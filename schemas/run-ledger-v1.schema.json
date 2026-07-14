@@ -1,0 +1,19 @@
+{
+  "$id": "https://agent-workflow.local/schemas/run-ledger-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "approval_records": {"items": {"type": "object"}, "type": "array"},
+    "artifact_hashes": {"items": {"type": "object"}, "type": "array"},
+    "final_status": {"enum": ["active", "completed", "partial", "blocked", "cancelled"]},
+    "node_attempts": {"items": {"type": "object"}, "type": "array"},
+    "package_lock_hash": {"type": "string"},
+    "plan_fingerprint": {"type": "string"},
+    "resolved_policy_hash": {"type": "string"},
+    "resource_events": {"items": {"type": "object"}, "type": "array"},
+    "run_id": {"type": "string"},
+    "schema_version": {"const": "1.0"}
+  },
+  "required": ["schema_version", "run_id", "plan_fingerprint", "node_attempts", "resource_events", "approval_records", "artifact_hashes", "final_status"],
+  "title": "Run Ledger v1",
+  "type": "object"
+}

@@ -1,0 +1,16 @@
+{
+  "$id": "https://agent-workflow.local/schemas/workflow-plan-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "edges": {"items": {"properties": {"from": {"type": "string"}, "to": {"type": "string"}}, "required": ["from", "to"], "type": "object"}, "type": "array"},
+    "fingerprint": {"type": "string"},
+    "missing_capabilities": {"items": {"type": "string"}, "type": "array"},
+    "nodes": {"items": {"properties": {"id": {"type": "string"}, "capability": {"type": "string"}, "mandatory": {"type": "boolean"}, "status": {"type": "string"}, "timeout_seconds": {"type": "integer"}, "max_retries": {"type": "integer"}}, "required": ["id", "capability", "mandatory", "status", "timeout_seconds", "max_retries"], "type": "object"}, "type": "array"},
+    "plan_id": {"type": "string"},
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["ready", "degraded", "blocked"]}
+  },
+  "required": ["schema_version", "plan_id", "fingerprint", "nodes", "edges", "status"],
+  "title": "Workflow Plan v1",
+  "type": "object"
+}

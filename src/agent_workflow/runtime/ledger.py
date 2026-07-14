@@ -1,0 +1,80 @@
+"""Append-only JSONL run ledger with a validated snapshot."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from ..canonical_json import dumps
+from ..contracts import validate_run_ledger
+from ..models import ContractError
+
+
+class RunLedger:
+    def __init__(
+        self,
+        plan_fingerprint: str,
+        *,
+        path: str | Path | None = None,
+        package_lock_hash: str = "",
+        resolved_policy_hash: str = "",
+        run_id: str | None = None,
+    ) -> None:
+        self.path = Path(path) if path else None
+        self.value: dict[str, Any] = {
+            "approval_records": [],
+            "artifact_hashes": [],
+            "final_status": "active",
+            "node_attempts": [],
+            "package_lock_hash": package_lock_hash,
+            "plan_fingerprint": plan_fingerprint,
+            "resolved_policy_hash": resolved_policy_hash,
+            "resource_events": [],
+            "run_id": run_id or f"run-{uuid4().hex}",
+            "schema_version": "1.0",
+        }
+
+    def append(self, event_type: str, value: dict[str, Any]) -> None:
+        event = {"event_type": event_type, "run_id": self.value["run_id"], "value": value}
+        if self.path:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(dumps(event))
+        if event_type == "node-attempt":
+            self.value["node_attempts"].append(value)
+        elif event_type == "resource-event":
+            self.value["resource_events"].append(value)
+        elif event_type == "approval-record":
+            self.value["approval_records"].append(value)
+        elif event_type == "artifact-hash":
+            self.value["artifact_hashes"].append(value)
+        elif event_type == "run-finalized":
+            self.value["final_status"] = value["status"]
+        elif event_type == "run-started":
+            if value["plan_fingerprint"] != self.value["plan_fingerprint"]:
+                raise ContractError("run-started fingerprint does not match ledger")
+        elif event_type == "run-resumed":
+            self.value["final_status"] = "active"
+
+    def finalize(self, status: str) -> dict[str, Any]:
+        self.append("run-finalized", {"status": status})
+        validate_run_ledger(self.value)
+        return self.value
+
+    @staticmethod
+    def replay(path: str | Path, plan_fingerprint: str) -> "RunLedger":
+        ledger_path = Path(path)
+        events = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+        run_id = events[0]["run_id"] if events else None
+        started = next((event for event in events if event["event_type"] == "run-started"), None)
+        if started and started["value"]["plan_fingerprint"] != plan_fingerprint:
+            raise ContractError("cannot resume ledger with a different plan fingerprint")
+        ledger = RunLedger(plan_fingerprint, path=None, run_id=run_id)
+        for event in events:
+            if event["run_id"] != ledger.value["run_id"]:
+                raise ValueError("ledger contains multiple run ids")
+            ledger.append(event["event_type"], event["value"])
+        ledger.path = ledger_path
+        return ledger

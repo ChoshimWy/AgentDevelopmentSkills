@@ -1,0 +1,16 @@
+{
+  "$id": "https://agent-workflow.local/schemas/delivery-report-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "blocked_items": {"items": {"type": "string"}, "type": "array"},
+    "known_risks": {"items": {"type": "string"}, "type": "array"},
+    "routing": {"type": "object"},
+    "run_id": {"type": "string"},
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["completed", "partial", "blocked", "cancelled"]},
+    "validation": {"type": "object"}
+  },
+  "required": ["schema_version", "run_id", "status", "routing", "validation", "known_risks", "blocked_items"],
+  "title": "Delivery Report v1",
+  "type": "object"
+}

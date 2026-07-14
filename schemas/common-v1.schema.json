@@ -1,0 +1,12 @@
+{
+  "$id": "https://agent-workflow.local/schemas/common-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "schemaVersion": {"const": "1.0"},
+    "sha256": {"pattern": "^[a-f0-9]{64}$", "type": "string"},
+    "status": {
+      "enum": ["pending", "ready", "running", "passed", "failed", "blocked", "skipped", "cancelled", "stale"]
+    }
+  },
+  "title": "Agent Workflow Common Types"
+}

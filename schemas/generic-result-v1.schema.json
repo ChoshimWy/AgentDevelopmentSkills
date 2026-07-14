@@ -1,0 +1,12 @@
+{
+  "$id": "https://agent-workflow.local/schemas/generic-result-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "artifacts": {"items": {"type": "object"}, "type": "array"},
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["completed", "partial", "blocked", "failed"]}
+  },
+  "required": ["schema_version", "status", "artifacts"],
+  "title": "Generic Capability Result v1",
+  "type": "object"
+}

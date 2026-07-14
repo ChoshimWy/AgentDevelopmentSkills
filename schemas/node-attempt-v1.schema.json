@@ -1,0 +1,18 @@
+{
+  "$id": "https://agent-workflow.local/schemas/node-attempt-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "attempt_id": {"type": "string"},
+    "attempt_number": {"minimum": 1, "type": "integer"},
+    "deadline": {"format": "date-time", "type": "string"},
+    "events": {"items": {"type": "object"}, "type": "array"},
+    "node_id": {"type": "string"},
+    "max_retries": {"minimum": 0, "type": "integer"},
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["pending", "ready", "running", "passed", "failed", "blocked", "skipped", "cancelled", "stale"]},
+    "timeout_seconds": {"exclusiveMinimum": 0, "type": "integer"}
+  },
+  "required": ["schema_version", "attempt_id", "node_id", "status", "events", "attempt_number", "max_retries", "timeout_seconds", "deadline"],
+  "title": "Node Attempt v1",
+  "type": "object"
+}

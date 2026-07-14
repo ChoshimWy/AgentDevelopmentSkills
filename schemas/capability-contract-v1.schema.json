@@ -1,0 +1,20 @@
+{
+  "$id": "https://agent-workflow.local/schemas/capability-contract-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "concurrency_keys": {"items": {"type": "string"}, "type": "array"},
+    "failure_codes": {"items": {"type": "string"}, "type": "array"},
+    "id": {"minLength": 3, "type": "string"},
+    "idempotent": {"type": "boolean"},
+    "input_schema": {"type": "string"},
+    "output_schema": {"type": "string"},
+    "permission_profile": {"type": "string"},
+    "schema_version": {"const": "1.0"},
+    "side_effects": {"items": {"type": "string"}, "type": "array"},
+    "version": {"type": "string"}
+  },
+  "required": ["schema_version", "id", "version", "input_schema", "output_schema", "permission_profile", "side_effects", "idempotent", "concurrency_keys", "failure_codes"],
+  "title": "Capability Contract v1",
+  "type": "object"
+}

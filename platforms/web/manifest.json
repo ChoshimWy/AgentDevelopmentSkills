@@ -1,0 +1,26 @@
+{
+  "bindings": {
+    "analysis.web": "web-workflow",
+    "implementation.web": "web-feature-implementation",
+    "verification.web.affected-tests": "web-verification"
+  },
+  "capabilities": [
+    {"id": "analysis.web", "version": "1.0"},
+    {"id": "implementation.web", "version": "1.0"},
+    {"id": "verification.web.affected-tests", "version": "1.0"}
+  ],
+  "conflicts": [],
+  "detection": {
+    "medium": ["package.json", "pnpm-workspace.yaml", "src/App.*"],
+    "strong": ["vite.config.*", "next.config.*", "nuxt.config.*", "angular.json"],
+    "weak": ["*.tsx", "*.vue", "*.svelte"]
+  },
+  "id": "web",
+  "kind": "platform",
+  "optional_requires": ["design.context"],
+  "permissions": {"detection": "repository-read-only"},
+  "requires": [],
+  "schema_version": "1.0",
+  "targets": ["browser"],
+  "version": "0.1.0"
+}

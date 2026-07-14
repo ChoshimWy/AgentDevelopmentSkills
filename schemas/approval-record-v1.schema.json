@@ -1,0 +1,16 @@
+{
+  "$id": "https://agent-workflow.local/schemas/approval-record-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "action": {"type": "string"},
+    "attempt_id": {"type": "string"},
+    "reason": {"type": "string"},
+    "schema_version": {"const": "1.0"},
+    "scope": {"type": "object"},
+    "scope_hash": {"type": "string"},
+    "status": {"enum": ["pending", "granted", "denied", "expired"]}
+  },
+  "required": ["schema_version", "attempt_id", "action", "reason", "scope", "scope_hash", "status"],
+  "title": "Approval Record v1",
+  "type": "object"
+}

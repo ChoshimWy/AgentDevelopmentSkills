@@ -1,0 +1,14 @@
+{
+  "$id": "https://agent-workflow.local/schemas/resource-event-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "action": {"enum": ["requested", "acquired", "released", "timed-out", "cancelled"]},
+    "attempt_id": {"type": "string"},
+    "resource_key": {"type": "string"},
+    "schema_version": {"const": "1.0"},
+    "sequence": {"minimum": 0, "type": "integer"}
+  },
+  "required": ["schema_version", "sequence", "attempt_id", "resource_key", "action"],
+  "title": "Resource Event v1",
+  "type": "object"
+}

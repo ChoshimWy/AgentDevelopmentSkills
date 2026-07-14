@@ -1,0 +1,24 @@
+{
+  "bindings": {
+    "core.intent-lock": "workflow-orchestration",
+    "design.context": "design-provider",
+    "qa.targeted": "qa-orchestration",
+    "review.independent": "code-review"
+  },
+  "capabilities": [
+    {"id": "core.intent-lock", "version": "1.0"},
+    {"id": "design.context", "version": "1.0"},
+    {"id": "qa.targeted", "version": "1.0"},
+    {"id": "review.independent", "version": "1.0"}
+  ],
+  "conflicts": [],
+  "detection": {"medium": [], "strong": [], "weak": []},
+  "id": "core",
+  "kind": "adapter",
+  "optional_requires": [],
+  "permissions": {"detection": "repository-read-only"},
+  "requires": [],
+  "schema_version": "1.0",
+  "targets": [],
+  "version": "0.1.0"
+}

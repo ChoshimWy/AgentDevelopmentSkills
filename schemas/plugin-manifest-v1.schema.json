@@ -1,0 +1,29 @@
+{
+  "$id": "https://agent-workflow.local/schemas/plugin-manifest-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "bindings": {"type": "object"},
+    "capabilities": {"items": {"type": "object"}, "type": "array"},
+    "conflicts": {"items": {"type": "string"}, "type": "array"},
+    "detection": {
+      "properties": {
+        "medium": {"items": {"type": "string"}, "type": "array"},
+        "strong": {"items": {"type": "string"}, "type": "array"},
+        "weak": {"items": {"type": "string"}, "type": "array"}
+      },
+      "required": ["strong", "medium", "weak"],
+      "type": "object"
+    },
+    "id": {"type": "string"},
+    "kind": {"enum": ["platform", "stack", "discipline", "adapter"]},
+    "optional_requires": {"items": {"type": "string"}, "type": "array"},
+    "permissions": {"type": "object"},
+    "requires": {"items": {"type": "string"}, "type": "array"},
+    "schema_version": {"const": "1.0"},
+    "targets": {"items": {"type": "string"}, "type": "array"},
+    "version": {"type": "string"}
+  },
+  "required": ["schema_version", "id", "kind", "detection", "capabilities"],
+  "title": "Plugin Manifest v1",
+  "type": "object"
+}

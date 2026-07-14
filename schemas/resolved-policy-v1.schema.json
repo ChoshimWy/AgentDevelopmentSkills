@@ -1,0 +1,15 @@
+{
+  "$id": "https://agent-workflow.local/schemas/resolved-policy-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "constraints": {"type": "object"},
+    "decisions": {"items": {"properties": {"confidence": {"maximum": 1, "minimum": 0, "type": "number"}, "decision": {"type": "string"}, "merge_strategy": {"enum": ["replace", "append", "union", "intersect", "deny-wins", "locked"]}, "overridden_candidates": {"items": {"type": "string"}, "type": "array"}, "reason_code": {"type": "string"}, "source": {"type": "string"}}, "required": ["decision", "reason_code", "source", "confidence", "merge_strategy", "overridden_candidates"], "type": "object"}, "type": "array"},
+    "fingerprint": {"type": "string"},
+    "schema_version": {"const": "1.0"},
+    "selected_platforms": {"items": {"type": "string"}, "type": "array"},
+    "task": {"properties": {"disciplines": {"items": {"type": "string"}, "type": "array"}, "risk": {"type": "string"}, "text": {"type": "string"}, "type": {"type": "string"}}, "required": ["text", "type", "risk", "disciplines"], "type": "object"}
+  },
+  "required": ["schema_version", "selected_platforms", "task", "decisions", "constraints", "fingerprint"],
+  "title": "Resolved Policy v1",
+  "type": "object"
+}

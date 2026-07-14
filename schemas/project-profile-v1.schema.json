@@ -1,0 +1,27 @@
+{
+  "$id": "https://agent-workflow.local/schemas/project-profile-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "ambiguities": {"items": {"properties": {"candidates": {"items": {"type": "string"}, "type": "array"}, "path": {"type": "string"}, "reason": {"type": "string"}}, "required": ["path", "candidates", "reason"], "type": "object"}, "type": "array"},
+    "evidence": {"items": {"type": "object"}, "type": "array"},
+    "explicit_context": {"type": "object"},
+    "modules": {"items": {"properties": {"confidence": {"maximum": 1, "minimum": 0, "type": "number"}, "evidence": {"items": {"type": "string"}, "type": "array"}, "path": {"type": "string"}, "platform": {"type": "string"}}, "required": ["path", "platform", "confidence", "evidence"], "type": "object"}, "type": "array"},
+    "platforms": {"items": {"type": "string"}, "type": "array", "uniqueItems": true},
+    "repository": {
+      "properties": {
+        "kind": {"enum": ["single", "multi-module", "monorepo", "unknown"]},
+        "root": {"type": "string"}
+      },
+      "required": ["root", "kind"],
+      "type": "object"
+    },
+    "schema_version": {"const": "1.0"},
+    "shared_contracts": {"items": {"type": "object"}, "type": "array"},
+    "target_modules": {"items": {"type": "object"}, "type": "array"},
+    "testing": {"type": "object"}
+  },
+  "required": ["schema_version", "repository", "platforms", "modules", "ambiguities"],
+  "title": "Project Profile v1",
+  "type": "object"
+}

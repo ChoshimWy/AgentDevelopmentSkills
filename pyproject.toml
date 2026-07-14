@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-development-skills"
+version = "0.1.0"
+description = "Cross-platform agent workflow core"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+agent-workflow = "agent_workflow.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/agent-workflow/platforms/android" = ["platforms/android/manifest.json"]
+"share/agent-workflow/platforms/apple" = ["platforms/apple/manifest.json"]
+"share/agent-workflow/platforms/backend" = ["platforms/backend/manifest.json"]
+"share/agent-workflow/platforms/core" = ["platforms/core/manifest.json"]
+"share/agent-workflow/platforms/desktop" = ["platforms/desktop/manifest.json"]
+"share/agent-workflow/platforms/web" = ["platforms/web/manifest.json"]

@@ -1,0 +1,26 @@
+{
+  "bindings": {
+    "analysis.backend": "backend-workflow",
+    "implementation.backend": "backend-feature-implementation",
+    "verification.backend.affected-tests": "backend-verification"
+  },
+  "capabilities": [
+    {"id": "analysis.backend", "version": "1.0"},
+    {"id": "implementation.backend", "version": "1.0"},
+    {"id": "verification.backend.affected-tests", "version": "1.0"}
+  ],
+  "conflicts": [],
+  "detection": {
+    "medium": ["go.mod", "pyproject.toml", "requirements.txt", "Cargo.toml", "pom.xml"],
+    "strong": ["serverless.yml", "serverless.yaml", "manage.py", "cmd/server/main.go"],
+    "weak": ["Dockerfile", "docker-compose.yml"]
+  },
+  "id": "backend",
+  "kind": "platform",
+  "optional_requires": [],
+  "permissions": {"detection": "repository-read-only"},
+  "requires": [],
+  "schema_version": "1.0",
+  "targets": ["server"],
+  "version": "0.1.0"
+}

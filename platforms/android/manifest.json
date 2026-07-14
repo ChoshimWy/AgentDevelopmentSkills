@@ -1,0 +1,26 @@
+{
+  "bindings": {
+    "analysis.android": "android-workflow",
+    "implementation.android": "android-feature-implementation",
+    "verification.android.affected-tests": "android-verification"
+  },
+  "capabilities": [
+    {"id": "analysis.android", "version": "1.0"},
+    {"id": "implementation.android", "version": "1.0"},
+    {"id": "verification.android.affected-tests", "version": "1.0"}
+  ],
+  "conflicts": [],
+  "detection": {
+    "medium": ["build.gradle", "build.gradle.kts", "*.kt"],
+    "strong": ["settings.gradle", "settings.gradle.kts", "AndroidManifest.xml"],
+    "weak": ["gradle.properties"]
+  },
+  "id": "android",
+  "kind": "platform",
+  "optional_requires": ["design.context"],
+  "permissions": {"detection": "repository-read-only"},
+  "requires": [],
+  "schema_version": "1.0",
+  "targets": ["android"],
+  "version": "0.1.0"
+}

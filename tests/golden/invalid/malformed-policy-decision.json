@@ -1,0 +1,1 @@
+{"artifact":{"constraints":{},"decisions":[{"confidence":1,"decision":"x","reason_code":"r","source":"s"}],"fingerprint":"f","schema_version":"1.0","selected_platforms":[],"task":{"disciplines":[],"risk":"low","text":"x","type":"review-only"}},"kind":"resolved-policy"}

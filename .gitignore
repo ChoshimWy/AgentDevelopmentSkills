@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.coverage
+.pytest_cache/
+.agent-workflow/
+agent-skills.lock
+run-ledger.jsonl

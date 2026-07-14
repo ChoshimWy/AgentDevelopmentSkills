@@ -1,0 +1,26 @@
+{
+  "bindings": {
+    "analysis.desktop": "desktop-workflow",
+    "implementation.desktop": "desktop-feature-implementation",
+    "verification.desktop.affected-tests": "desktop-verification"
+  },
+  "capabilities": [
+    {"id": "analysis.desktop", "version": "1.0"},
+    {"id": "implementation.desktop", "version": "1.0"},
+    {"id": "verification.desktop.affected-tests", "version": "1.0"}
+  ],
+  "conflicts": [],
+  "detection": {
+    "medium": ["electron-builder.*", "*.csproj", "CMakeLists.txt"],
+    "strong": ["src-tauri/tauri.conf.json", "*.sln"],
+    "weak": ["*.rs", "*.cs", "*.cpp"]
+  },
+  "id": "desktop",
+  "kind": "platform",
+  "optional_requires": ["design.context"],
+  "permissions": {"detection": "repository-read-only"},
+  "requires": [],
+  "schema_version": "1.0",
+  "targets": ["macos", "windows", "linux", "cross-platform"],
+  "version": "0.1.0"
+}

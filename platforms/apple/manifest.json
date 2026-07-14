@@ -1,0 +1,27 @@
+{
+  "bindings": {
+    "analysis.apple": "codex-subagent-orchestration",
+    "implementation.apple": "ios-feature-implementation",
+    "verification.apple.affected-tests": "ios-verification"
+  },
+  "capabilities": [
+    {"id": "analysis.apple", "version": "1.0"},
+    {"id": "implementation.apple", "version": "1.0"},
+    {"id": "verification.apple.affected-tests", "version": "1.0"}
+  ],
+  "conflicts": [],
+  "detection": {
+    "medium": ["Package.swift", "*.entitlements"],
+    "strong": ["*.xcworkspace", "*.xcodeproj", "Podfile"],
+    "weak": ["*.swift", "Info.plist"]
+  },
+  "external_package": {"compatibility": ">=1.0 <2.0", "name": "iOSAgentSkills"},
+  "id": "apple",
+  "kind": "platform",
+  "optional_requires": ["design.context"],
+  "permissions": {"detection": "repository-read-only", "implementation": "project-write", "verification": "project-read-execute"},
+  "requires": [],
+  "schema_version": "1.0",
+  "targets": ["ios", "macos", "watchos", "tvos", "visionos"],
+  "version": "0.1.0"
+}
