@@ -168,6 +168,11 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 
 - [跨平台研发工作流架构](docs/cross-platform-agent-workflow-architecture.html)
 - [Phase 1 Core Foundation 实施清单](docs/implementation/phase-1-core-foundation.html)
+- [Phase 2 iOSAgentSkills Compatibility Integration 实施清单](docs/implementation/phase-2-ios-agent-skills-integration.html)
+- [Phase 3 Design Provider & Canonical UI IR 实施清单](docs/implementation/phase-3-design-provider-and-canonical-ir.html)
+- [Phase 4 QA Core & Desktop Minimum Package 实施清单](docs/implementation/phase-4-qa-core-and-desktop-minimum.html)
+- [Phase 5 Android, Web, Backend & UI Binding Expansion 实施清单](docs/implementation/phase-5-platform-expansion.html)
+- [Phase 6 Distribution, Lockfile & Governance 实施清单](docs/implementation/phase-6-distribution-and-governance.html)
 - [仓库执行合同](AGENTS.md)
 
 ## 路线图
