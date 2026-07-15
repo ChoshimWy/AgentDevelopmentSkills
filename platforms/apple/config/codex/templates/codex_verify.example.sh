@@ -7,6 +7,8 @@ Usage:
   ./codex_verify.sh -- <xcodebuild args...>
   ./codex_verify.sh --repo-root <repo-root> -- <xcodebuild args...>
   ./codex_verify.sh --build-check <build-check.sh> <repo-root> [build-check args...]
+  ./codex_verify.sh --force --build-check <build-check.sh> <repo-root> [build-check args...]
+  ./codex_verify.sh --no-cache --build-check <build-check.sh> <repo-root> [build-check args...]
   ./codex_verify.sh --queue-status
   ~/.codex/bin/codex_verify --repo-root <repo-root> -- <xcodebuild args...>
 
@@ -29,6 +31,8 @@ Notes:
   - Legacy public overrides XCODE_DERIVED_DATA_MODE / XCODE_DERIVED_DATA_SEED_MODE /
     XCODE_DERIVED_DATA_REFRESH / CODEX_DERIVED_DATA_SLOT are no longer supported.
   - The build-queue daemon is started automatically on first use.
+  - Identical in-flight fingerprints attach to one queue job. Successful
+    matching fingerprints are reused unless --force/--no-cache is set.
   - The wrapper prints a compact agent-summary.json by default. Set
     CODEX_VERIFY_STREAM_LOG=1 only when raw log streaming is explicitly needed.
 EOF
@@ -118,6 +122,115 @@ queue_root() {
   printf '%s' "${CODEX_BUILD_QUEUE_ROOT:-/tmp/codex-build-queue}"
 }
 
+compute_request_fingerprint() {
+  python3 - "$REPO_ROOT" "$MODE" "$META_WORKSPACE" "$META_PROJECT" "$META_SCHEME" "$META_CONFIGURATION" "$META_DESTINATION" "$META_ACTION" "$COMMAND_PREVIEW" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+
+
+identity_errors = []
+
+
+def git(*args: str, text: bool = False):
+    completed = subprocess.run(["git", *args], cwd=root, capture_output=True, text=text, check=False)
+    if completed.returncode:
+        identity_errors.append(f"git {' '.join(args)}")
+        return "" if text else b""
+    return completed.stdout
+
+
+def tool_output(*args: str) -> str:
+    completed = subprocess.run(args, cwd=root, capture_output=True, text=True, check=False)
+    if completed.returncode:
+        identity_errors.append(" ".join(args))
+        return ""
+    return completed.stdout.strip()
+
+
+status = git("status", "--porcelain=v1", "-z", "--untracked-files=all")
+untracked = []
+for entry in status.split(b"\0"):
+    if not entry.startswith(b"?? "):
+        continue
+    raw = entry[3:].decode("utf-8", errors="surrogateescape")
+    path = (root / raw).resolve()
+    try:
+        relative = path.relative_to(root).as_posix()
+    except ValueError:
+        continue
+    untracked.append({
+        "path": relative,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None,
+    })
+
+config_inputs = []
+tracked_config = git(
+    "ls-files",
+    "-z",
+    "--",
+    "Package.resolved",
+    "**/Package.resolved",
+    "Podfile.lock",
+    "**/Podfile.lock",
+    "Pods/Manifest.lock",
+    "**/*.xcconfig",
+)
+config_paths = {
+    entry.decode("utf-8", errors="surrogateescape")
+    for entry in tracked_config.split(b"\0")
+    if entry
+}
+if (root / ".codex/xcodebuild.env").is_file():
+    config_paths.add(".codex/xcodebuild.env")
+digest_script = os.environ.get("CODEX_XCODEBUILD_DIGEST_SCRIPT", "")
+if digest_script:
+    digest_path = Path(digest_script).expanduser().resolve()
+    if digest_path.is_file():
+        config_inputs.append({"path": str(digest_path), "sha256": hashlib.sha256(digest_path.read_bytes()).hexdigest()})
+for raw in sorted(config_paths):
+    path = (root / raw).resolve()
+    if not path.is_file():
+        continue
+    config_inputs.append({"path": raw, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+
+payload = {
+    "repo_root": str(root),
+    "head": git("rev-parse", "HEAD", text=True).strip(),
+    "tracked_diff_sha256": hashlib.sha256(git("diff", "--binary", "HEAD")).hexdigest(),
+    "untracked": sorted(untracked, key=lambda item: item["path"]),
+    "configuration_inputs": config_inputs,
+    "mode": sys.argv[2],
+    "workspace": sys.argv[3],
+    "project": sys.argv[4],
+    "scheme": sys.argv[5],
+    "configuration": sys.argv[6],
+    "destination": sys.argv[7],
+    "action": sys.argv[8],
+    "command": sys.argv[9],
+    "developer_dir": os.environ.get("DEVELOPER_DIR", ""),
+    "xcode_environment": {key: value for key, value in os.environ.items() if key.startswith("XCODE_")},
+    "xcode_version": tool_output("xcodebuild", "-version"),
+    "sdk_version": tool_output("xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"),
+}
+encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+fingerprint = hashlib.sha256(encoded).hexdigest()
+if identity_errors:
+    nonce = hashlib.sha256(f"{time.time_ns()}:{os.getpid()}".encode()).hexdigest()[:16]
+    print(f"volatile-{fingerprint}-{nonce}")
+else:
+    print(fingerprint)
+PY
+}
+
 job_state() {
   local job_dir="$1"
   if [[ -f "$job_dir/state" ]]; then
@@ -130,7 +243,9 @@ job_state() {
 set_job_state() {
   local job_dir="$1"
   local state="$2"
-  printf '%s\n' "$state" >"$job_dir/state"
+  local temporary="$job_dir/.state.$$.$RANDOM.tmp"
+  printf '%s\n' "$state" >"$temporary"
+  mv "$temporary" "$job_dir/state"
 }
 
 write_text_file() {
@@ -325,6 +440,7 @@ write_agent_summary() {
   python3 - "$job_dir" <<'PY'
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shlex
@@ -351,7 +467,10 @@ def load_report() -> dict:
             "needs_raw_log": False,
         }
     try:
-        return json.loads(report_path.read_text(encoding="utf-8"))
+        value = json.loads(report_path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("top-level value must be an object")
+        return value
     except Exception as exc:
         return {
             "status": "blocked",
@@ -603,6 +722,13 @@ artifact_paths = {
     "raw_log": str(job_dir / "job.log"),
 }
 environment_sanity = report.get("environment_sanity") if isinstance(report.get("environment_sanity"), dict) else load_json_file("xcode-entry-sanity.json")
+artifact_hashes = {}
+for name, raw_path in artifact_paths.items():
+    if name in {"agent_summary", "raw_log"} or not raw_path:
+        continue
+    path = Path(str(raw_path))
+    if path.is_file():
+        artifact_hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
 
 summary = {
     "schema_version": 1,
@@ -628,6 +754,8 @@ summary = {
     "executed_commands": [command_preview] if command_preview else [],
     "queue_job_id": job_dir.name,
     "queue_job_dir": str(job_dir),
+    "request_fingerprint": read_text("request_fingerprint"),
+    "request_fingerprint_cacheable": read_text("request_fingerprint_cacheable") == "1",
     "fingerprint": report.get("fingerprint"),
     "cached": report.get("cached", False),
     "summary": report.get("summary"),
@@ -636,11 +764,66 @@ summary = {
     "warnings_count": report.get("warnings_count", 0),
     "ui_smoke": report.get("ui_smoke"),
     "artifact_paths": artifact_paths,
+    "artifact_hashes": artifact_hashes,
     "raw_log_policy": report.get("raw_log_policy", "forbidden_by_default"),
     "needs_raw_log": report.get("needs_raw_log", False),
     "next_action": report.get("suggested_next_action") or report.get("next_action"),
 }
 summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+job_artifacts_are_valid() {
+  local job_dir="$1"
+  local exit_code="$2"
+  local expected_request_fingerprint="${3:-}"
+  python3 - "$job_dir" "$exit_code" "$expected_request_fingerprint" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+job_dir = Path(sys.argv[1])
+exit_code = int(sys.argv[2])
+expected_request_fingerprint = sys.argv[3]
+
+
+def load_object(path: Path) -> dict:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"{path.name} must contain an object")
+    return value
+
+
+try:
+    report = load_object(job_dir / "verification-report.json")
+    summary = load_object(job_dir / "agent-summary.json")
+    expected_statuses = {"passed"} if exit_code == 0 else {"failed", "blocked"}
+    if report.get("status") not in expected_statuses or summary.get("status") not in expected_statuses:
+        raise ValueError("structured artifact status does not match process exit status")
+    request_fingerprint = (job_dir / "request_fingerprint").read_text(encoding="utf-8").strip()
+    if expected_request_fingerprint and request_fingerprint != expected_request_fingerprint:
+        raise ValueError("queue request fingerprint mismatch")
+    if summary.get("request_fingerprint") != request_fingerprint:
+        raise ValueError("agent summary request fingerprint mismatch")
+    artifact_paths = summary.get("artifact_paths")
+    artifact_hashes = summary.get("artifact_hashes")
+    if not isinstance(artifact_paths, dict) or not isinstance(artifact_hashes, dict):
+        raise ValueError("artifact paths and hashes are required")
+    for name in ("verification_report", "diagnostics_json", "build_summary"):
+        raw_path = artifact_paths.get(name)
+        expected_hash = artifact_hashes.get(name)
+        if not isinstance(raw_path, str) or not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+            raise ValueError(f"missing valid structured artifact identity: {name}")
+        path = Path(raw_path)
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
+            raise ValueError(f"structured artifact changed or disappeared: {name}")
+except (OSError, ValueError, json.JSONDecodeError) as exc:
+    print(f"[codex_verify] invalid structured artifacts: {exc}", file=sys.stderr)
+    raise SystemExit(1)
 PY
 }
 
@@ -675,9 +858,23 @@ generate_verification_artifacts() {
 
 print_verification_report() {
   local job_dir="$1"
+  local reuse_kind="${2:-new}"
   local summary_path="$job_dir/agent-summary.json"
   if [[ -f "$summary_path" ]]; then
-    cat "$summary_path"
+    python3 - "$summary_path" "$reuse_kind" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+reuse = sys.argv[2]
+summary["request_reuse"] = reuse
+summary["attached_to_in_flight"] = reuse == "attached"
+if reuse == "cached":
+    summary["cached"] = True
+    summary["source_queue_job_id"] = summary.get("queue_job_id")
+print(json.dumps(summary, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+PY
   else
     echo "{\"status\":\"blocked\",\"summary\":\"agent-summary.json missing\",\"artifact_paths\":{\"raw_log\":\"$job_dir/job.log\"},\"needs_raw_log\":false}"
   fi
@@ -974,33 +1171,103 @@ write_env_snapshot() {
 }
 
 queue_job() {
-  local job_id job_dir owner_body
+  local job_id job_dir staging_dir owner_body
   job_id="$(generate_job_id)"
   job_dir="$JOBS_DIR/$job_id"
-  mkdir -p "$job_dir"
+  staging_dir="$STAGING_DIR/$job_id.$$"
+  mkdir -p "$staging_dir"
 
   owner_body="$(build_owner_body)"
-  set_job_state "$job_dir" 'queued'
-  write_text_file "$job_dir/mode" "$MODE"
-  write_text_file "$job_dir/repo_root" "$REPO_ROOT"
-  write_text_file "$job_dir/created_at" "$(timestamp_now)"
-  write_text_file "$job_dir/created_at_epoch" "$(seconds_now)"
-  write_text_file "$job_dir/submitter.txt" "$owner_body"
-  write_text_file "$job_dir/workspace" "$META_WORKSPACE"
-  write_text_file "$job_dir/project" "$META_PROJECT"
-  write_text_file "$job_dir/scheme" "$META_SCHEME"
-  write_text_file "$job_dir/configuration" "$META_CONFIGURATION"
-  write_text_file "$job_dir/destination" "$META_DESTINATION"
-  write_text_file "$job_dir/action" "$META_ACTION"
-  write_text_file "$job_dir/command_preview" "$COMMAND_PREVIEW"
-  write_text_file "$job_dir/log_path" "$job_dir/job.log"
-  write_env_snapshot "$job_dir/env.sh"
-  write_args_file "$job_dir/command.args0" "${COMMAND[@]}"
-  write_xcode_entry_sanity "$job_dir"
+  set_job_state "$staging_dir" 'queued'
+  write_text_file "$staging_dir/mode" "$MODE"
+  write_text_file "$staging_dir/repo_root" "$REPO_ROOT"
+  write_text_file "$staging_dir/created_at" "$(timestamp_now)"
+  write_text_file "$staging_dir/created_at_epoch" "$(seconds_now)"
+  write_text_file "$staging_dir/submitter.txt" "$owner_body"
+  write_text_file "$staging_dir/workspace" "$META_WORKSPACE"
+  write_text_file "$staging_dir/project" "$META_PROJECT"
+  write_text_file "$staging_dir/scheme" "$META_SCHEME"
+  write_text_file "$staging_dir/configuration" "$META_CONFIGURATION"
+  write_text_file "$staging_dir/destination" "$META_DESTINATION"
+  write_text_file "$staging_dir/action" "$META_ACTION"
+  write_text_file "$staging_dir/command_preview" "$COMMAND_PREVIEW"
+  write_text_file "$staging_dir/request_fingerprint" "$REQUEST_FINGERPRINT"
+  write_text_file "$staging_dir/request_fingerprint_cacheable" "$REQUEST_CACHEABLE"
+  write_text_file "$staging_dir/log_path" "$job_dir/job.log"
+  write_env_snapshot "$staging_dir/env.sh"
+  write_args_file "$staging_dir/command.args0" "${COMMAND[@]}"
+  write_xcode_entry_sanity "$staging_dir"
+  mv "$staging_dir" "$job_dir"
 
   JOB_ID="$job_id"
   JOB_DIR="$job_dir"
   JOB_LOG_FILE="$job_dir/job.log"
+}
+
+acquire_request_lock() {
+  local waited=0 owner_pid=''
+  while ! mkdir "$REQUEST_LOCK_DIR" 2>/dev/null; do
+    owner_pid="$(cat "$REQUEST_LOCK_DIR/pid" 2>/dev/null || true)"
+    if [[ -n "$owner_pid" ]] && ! kill -0 "$owner_pid" 2>/dev/null; then
+      rm -rf "$REQUEST_LOCK_DIR"
+      continue
+    fi
+    sleep 1
+    waited=$(( waited + 1 ))
+    [[ $waited -lt 30 ]] || die "timed out acquiring verification fingerprint lock: $REQUEST_FINGERPRINT"
+  done
+  write_text_file "$REQUEST_LOCK_DIR/pid" "$$"
+}
+
+release_request_lock() {
+  rm -rf "$REQUEST_LOCK_DIR"
+}
+
+find_matching_job() {
+  local job_dir state
+  MATCHING_JOB_DIR=''
+  MATCHING_JOB_KIND=''
+  for job_dir in $(find "$JOBS_DIR" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | LC_ALL=C sort -r); do
+    [[ -f "$job_dir/request_fingerprint" ]] || continue
+    [[ "$(cat "$job_dir/request_fingerprint")" == "$REQUEST_FINGERPRINT" ]] || continue
+    state="$(job_state "$job_dir")"
+    case "$state" in
+      queued|running)
+        MATCHING_JOB_DIR="$job_dir"
+        MATCHING_JOB_KIND='attached'
+        return 0
+        ;;
+      succeeded)
+        if [[ "$NO_CACHE" != '1' && "$FORCE_REVERIFY" != '1' ]] \
+          && job_artifacts_are_valid "$job_dir" "$(cat "$job_dir/exit_code" 2>/dev/null || printf '%s' '1')" "$REQUEST_FINGERPRINT"; then
+          MATCHING_JOB_DIR="$job_dir"
+          MATCHING_JOB_KIND='cached'
+          return 0
+        fi
+        return 1
+        ;;
+      failed)
+        # The newest terminal result is authoritative. Never fall back to an
+        # older success after a forced revalidation failed.
+        return 1
+        ;;
+    esac
+  done
+  return 1
+}
+
+queue_or_reuse_job() {
+  acquire_request_lock
+  if find_matching_job; then
+    JOB_DIR="$MATCHING_JOB_DIR"
+    JOB_ID="$(basename "$JOB_DIR")"
+    JOB_LOG_FILE="$JOB_DIR/job.log"
+    JOB_REUSE_KIND="$MATCHING_JOB_KIND"
+  else
+    JOB_REUSE_KIND='new'
+    queue_job
+  fi
+  release_request_lock
 }
 
 job_summary_line() {
@@ -1125,7 +1392,7 @@ wait_for_job() {
           wait "$tail_pid" 2>/dev/null || true
         fi
         exit_code="$(cat "$JOB_DIR/exit_code" 2>/dev/null || printf '%s' '1')"
-        print_verification_report "$JOB_DIR"
+        print_verification_report "$JOB_DIR" "$JOB_REUSE_KIND"
         echo "[codex_verify] finished job=$JOB_ID state=$state status=$exit_code agent_summary=$JOB_DIR/agent-summary.json report=$JOB_DIR/verification-report.json log_file=$JOB_LOG_FILE" >&2
         return "$exit_code"
         ;;
@@ -1202,11 +1469,15 @@ run_job() {
   status=${PIPESTATUS[0]}
   set -e
 
-  write_text_file "$job_dir/exit_code" "$status"
   write_text_file "$job_dir/finished_at" "$(timestamp_now)"
   append_log_line "$job_dir/job.log" "[codex_verify] finished_at=$(cat "$job_dir/finished_at")"
   append_log_line "$job_dir/job.log" "[codex_verify] status=$status"
   generate_verification_artifacts "$job_dir" "$status"
+  if ! job_artifacts_are_valid "$job_dir" "$status" "$(cat "$job_dir/request_fingerprint")"; then
+    append_log_line "$job_dir/job.log" "[codex_verify] structured artifact validation failed"
+    status=65
+  fi
+  write_text_file "$job_dir/exit_code" "$status"
   if [[ $status -eq 0 ]]; then
     set_job_state "$job_dir" 'succeeded'
   else
@@ -1252,6 +1523,8 @@ MODE=''
 SCRIPT_PATH="$(resolve_path "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd -P)"
 USER_REPO_ROOT=''
+FORCE_REVERIFY="${CODEX_VERIFY_FORCE:-0}"
+NO_CACHE="${CODEX_VERIFY_NO_CACHE:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -1259,6 +1532,14 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || die "--repo-root requires a path"
       USER_REPO_ROOT="$2"
       shift 2
+      ;;
+    --force)
+      FORCE_REVERIFY='1'
+      shift
+      ;;
+    --no-cache)
+      NO_CACHE='1'
+      shift
       ;;
     --|--build-check|--queue-status|--daemon|--help|-h)
       break
@@ -1281,6 +1562,8 @@ XCODE_ENV_FILE="$REPO_ROOT/.codex/xcodebuild.env"
 SYSTEM_DERIVED_DATA_HOME="$HOME/Library/Developer/Xcode/DerivedData"
 QUEUE_ROOT="$(queue_root)"
 JOBS_DIR="$QUEUE_ROOT/jobs"
+STAGING_DIR="$QUEUE_ROOT/staging"
+REQUESTS_DIR="$QUEUE_ROOT/requests"
 DAEMON_PID_FILE="$QUEUE_ROOT/daemon.pid"
 DAEMON_STDOUT_LOG="$QUEUE_ROOT/daemon.log"
 ACTIVE_JOB_FILE="$QUEUE_ROOT/active_job"
@@ -1362,8 +1645,20 @@ if [[ "$MODE" == 'queue-status' ]]; then
 fi
 
 COMMAND_PREVIEW="$(join_quoted_command "${COMMAND[@]}")"
+mkdir -p "$JOBS_DIR" "$STAGING_DIR" "$REQUESTS_DIR"
+REQUEST_FINGERPRINT="$(compute_request_fingerprint)"
+REQUEST_CACHEABLE='1'
+if [[ "$REQUEST_FINGERPRINT" == volatile-* ]]; then
+  REQUEST_CACHEABLE='0'
+fi
+REQUEST_LOCK_DIR="$REQUESTS_DIR/$REQUEST_FINGERPRINT.lockdir"
+JOB_REUSE_KIND='new'
 
-queue_job
+queue_or_reuse_job
+if [[ "$JOB_REUSE_KIND" == 'cached' ]]; then
+  print_verification_report "$JOB_DIR" "$JOB_REUSE_KIND"
+  exit "$(cat "$JOB_DIR/exit_code" 2>/dev/null || printf '%s' '1')"
+fi
 ensure_daemon_running
 wait_for_job
 exit $?

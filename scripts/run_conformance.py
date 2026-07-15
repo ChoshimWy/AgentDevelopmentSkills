@@ -19,6 +19,7 @@ def main() -> int:
         [sys.executable, "scripts/validate_apple_package.py"],
         [sys.executable, "scripts/compare_apple_routes.py"],
         [sys.executable, "scripts/run_apple_dual_route_smoke.py"],
+        [sys.executable, "scripts/run_ios_installed_workflow_smoke.py"],
         [sys.executable, "platforms/apple/scripts/lint_skill_schema.py", "--skills-dir", "platforms/apple/skills"],
         [sys.executable, "platforms/apple/scripts/lint_skill_schema.py", "--skills-dir", "disciplines/documentation/skills"],
         [sys.executable, "platforms/apple/scripts/lint_skill_schema.py", "--skills-dir", "disciplines/design/skills"],

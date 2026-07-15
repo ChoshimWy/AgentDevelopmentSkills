@@ -66,7 +66,7 @@ def main() -> int:
 
     require_contains(
         ROOT / "agent-instructions" / "global.md",
-        ["Apple 平台规则", "独立 reviewer", "Xcode MCP", "codex_verify", "本地 `:path` Pod"],
+        ["Apple 平台规则", "独立 reviewer", "Verification Session", "codex_verify", "本地 `:path` Pod"],
         failures,
     )
     require_contains(
@@ -121,11 +121,19 @@ def main() -> int:
             "codex_verify.sh",
             "~/.codex/bin/codex_verify",
             "shared build-queue daemon",
-            "Xcode 系统 DerivedData",
-            "Xcode MCP Fast Lane",
-            "RunSomeTests",
-            "XcodeWrite",
+            "Xcode system DerivedData",
+            "quick-verify",
+            "Verification Session",
+            "In-flight Dedupe",
+            "required_evidence",
+            "build-for-testing",
+            "test-without-building",
         ],
+        failures,
+    )
+    require_not_contains(
+        ios_verification,
+        ["`xcode-mcp`", "GetTestList", "RunSomeTests", "BuildProject", "GetBuildLog", "XcodeListNavigatorIssues"],
         failures,
     )
     require_contains(
@@ -144,24 +152,55 @@ def main() -> int:
     )
     require_contains(
         ROOT / "config" / "claude-code" / "memory-seed.md",
-        ["GetTestList", "RunSomeTests", "GetBuildLog", "同一 fingerprint 不重复 wrapper"],
+        ["quick-verify", "Verification Session", "三层 fingerprint", "in-flight attach"],
         failures,
     )
     require_contains(
         ROOT / "config" / "claude-code" / "agents" / "orchestration.md",
-        ["GetTestList", "RunSomeTests", "不得调用 MCP 写工具", "才升级 `ios-verification` 的 wrapper 路径"],
+        ["quick-verify", "Verification Session", "in-flight attach", "checkpoint/final lane"],
         failures,
     )
     require_contains(
         ROOT / "config" / "codex" / "templates" / "agents" / "tester.toml",
-        ["GetTestList", "RunSomeTests", "XcodeWrite", "同一 fingerprint 不重复 wrapper", "升级 wrapper"],
+        ["quick-verify", "Verification Session", "in-flight fingerprint", "checkpoint/final lane"],
         failures,
     )
     require_contains(
         ROOT / "skills" / "ios-verification" / "agents" / "openai.yaml",
-        ["GetTestList", "RunSomeTests", "XcodeWrite", "不要为同一 fingerprint 重复 wrapper", "才通过目标项目 ./codex_verify.sh"],
+        ["quick-verify", "Verification Session", "in-flight 请求", "目标项目 ./codex_verify.sh", "Final Gate"],
         failures,
     )
+    for policy_path in (
+        ROOT / "config" / "claude-code" / "memory-seed.md",
+        ROOT / "config" / "claude-code" / "agents" / "orchestration.md",
+        ROOT / "config" / "claude-code" / "agents" / "tester.md",
+        ROOT / "config" / "codex" / "templates" / "agents" / "tester.toml",
+        ROOT / "skills" / "ios-verification" / "agents" / "openai.yaml",
+    ):
+        require_not_contains(
+            policy_path,
+            ["GetTestList", "RunSomeTests", "BuildProject", "GetBuildLog", "XcodeListNavigatorIssues", "`xcode-mcp`"],
+            failures,
+        )
+    for reference in (
+        "verification-session-schema.md",
+        "evidence-model.md",
+        "fingerprint-rules.md",
+        "daemon-protocol.md",
+    ):
+        require_contains(
+            ROOT / "skills" / "ios-verification" / "references" / reference,
+            ["fingerprint"],
+            failures,
+        )
+    for helper in (
+        "verification_coordinator.py",
+        "session_store.py",
+        "fingerprint.py",
+        "evidence_cache.py",
+        "affected_tests.py",
+    ):
+        require_contains(ROOT / "skills" / "ios-verification" / "scripts" / helper, ["#!/usr/bin/env python3"], failures)
     for settings_path in sorted((ROOT / "config" / "claude-code").glob("settings*.json")):
         require_not_contains(settings_path, ["Bash(xcodebuild:*)"], failures)
     require_contains(
@@ -191,6 +230,13 @@ def main() -> int:
             "write_xcode_entry_sanity",
             "normalize_xcodebuild_entry_args",
             "environment_sanity",
+            "compute_request_fingerprint",
+            "request_fingerprint",
+            "queue_or_reuse_job",
+            "MATCHING_JOB_KIND='attached'",
+            "MATCHING_JOB_KIND='cached'",
+            "--force",
+            "--no-cache",
         ],
         failures,
     )

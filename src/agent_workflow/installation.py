@@ -10,7 +10,7 @@ from pathlib import PurePosixPath
 import re
 import shutil
 import tempfile
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from . import __version__ as CORE_VERSION
 from .canonical_json import dump, load, sha256
@@ -23,6 +23,9 @@ from .registry.versions import satisfies
 MANAGER_ID = "agent-development-skills"
 MANAGED_HEADER = "<!-- agent-development-skills:managed instructions-v1 -->"
 MANAGED_ROOTS = ("AGENTS.md", "skills", ".agent-skills")
+EXTERNAL_SKILL_ROOTS = (".system",)
+EXTERNAL_ACTIVATION_LOCK = "activation-lock.json"
+IGNORED_OS_METADATA_FILES = (".DS_Store",)
 MANAGED_FILE_MODE = 0o644
 MANAGED_DIRECTORY_MODE = 0o755
 
@@ -257,13 +260,24 @@ def _directories_for_files(root: Path, files: Iterable[dict[str, Any]]) -> tuple
     )
 
 
-def _snapshot_tree(root: Path, *, ignore_source_cache: bool = False) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+def _is_ignored_os_metadata(path: Path) -> bool:
+    return path.name in IGNORED_OS_METADATA_FILES and path.is_file() and not path.is_symlink()
+
+
+def _snapshot_tree(
+    root: Path,
+    *,
+    ignore_source_cache: bool = False,
+    ignore_os_metadata: bool = False,
+) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
     if root.is_symlink() or not root.is_dir():
         raise ContractError(f"install tree is missing or unsafe: {root}")
     files: list[dict[str, Any]] = []
     directories: list[dict[str, Any]] = []
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
+        if ignore_os_metadata and _is_ignored_os_metadata(path):
+            continue
         if ignore_source_cache and (
             "__pycache__" in relative.parts or path.name == ".DS_Store" or path.suffix == ".pyc"
         ):
@@ -834,14 +848,54 @@ def _is_managed_install(target_root: Path) -> bool:
             return False
         if _bytes_digest(agents.read_bytes()) != lock["instructions"]["sha256"]:
             return False
-        if sorted(item.name for item in managed_directory.iterdir()) != ["install-lock.json", "packages"]:
+        managed_entries = sorted(
+            item.name
+            for item in managed_directory.iterdir()
+            if not _is_ignored_os_metadata(item)
+        )
+        if managed_entries not in (
+            ["install-lock.json", "packages"],
+            [EXTERNAL_ACTIVATION_LOCK, "install-lock.json", "packages"],
+        ):
             return False
+        activation_lock_path = managed_directory / EXTERNAL_ACTIVATION_LOCK
+        if _path_exists(activation_lock_path):
+            if activation_lock_path.is_symlink() or not activation_lock_path.is_file():
+                return False
+            if activation_lock_path.stat().st_mode & 0o777 != MANAGED_FILE_MODE:
+                return False
+            activation_lock = load(activation_lock_path)
+            if (
+                activation_lock.get("schema_version") != "1.0"
+                or activation_lock.get("manager") != MANAGER_ID
+                or not isinstance(activation_lock.get("files"), list)
+            ):
+                return False
+            for entry in activation_lock["files"]:
+                if not isinstance(entry, dict):
+                    return False
+                activated_path = _resolve_child(
+                    target_root,
+                    entry.get("path", ""),
+                    label="activated file",
+                )
+                if activated_path.is_symlink() or not activated_path.is_file():
+                    return False
+                if (
+                    activated_path.stat().st_mode & 0o777 != entry.get("mode")
+                    or _bytes_digest(activated_path.read_bytes()) != entry.get("sha256")
+                ):
+                    return False
         packages_root = managed_directory / "packages"
         if packages_root.is_symlink() or not packages_root.is_dir():
             return False
         if packages_root.stat().st_mode & 0o777 != MANAGED_DIRECTORY_MODE:
             return False
-        installed_package_ids = sorted(item.name for item in packages_root.iterdir())
+        installed_package_ids = sorted(
+            item.name
+            for item in packages_root.iterdir()
+            if not _is_ignored_os_metadata(item)
+        )
         expected_package_ids = sorted(item["id"] for item in lock["packages"])
         if installed_package_ids != expected_package_ids:
             return False
@@ -851,10 +905,26 @@ def _is_managed_install(target_root: Path) -> bool:
                 return False
             if directory.stat().st_mode & 0o777 != item["root_mode"]:
                 return False
-            files, directories = _snapshot_tree(directory)
+            files, directories = _snapshot_tree(directory, ignore_os_metadata=True)
             if not _tree_matches_record(files, directories, item, digest_field="files_sha256"):
                 return False
-        installed_names = sorted(item.name for item in skills_root.iterdir())
+        external_names = {
+            item.name
+            for item in skills_root.iterdir()
+            if item.name in EXTERNAL_SKILL_ROOTS
+            and item.is_dir()
+            and not item.is_symlink()
+        }
+        metadata_names = {
+            item.name
+            for item in skills_root.iterdir()
+            if _is_ignored_os_metadata(item)
+        }
+        installed_names = sorted(
+            item.name
+            for item in skills_root.iterdir()
+            if item.name not in external_names and item.name not in metadata_names
+        )
         expected_names = sorted(item["name"] for item in lock["skills"])
         if installed_names != expected_names:
             return False
@@ -864,7 +934,7 @@ def _is_managed_install(target_root: Path) -> bool:
                 return False
             if directory.stat().st_mode & 0o777 != item["root_mode"]:
                 return False
-            files, directories = _snapshot_tree(directory)
+            files, directories = _snapshot_tree(directory, ignore_os_metadata=True)
             if not _tree_matches_record(files, directories, item, digest_field="sha256"):
                 return False
     except (ContractError, KeyError, OSError, TypeError, ValueError):
@@ -974,7 +1044,13 @@ def _verify_staged_install(stage: Path, result: dict[str, Any]) -> None:
             raise ContractError(f"staged instruction fragment differs from install plan: {fragment['id']}")
 
 
-def install_bundle(bundle: InstallBundle, target_root: str | Path, *, dry_run: bool = False) -> dict[str, Any]:
+def install_bundle(
+    bundle: InstallBundle,
+    target_root: str | Path,
+    *,
+    dry_run: bool = False,
+    post_install: Callable[[Path, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     raw_target = Path(target_root).expanduser()
     if raw_target.is_symlink():
         raise ContractError(f"install target must not be a symlink: {raw_target}")
@@ -1019,6 +1095,19 @@ def install_bundle(bundle: InstallBundle, target_root: str | Path, *, dry_run: b
                     stage / "skills" / skill.name,
                     root_mode=skill_record["root_mode"],
                 )
+        existing_skills = target / "skills"
+        for name in EXTERNAL_SKILL_ROOTS:
+            source = existing_skills / name
+            if source.is_dir() and not source.is_symlink():
+                # `.system` 由 Codex 自身维护，不进入本仓 Lock；更新受管 Skills 时原样保留。
+                shutil.copytree(source, stage / "skills" / name, symlinks=True)
+        activation_lock = target / ".agent-skills" / EXTERNAL_ACTIVATION_LOCK
+        if activation_lock.is_file() and not activation_lock.is_symlink():
+            shutil.copyfile(
+                activation_lock,
+                stage / ".agent-skills" / EXTERNAL_ACTIVATION_LOCK,
+            )
+            (stage / ".agent-skills" / EXTERNAL_ACTIVATION_LOCK).chmod(MANAGED_FILE_MODE)
         _verify_staged_install(stage, result)
         lock = dict(result)
         lock["status"] = "installed"
@@ -1032,6 +1121,9 @@ def install_bundle(bundle: InstallBundle, target_root: str | Path, *, dry_run: b
                 moved_existing.append(name)
             os.replace(stage / name, destination)
             moved_new.append(name)
+        if post_install is not None:
+            # 后置激活与 smoke 必须留在同一回滚窗口内；回调失败时恢复受管目录。
+            post_install(target, result)
     except Exception as primary_error:
         recovery_errors: list[str] = []
         for name in reversed(moved_new):

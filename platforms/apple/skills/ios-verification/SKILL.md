@@ -1,247 +1,176 @@
 ---
 name: ios-verification
-description: iOS / Apple Xcode 项目统一验证 Skill。用于验证前路由、优先通过官方 Xcode MCP 执行最窄交互式 build/test、按风险升级到 codex_verify wrapper + shared build-queue 的项目环境证据、读取 MCP 结果或结构化 artifact 做低 token 失败归因，以及在定向验证和独立 code-review 后裁决最终证据是否足够；替代原先分散的验证路由、受影响测试选择、定向验证执行、构建日志摘要、最终证据裁决与项目环境构建验证入口。
+description: iOS / Apple Xcode 项目统一验证 Skill。用于按当前 Diff 生成 evidence requirements、选择受影响测试、通过 codex_verify + shared build-queue 执行 quick/checkpoint/final 验证、复用 Verification Session 与相同或更强证据、读取结构化 artifact 收敛首个阻塞错误，并在独立 code-review 后执行 Final Evidence Gate；不要用它编写生产/测试代码、修改构建配置或直接运行裸 xcodebuild。
 ---
 
 # iOS Verification（统一验证入口）
 
 ## Purpose
 
-Select, execute, digest, and judge the cheapest sufficient iOS / Apple-platform verification path without scattering the workflow across multiple verification Skills.
+只补齐当前 Diff 缺失的验证证据。所有验证型 `xcodebuild`、项目发现和 destination 选择统一进入 `codex_verify` / shared build-queue；不依赖已打开的 Xcode 窗口或 Xcode MCP。
 
-## 中文说明
+## Modes
 
-该 Skill 是 Apple Xcode 项目验证链路的唯一入口，内部按 `verification_mode` 分流：
+| Mode | Responsibility |
+| --- | --- |
+| `route` | 分类 Diff，输出最低有效等级与 `required_evidence` |
+| `affected-tests` | 选择最窄 XCTest；无入口时输出 `no_test_reason` |
+| `auto` | 自动选择 dev/checkpoint/final lane，并只补缺失证据 |
+| `quick-verify` | 开发循环：缓存优先、受影响测试优先、紧凑结果 |
+| `execute` | checkpoint/final 或高风险项目环境验证，生成可归档证据 |
+| `digest` | 从结构化 artifact 提取第一个 blocking failure |
+| `final-gate` | 校验证据新鲜度、覆盖面、Review 与残余风险 |
 
-| Mode | 负责内容 | 说明 |
-| --- | --- | --- |
-| `route` | 根据 diff 选择最低有效验证等级 | 验证前决策 |
-| `affected-tests` | 推导最窄 XCTest / `-only-testing` 范围 | 测试面选择 |
-| `xcode-mcp` | 通过已打开 Xcode 的官方 MCP 执行一次最窄 build/test | 默认快车道 |
-| `execute` | 通过 `codex_verify` / build-queue 执行项目环境验证 | 风险升级或可归档证据 |
-| `digest` | 读取结构化 artifact，定位第一个 blocking failure | 失败归因 |
-| `final-gate` | 在定向验证和独立 `code-review` 后裁决证据是否足够 | 最终证据裁决 |
-
-不负责：生产/测试代码实现、Mock / Stub / Spy / fixture / Page Object 编写、构建配置设计、签名、Archive / Export、CI/CD、运行时 crash 调试、性能 profiling、设备导航自动化。
-
-## When to Use
-
-Use this Skill when:
-
-- An iOS / macOS / Apple-platform code change needs targeted validation, `no_test_reason`, or `suggested_validation`.
-- An Agent is about to request Xcode build/test and the cheapest valid mode is unclear.
-- Swift / Objective-C / test / UI / resource / project / dependency files changed and verification routing is needed.
-- Matching XCTest / `-only-testing` candidates must be selected.
-- The user explicitly asks to run build verification, compile check, `xcodebuild`, or project-environment verification.
-- A build/test command failed and compact artifacts such as `agent-summary.json`, `verification-report.json`, or `diagnostics.json` exist.
-- The user asks whether existing evidence is enough for merge/release/final confidence.
-- Multiple Agents share the build-queue daemon and duplicate verification must be suppressed.
-
-## When Not to Use
-
-Do not use this Skill when:
-
-- Production or test code must be written or modified; use `ios-feature-implementation` (`test-implementation` for test code).
-- The task is pure code review or PR review; use independent reviewer subAgent `code-review`.
-- The task is Build Settings, signing, Archive, Export, CI/CD, scheme design, xcconfig, or packaging mechanics; use `xcode-build`.
-- The task is install, launch, navigation, screenshot, accessibility tree, simulator lifecycle, or device automation; use `ios-automation`.
-- The issue is runtime crash, hang, leak, watchdog, or behavior debugging; use `debugging`.
-- The issue is frame drops, startup, CPU / memory, benchmark, `xctrace`, or Instruments; use `ios-performance`.
-- The repository is not an Xcode / Apple-platform project and no Xcode verification is relevant.
+不负责：生产/测试代码实现、Mock/fixture/Page Object 编写、Build Settings、签名、Archive/Export、CI/CD、crash 调试、性能 profiling 或普通设备导航。
 
 ## Agent Rules
 
-### Mode Selection
+### Current Implementation Boundary
 
-- Use `route` first when validation level is unclear.
-- Use `affected-tests` when unit test mapping is non-trivial.
-- Xcode 项目已打开且 `xcode` MCP 暴露 `GetTestList`、`RunSomeTests` / `BuildProject` 时，先用 `xcode-mcp`：从测试列表选最窄目标，只执行一次；仅失败时读取 `GetBuildLog` / `XcodeListNavigatorIssues`。
-- MCP 快车道不可用、用户要求 artifact、发布前/高风险/依赖或项目配置变更、需要多人队列治理，或 MCP 失败无法归因时，才用 `execute` 升级到 wrapper。
-- 同一 workspace / scheme / 测试集合在同一任务内只允许一个活动验证；复用 MCP 测试列表与已完成结果，避免并行或 wrapper 重复执行。
-- 验证角色只允许调用 Xcode MCP 的只读/验证工具；禁止 `XcodeWrite`、`XcodeUpdate`、`XcodeMakeDir`、`XcodeMV`、`XcodeRM`、`ExecuteSnippet`。
-- Use `execute` only when wrapper-backed targeted validation or project-environment verification should actually run.
-- Use `digest` after a failed verification or when raw log inspection is being considered.
-- Use `final-gate` only after targeted validation / `no_test_reason` and independent `code-review` evidence are available, or when the user explicitly asks for final confidence.
-- Do not run full verification by default.
-- Do not read full raw build logs by default.
-- Do not implement code or tests in this Skill.
+- The current wrapper implements exact request-fingerprint in-flight attachment, successful-result reuse, atomic queue publication and structured-artifact validation.
+- `verification_coordinator.py`, `session_store.py`, `fingerprint.py`, `evidence_cache.py` and `affected_tests.py` are executable contract/scaffold tools, but the wrapper/daemon does not yet invoke them as one end-to-end coordinator.
+- Lane-aware priority scheduling, persisted Session mutation, same-or-stronger cross-request evidence reuse, deterministic failure caching, request coalescing and automatic `.xctestrun` registration remain follow-up implementation work. Until then, do not report those behaviors as executed daemon evidence.
+- `build-for-testing` and `test-without-building` remain supported actions only; compatibility and reuse must be proven by structured evidence rather than inferred from this contract.
 
-### Diff Classification
+### Core Rules
 
-Classify changed files before verification:
+### One Entry Point
 
-| Diff Type | Examples | Default Verification |
+- Never run validation-type `xcodebuild` directly, including `-list`, `-showdestinations`, build, test, `build-for-testing`, or `test-without-building`.
+- Prefer target project `./codex_verify.sh`; fall back to `~/.codex/bin/codex_verify`.
+- `codex_verify` owns workspace/project, scheme, test plan, configuration, destination, formatter, DerivedData, queueing, parsing and artifact generation.
+- The wrapper must submit work to the shared build-queue daemon and use Xcode system DerivedData. Do not create per-Agent DerivedData to bypass `build.db` locks.
+- Xcode MCP、AppleScript、Accessibility 点击 Xcode GUI，以及第三方 Xcode GUI 控制 MCP 不属于验证回退路径。
+
+### Evidence First
+
+- `route` must output evidence requirements, not only a linear level.
+- Evidence kinds are independent: `compile:<target>`, `test:<selector>`, `ui:<scenario>:<screen>`, `review:current-diff`, and release-specific evidence.
+- Reuse only passed same-or-stronger evidence whose environment/source/evidence fingerprints still match the latest tracked and untracked changes.
+- A cached result is evidence only when the producer reports `cached=true`, the source job/artifact hashes remain available, and invalidation rules pass.
+- Never claim cache reuse when fingerprinting or the evidence index is unavailable.
+
+### Verification Session
+
+- Persist one task session below `.codex/verification/sessions/<session-id>/`.
+- Cache project metadata, test manifest, target/source inputs, evidence index, in-flight requests and failure classification.
+- Re-discover workspace, scheme, destination or test plan only when relevant project configuration changes.
+- Use the helper scripts in `scripts/` for deterministic session/fingerprint/evidence operations; do not reimplement these decisions ad hoc.
+- Read `references/verification-session-schema.md` and `references/fingerprint-rules.md` before changing session or cache semantics.
+
+### Lanes
+
+- **Dev / quick-verify:** narrowest evidence, cache allowed, compact artifacts, no complete `.xcresult` by default.
+- **Checkpoint / execute:** affected target build + affected tests + required UI smoke.
+- **Final / execute:** final Diff, consumer integration, affected tests, required UI/runtime evidence, structured `.xcresult`, independent Review, Final Gate.
+- Do not upgrade directly to full. Escalate only when required evidence cannot be satisfied by a narrower lane.
+
+## Diff Routing
+
+| Diff Type | Examples | Default evidence |
 | --- | --- | --- |
-| `doc-only` | `*.md`, docs, comments only | none / lint |
-| `rule-only` | `AGENTS.md`, `SKILL.md`, policy docs | policy lint or no Xcode |
-| `asset-only` | images, colors, json fixtures with no runtime loader change | no Xcode or resource check |
-| `test-only` | XCTest / XCUITest files only | targeted `-only-testing` |
-| `swift-small` | narrow Swift / ObjC logic change | affected tests or targeted build |
-| `swift-risky` | persistence, networking, BLE, DB, concurrency, subscription | affected tests + build |
-| `ui-only` | SwiftUI/UIKit view/layout files | build; UI smoke only if justified |
-| `project-config` | `.xcodeproj`, `.xcworkspace`, scheme, xctestplan, xcconfig | project-environment build/test |
-| `dependency` | `Podfile`, lockfiles, `Package.resolved`, private Pod version | project-environment build/test |
-| `release` | signing, entitlements, Archive / Export | route to `xcode-build` + stronger evidence |
+| `doc-only` | Markdown, comments | none / lint |
+| `rule-only` | `AGENTS.md`, `SKILL.md` | policy lint |
+| `asset-only` | image/color/static JSON | resource check; UI only if runtime presentation changes |
+| `test-only` | XCTest/XCUITest | targeted test |
+| `swift-small` | narrow Swift/ObjC logic | affected tests or target compile |
+| `swift-risky` | DB, BLE, concurrency, payment, network | affected tests + app/consumer compile |
+| `ui-only` | SwiftUI/UIKit/layout/localization/accessibility | compile + targeted UI evidence |
+| `project-config` | pbxproj, scheme, xctestplan, xcconfig | checkpoint/final project evidence |
+| `dependency` | Podfile/lockfiles/Package.resolved | resolve + consumer integration evidence |
+| `release` | signing, entitlement, Archive | route `xcode-build` + final release evidence |
 
-### Verification Levels
+## Affected Tests
 
-Use the smallest sufficient level:
+- Prefer exact method -> class -> file -> bundle.
+- Prefer basename and feature-folder matches: `*ViewModel` -> `*ViewModelTests`; Service/Repository/UseCase/Manager follow the same rule.
+- StoreKit/subscription changes require purchase/receipt/entitlement candidates; persistence requires DB tests; BLE/mesh requires parser/state-machine tests.
+- View/layout-only changes normally require compile + UI evidence rather than unrelated unit suites.
+- Use `scripts/affected_tests.py` and project impact maps when available.
+- If there is no deterministic low-cost test, return non-empty `no_test_reason` and `suggested_validation`; selection-only output is never executed evidence.
 
-| Level | Meaning |
-| --- | --- |
-| `none` | No Xcode verification; explain why. |
-| `lint` | Static policy/schema check only. |
-| `typecheck` | Lightweight source validation where supported. |
-| `unit` | Targeted XCTest with `-only-testing`. |
-| `build` | Build affected target or app integration baseline. |
-| `ui` | Targeted UI smoke / UI test only when justified. |
-| `full` | Release, dependency, project config, or explicit confidence gate. |
+## Quick Verify, In-flight Dedupe and Build/Test Reuse
 
-### Affected Test Selection
+- Invoke `quick-verify` through the wrapper/daemon; never through Xcode MCP.
+- For a reusable compatible test build, prefer `test-without-building` with the cached `.xctestrun`.
+- Otherwise create one `build-for-testing` artifact and register its environment, target source, test bundle, test plan and destination fingerprints before reuse.
+- Attach duplicate in-flight requests to the existing queue job. Do not enqueue the same fingerprint twice.
+- Coalesce compatible build + test requests when the coordinator can prove the environment/source fingerprints match.
+- Cache deterministic compile/link/test failures for the same fingerprint; retry only after source/config/destination changes, an environment/flaky classification, or explicit `--force`.
+- Read `references/daemon-protocol.md` before modifying queue or reuse behavior.
 
-- Prefer exact test method -> test class -> smallest test file / bundle.
-- Prefer matching basename, changed type references, and nearest feature-folder tests.
-- For `*ViewModel.swift`, prefer `*ViewModelTests`.
-- For `*Service.swift`, `*Repository.swift`, `*UseCase.swift`, or `*Manager.swift`, prefer matching unit tests.
-- For StoreKit / purchase / subscription, prefer purchase / receipt / entitlement tests.
-- For database / persistence / CoreData / WCDB, prefer persistence tests.
-- For BLE / mesh / provisioning, prefer parser or state-machine tests; avoid real-device tests by default.
-- For SwiftUI / UIKit view-only changes, prefer build unless targeted UI tests are cheap and explicit.
-- If no deterministic low-cost path exists, return `no_test_reason` and `suggested_validation` instead of escalating automatically.
+## Script-Owned Decisions
 
-### Xcode MCP Fast Lane
+The wrapper/coordinator owns:
 
-- 前置条件：目标项目在 Xcode 中打开，官方 `xcode` MCP 已连接且实际工具面包含 `GetTestList`、`RunSomeTests` 或 `BuildProject`。
-- 先以 `GetTestList` 建立本任务的 session-scoped 测试映射（受影响文件/模块 → XCTest 标识）；仅在 diff、scheme 或 test plan 改变时刷新，避免重复 discovery。
-- 有确定测试时调用一次 `RunSomeTests`；无确定低成本测试但需要编译信号时调用一次 `BuildProject`。不要对同一 fingerprint 同时运行 MCP 测试和 wrapper 测试。
-- 通过时记录工具名、Xcode 窗口/workspace、scheme/test plan、测试标识、耗时和结果；失败时只读取 `GetBuildLog` / `XcodeListNavigatorIssues` 的首个阻塞项。
-- MCP 结果用于日常快速反馈；它不替代 wrapper 的 build-queue、结构化 artifact、明确 destination 或发布级可复现证据。
+- `.xcworkspace` vs `.xcodeproj` discovery and shared scheme selection.
+- Test plan and XCTest manifest discovery.
+- `.codex/xcodebuild.env` loading and session metadata refresh.
+- Connected device discovery and simulator fallback.
+- `TARGETED_DEVICE_FAMILY` preference, explicit destination overrides and destination locks.
+- Environment/target/evidence fingerprints, in-flight dedupe and evidence reuse.
+- `build-for-testing` / `.xctestrun` compatibility checks.
+- Formatter bootstrap, redaction, `.xcresult` digest and first-error classification.
 
-### Wrapper and Build Queue Rules（升级路径）
+Agents may provide changed files, selectors, scenario/screen and requested lane. Agents must not hand-compose workspace, scheme, configuration, destination or DerivedData parameters.
 
-- Never run validation-type `xcodebuild` directly.
-- 当已选择 `execute` 时，优先 target project `./codex_verify.sh`。
-- If absent, use `~/.codex/bin/codex_verify`.
-- The wrapper must submit validation-type `xcodebuild` to shared build-queue daemon.
-- Project-environment verification must run from the target project root in the non-sandbox host environment.
-- For Codex, every **direct validation-type `xcodebuild`** probe or run (`-list`, `-showdestinations`, build, test) must start the wrapper through `functions.exec_command` with `sandbox_permissions="require_escalated"`; do not run sandboxed `codex_verify` / `xcodebuild` as final evidence. This does not prohibit the official Xcode MCP fast lane.
-- The wrapper / script owns formatter selection, tool bootstrap, parsing, redaction, artifact generation, and preserving the real `xcodebuild` exit code.
-- Agents must not manually install or invoke `xcbeautify`, `xcpretty`, `xcprint`, `xcresulttool`, or equivalent parser tools.
-- Reuse Xcode 系统 DerivedData (`~/Library/Developer/Xcode/DerivedData`) via daemon; do not reintroduce `XCODE_DERIVED_DATA_*` or `CODEX_DERIVED_DATA_SLOT` public configuration.
-- For targeted XCTest, do not hand-compose `-workspace` / `-project` / `-scheme` / `-destination` in a direct `codex_verify -- <xcodebuild args>` command. Prefer `codex_verify --build-check <build-check.sh> <repo-root> -only-testing:<selector> test` (or `scripts/build-check.sh <repo-root> -only-testing:<selector> test`) so workspace, scheme, and destination stay script-owned.
-- Direct `codex_verify -- <xcodebuild args>` is only for a user-supplied exact Xcode command or a deliberate low-level diagnostic; the wrapper must fail fast when an explicit scheme is not present in shared schemes.
+## UI and Runtime Evidence
 
-### Script-Owned Validation Decisions
+- Route device lifecycle, launch, semantic snapshot, accessibility tree, scenario injection and screenshots to `ios-automation`.
+- UI-sensitive changes require the smallest sufficient combination of structure, behavior and visual-region evidence.
+- Prefer deterministic Debug/Test-only scenarios and fixtures over manual login, BLE, network, pairing or navigation setup.
+- A screenshot alone is insufficient when semantic/accessibility state is available.
 
-The following deterministic steps are script-owned; Agents should invoke the wrapper and read structured artifacts instead of manually probing and deciding:
+## Digest
 
-- Workspace / project discovery and `.xcworkspace` vs `.xcodeproj` priority.
-- Scheme selection, including `*Tests` / `*UITests` / `*_TEST` preference and reporting via `project_selection` / `scheme_selection`.
-- Targeted XCTest command assembly: Agents may provide `-only-testing` / `-skip-testing` selectors and the action (`test`, `build`, etc.), but must let scripts inject the actual workspace/project, scheme, configuration, and destination from `.codex/xcodebuild.env` or auto-discovery.
-- Connected physical-device discovery: scripts combine `xcodebuild -showdestinations` with `xcrun devicectl list devices`, select only `connected` devices by default, and do not treat paired but disconnected devices as final verification targets.
-- Simulator fallback selection, including `TARGETED_DEVICE_FAMILY` model preference: if iPhone is supported, prefer iPhone; otherwise prefer iPad when iPad is supported.
-- Explicit destination / device override handling: `XCODE_DESTINATION`, `XCODE_DEVICE_ID`, `XCODE_DEVICE_NAME`, and `XCODE_PREFER_MODEL` take precedence over automatic inference.
-- Formatter bootstrap, missing-tool handling, command redaction, compact artifact generation, and first blocking error classification.
-- Build-queue submission, destination locking, fingerprint reuse, and simulator-to-device fallback when script policy allows it.
+Read only as needed, in this order:
 
-Agents may set explicit inputs when the user or project config requires a non-default baseline, but should not reimplement these decisions by running ad-hoc `xcodebuild -showdestinations`, `xcrun devicectl`, or formatter commands outside the wrapper.
+1. `agent-summary.json`
+2. `verification-report.json`
+3. `diagnostics.json`
+4. `test-summary.json`
+5. `ui-summary.json`
+6. `xcresult-summary.json`
+7. `build-summary.txt`
+8. a small source/log excerpt explicitly requested by the summary
 
-### Baseline Rules
+- Do not read full raw logs or recursive `.xcresult` JSON by default.
+- Report and fix only the first real blocking error before resuming the original evidence request.
+- Classify failure as `current_change`, `pre_existing`, `environment`, `flaky`, or `unknown`; never guess `pre_existing` without evidence.
+- Use Recovery Validation: validate the narrow repaired target first, then resume the original failed evidence request.
 
-- If `.codex/xcodebuild.env` sets workspace/project/scheme/configuration/destination, respect it.
-- If both `.xcworkspace` and `.xcodeproj` exist, prefer `.xcworkspace`.
-- Prefer schemes bound to unit test targets / bundles such as `*Tests`; otherwise consider `*UITests` or `*_TEST`.
-- Workspace/project priority and scheme test binding selection are script-owned decisions; Agents should read `project_selection` and `scheme_selection` from `agent-summary.json` instead of re-deriving them from the file tree.
-- Reuse earlier workspace / scheme / destination in the same task unless a clear reason exists.
-- For private Pod / component changes, keep the main project on local `:path` dependency as the validation and review baseline after modifying the real private library repository; switch to local `:path` only when the project is not already pointing at the local source and the private-library source change must be validated.
-- After validation passes, keep the current local `:path` state by default for independent `code-review`; do not switch to online versioned dependency or `Pods/` vendored snapshot unless explicitly requested or required for an authorized main-project dependency-file commit.
-- For iOS with no explicit destination, prefer connected physical iOS device; if none exists, fall back to simulator; for macOS use host build.
-- When `TARGETED_DEVICE_FAMILY` implies a default iOS validation model, prefer iPhone if iPhone is supported; otherwise prefer iPad when iPad is supported. This prevents iPad-only projects from falling back to the first listed iPhone simulator while keeping universal iPhone+iPad projects on the iPhone validation baseline unless `XCODE_DESTINATION` explicitly overrides it.
-- Do not treat paired but disconnected devices as default final verification targets.
+## Final Evidence Gate
 
-### Execution and Fingerprint Rules
+Accept only when all apply:
 
-- Xcode MCP 快车道的 fingerprint 包含 Xcode window/workspace、scheme/test plan、测试标识和 diff；同一 fingerprint 已通过则复用结果，不重复运行。
-- 进入 wrapper 升级路径后，prefer wrapper `--mode auto` unless a narrower/stronger mode is justified.
-- If the same fingerprint has successful same-or-stronger evidence after the latest change, skip duplicate verification and report cached evidence.
-- If the same fingerprint failed, read cached `agent-summary.json` / `verification-report.json` before another run.
-- Change code, config, destination, scheme, or mode before rerunning a failed fingerprint.
-- Fingerprint should include diff + workspace/project + scheme + configuration + destination + mode + Xcode version when supported.
-- If wrapper fingerprinting is unavailable, do not fake success.
+1. Evidence happened after the latest code/config/resource/dependency/fixture change.
+2. Every `required_evidence` item has matching or stronger accepted evidence.
+3. Environment and destination match the delivery baseline, or the evidence is explicitly stronger.
+4. No stale test build, snapshot baseline, fixture, scenario or test-plan fingerprint is reused.
+5. There is no unexplained `no_test_reason`.
+6. An independent reviewer subAgent ran `code-review`, reviewed the verification story and reported no blocking issues.
+7. Project/dependency/signing/resource/release risks received the stronger lane they require.
+8. UI changes have structure, behavior or visual evidence appropriate to the risk.
+9. Residual risks are explicit.
 
-### Digest Rules
-
-- Read artifacts in this order:
-  1. `agent-summary.json`
-  2. `verification-report.json`
-  3. `diagnostics.json`
-  4. `build-summary.txt`
-  5. `test-summary.json`
-  6. `xcresult-summary.json`
-  7. Small targeted source section around the reported location
-- Do not read `build.log`, raw `xcodebuild.log`, full `.xcresult` JSON, recursive `DerivedData`, all warnings, or unrelated SwiftCompile sections by default.
-- Inspect raw logs only when compact artifacts set `needs_raw_log=true`, summaries are insufficient, or the user explicitly asks.
-- Report only the first real blocking error.
-- Fix only the first real blocking error before rerunning verification.
-
-### Final Evidence Gate Rules
-
-Accept existing evidence only when all are true:
-
-1. Evidence happened after the latest code/config/resource/dependency change.
-2. 日常快车道证据来自已打开的目标 Xcode 项目；当 project-environment / 可归档证据被声明时，证据必须来自目标项目根目录的非沙盒 wrapper 环境。
-3. Baseline matches final delivery target or is clearly stronger.
-4. Targeted validation executed, or `no_test_reason` plus `suggested_validation` is explicit.
-5. Independent `code-review` has no `阻塞问题` and reviewed the verification story.
-6. No project/dependency/signing/resource/device high-risk trigger requires stronger evidence.
-
-Escalate to `execute` / stronger verification when any are true:
-
-- `.xcodeproj`, `.xcworkspace`, scheme, xctestplan, xcconfig, Build Settings, or build scripts changed.
-- Signing, entitlements, plist, capabilities, App Extensions, or device capability configuration changed.
-- `Podfile`, lockfiles, private Pod version, Package resolution, or dependency baseline changed.
-- Resources, Storyboard, XIB, Assets, target membership, InfoPlist strings, or packaging changed.
-- Targeted tests only cover a sub-library and do not prove consumer app integration.
-- Validation is stale, unknown, mismatched, or happened before the latest change.
-- `code-review` says the verification baseline is insufficient.
-- User requests release / merge / final confidence.
-
-### Token Budget
-
-- Keep verification decisions compact.
-- Prefer structured artifacts over formatter output or raw logs.
-- Do not paste large command outputs, logs, diffs, or `.xcresult` dumps.
-- Include baseline, result, first blocking error, evidence paths, residual risk, and next action only.
+See `references/evidence-model.md` for dominance and gate rules. `final-gate` must not execute missing evidence itself; it reports the missing set and next action.
 
 ## Inputs
 
 ```json
 {
-  "verification_mode": "route | affected-tests | xcode-mcp | execute | digest | final-gate | auto",
+  "verification_mode": "route | affected-tests | auto | quick-verify | execute | digest | final-gate",
+  "lane": "dev | checkpoint | final | auto",
+  "session_id": "optional",
   "changed_files": [],
   "target_project_root": ".",
-  "workspace": "optional",
-  "project": "optional",
-  "scheme": "optional",
-  "configuration": "Debug",
-  "destination": "optional",
   "requested_level": "none | lint | typecheck | unit | build | ui | full | auto",
   "only_testing": [],
-  "previous_validation": {
-    "executed_validation": [],
-    "no_test_reason": null,
-    "suggested_validation": [],
-    "code_review_blocking_findings": []
-  },
-  "artifact_paths": {
-    "agent_summary": "optional",
-    "verification_report": "optional",
-    "diagnostics": "optional",
-    "build_summary": "optional",
-    "test_summary": "optional",
-    "xcresult_summary": "optional"
-  },
-  "constraints": ["narrowest validation", "no full log"]
+  "scenario": null,
+  "screen": null,
+  "force": false,
+  "no_cache": false,
+  "constraints": ["narrowest sufficient evidence", "no full log"]
 }
 ```
 
@@ -249,114 +178,50 @@ Escalate to `execute` / stronger verification when any are true:
 
 ```json
 {
-  "status": "passed | failed | skipped | blocked | accepted | escalated | proposed",
-  "verification_mode": "route | affected-tests | xcode-mcp | execute | digest | final-gate",
+  "status": "passed | failed | skipped | blocked | accepted | proposed",
+  "verification_mode": "route | affected-tests | auto | quick-verify | execute | digest | final-gate",
+  "lane": "dev | checkpoint | final",
   "verification_level": "none | lint | typecheck | unit | build | ui | full",
-  "reason": "...",
-  "changed_files": [],
-  "only_testing": [],
-  "also_build": false,
-  "verification_route": "xcode-mcp-fast-lane | wrapper -> build-queue daemon -> xcodebuild",
-  "workspace_or_project": "App.xcworkspace",
-  "scheme": "App",
-  "configuration": "Debug",
-  "destination": "platform=iOS,id=...",
-  "fingerprint": null,
-  "cached": false,
-  "executed_validation": [],
+  "session_id": null,
+  "environment_fingerprint": null,
+  "target_fingerprints": {},
+  "required_evidence": [],
   "accepted_evidence": [],
-  "rejected_evidence": [],
-  "final_evidence_gate": "accepted_existing_evidence | needs_project_environment_verification | blocked_insufficient_evidence | null",
-  "verification_story": "accepted | needs-project-environment-verification | insufficient | null",
-  "agent_summary_path": null,
-  "verification_report_path": null,
-  "diagnostics_path": null,
-  "summary_path": null,
+  "missing_evidence": [],
+  "in_flight_request": null,
+  "cached": false,
+  "artifact_paths": {},
   "first_blocking_error": null,
-  "failure_attribution": "none | current_change | pre_existing | environment | unknown",
+  "failure_attribution": "none | current_change | pre_existing | environment | flaky | unknown",
   "no_test_reason": null,
   "suggested_validation": [],
+  "verification_story": "accepted | incomplete | blocked",
   "residual_risk": [],
-  "next_action": "none | run-targeted-validation | run-project-verification | fix_first_error | code-review | xcode-build | blocked"
+  "next_action": "none | run-missing-evidence | fix-first-error | recovery-validation | ios-automation | code-review | xcode-build | blocked"
 }
 ```
 
-Field rules:
-
-- `executed_validation` records only verification actually run through the active Xcode MCP, target project wrapper environment, or explicitly marked local/static validation.
-- `failure_attribution` must be evidence-backed; use `unknown` rather than guessing when compact artifacts are insufficient.
-- `first_blocking_error` is the first real compile, link, test, signing, destination, or UI-smoke blocker from compact artifacts.
-- `no_test_reason` is required when code changed but no low-cost deterministic test path exists.
-
 ## Exit Conditions
 
-Return `passed` when:
-
-- A route/affected-test selection is complete, or
-- Targeted/project verification ran and passed, or
-- Digest found no blocking error.
-
-Return `proposed` when verification was planned but not executed.
-
-Return `skipped` when no Xcode verification is needed or fresh same-or-stronger cached evidence exists.
-
-Return `failed` when verification ran and produced a real build/test/signing/destination/UI-smoke failure with first blocking error identified.
-
-Return `accepted` when final-gate accepts existing evidence with no blocking review findings.
-
-Return `escalated` when final-gate requires stronger project-environment verification.
-
-Return `blocked` when required project root, wrapper, scheme, dependency, device, credentials, permission, compact artifacts, or user decision is unavailable.
+- `passed`: the requested evidence ran or valid same-or-stronger evidence was reused.
+- `accepted`: Final Gate accepted all evidence and independent Review.
+- `skipped`: no Apple build/test evidence is required; explain why.
+- `blocked`: the required environment, target, tool, scenario or review is unavailable.
+- `failed`: execution produced a classified first blocking failure.
+- `proposed`: route/affected-tests returned a plan only; never present it as executed validation.
 
 ## Escalation Rules
 
-Escalate to `ios-feature-implementation` when production or test code must be written or modified.
-
-Escalate to `code-review` when targeted validation / `no_test_reason` is ready and independent review is required.
-
-Escalate to `xcode-build` when signing, Archive / Export, CI, Build Settings, scheme/destination strategy, or packaging design is the missing piece.
-
-Escalate to `ios-automation` when install, launch, navigation, accessibility tree, screenshot, simulator lifecycle, or real-device automation evidence is required.
-
-Escalate to `debugging` when a failure is a runtime crash, hang, leak, watchdog, or behavior issue rather than build/test failure.
-
-Escalate to `ios-performance` when evidence requires benchmark, `measure(metrics:)`, `xctrace`, Instruments, startup, CPU, memory, or frame analysis.
-
-## Reporting Format
-
-```text
-Verification status: passed | failed | skipped | blocked | accepted | escalated | proposed
-Mode: route | affected-tests | execute | digest | final-gate
-Level: none | lint | typecheck | unit | build | ui | full
-Baseline: workspace/project / scheme / configuration / destination
-Affected tests:
-- ...
-Executed validation:
-- ...
-Evidence:
-- agent-summary.json: ...
-- verification-report.json: ...
-First blocking error: none | file:line message
-Final gate: accepted_existing_evidence | needs_project_environment_verification | blocked_insufficient_evidence
-No test reason: none | ...
-Residual risk:
-- ...
-Next: none | run-targeted-validation | run-project-verification | fix_first_error | code-review | blocked
-```
-
-## Reference Resources
-
-- `scripts/build-check.sh`: project-environment verification wrapper helper used by `codex_verify --build-check`.
-- `scripts/build_check.py`: structured artifact generator / digest parser for Xcode build/test output.
-- `references/override-config.md`: supported `.codex/xcodebuild.env` controls and forbidden deprecated variables.
-- `references/verification-report-schema.md`: `agent-summary.json`, `verification-report.json`, and `diagnostics.json` schema and reading order.
+- Route Scenario/Fixture/UI capture to `ios-automation`.
+- Route Build Settings, signing, Archive/Export and CI/CD to `xcode-build`.
+- Route production/test implementation to `ios-feature-implementation`.
+- Route runtime crashes/hangs/leaks to `debugging` and performance evidence to `ios-performance`.
+- Escalate dev -> checkpoint -> final only when missing evidence or risk requires it.
 
 ## Relationship to Other Skills
 
-- Replaces the previous separate verification routing, affected-test selection, targeted validation execution, build-log digest, final evidence gate, and project-environment verification entries.
-- `ios-feature-implementation` owns production code and test code implementation, including `test-implementation`.
-- `code-review` owns independent static review and verification-story review.
-- `xcode-build` owns build/release configuration and signing/Archive/Export strategy.
-- `ios-automation` owns device/simulator UI automation and screenshot/accessibility evidence.
-- `debugging` owns runtime crash/hang/leak/behavior diagnosis.
-- `ios-performance` owns performance profiling and benchmark evidence.
+`workflow-orchestration` owns platform-neutral checkpoints; this Skill owns Apple verification evidence. `ios-automation` supplies UI/runtime artifacts, independent `code-review` supplies review evidence, and `ios-verification(final-gate)` only judges the combined story.
+
+## Token Budget
+
+Return baseline, fingerprint/cache decision, required/accepted/missing evidence, first blocker, artifact paths, residual risk and next action. Do not paste large logs, diffs or `.xcresult` dumps.

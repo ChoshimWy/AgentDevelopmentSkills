@@ -28,7 +28,7 @@ Compose the shared `workflow-orchestration` contract with Apple-specific impleme
 - 静态审查先用共享 `code-review`，再组合 `apple-code-review`，且必须由独立 reviewer subAgent 执行。
 - 构建配置用 `xcode-build`，运行时症状用 `debugging`，性能证据用 `ios-performance`，设备自动化用 `ios-automation`。
 - Apple API/availability/WWDC 使用 `apple-docs`；正式 HTML 使用共享 `html-docs`。
-- 日常最窄验证优先官方 Xcode MCP；需要项目环境证据时走 `codex_verify`，不得直接调用验证型 `xcodebuild`。
+- 所有验证统一进入 `ios-verification` 的 `codex_verify` + shared build-queue 路径；日常使用 `quick-verify` 复用 Verification Session/证据 fingerprint，不使用 Xcode MCP，也不得直接调用验证型 `xcodebuild`。
 - 私有 Pod 联调保持主项目本地 `:path`，修改真实组件仓，不改 `Pods/` 快照。
 - 具体 Apple 门禁见 `references/apple-gate-rules.md`、`references/coding-standards.md` 和 `references/tool-routing.md`。
 

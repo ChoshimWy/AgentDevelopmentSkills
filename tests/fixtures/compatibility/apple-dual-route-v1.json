@@ -10,7 +10,7 @@
       "task": "更新 iOS 文档"
     },
     {
-      "allowed_additional_capabilities": ["workflow.analysis", "workflow.orchestration", "review.apple.static", "reporting.delivery"],
+      "allowed_additional_capabilities": ["workflow.analysis", "workflow.orchestration", "verification.apple.auto", "review.apple.static", "reporting.delivery"],
       "expected_capabilities": ["core.intent-lock", "implementation.apple", "verification.apple.affected-tests", "review.independent"],
       "expected_task_type": "code-small",
       "id": "apple-code-small",
@@ -19,7 +19,7 @@
       "task": "实现 iOS 单文件小改动"
     },
     {
-      "allowed_additional_capabilities": ["workflow.analysis", "workflow.orchestration", "review.apple.static", "reporting.delivery"],
+      "allowed_additional_capabilities": ["workflow.analysis", "workflow.orchestration", "verification.apple.auto", "review.apple.static", "reporting.delivery"],
       "expected_capabilities": ["core.intent-lock", "implementation.apple", "verification.apple.affected-tests", "review.independent"],
       "expected_task_type": "code-medium",
       "id": "apple-code-medium",
@@ -28,7 +28,7 @@
       "task": "实现 iOS 功能"
     },
     {
-      "allowed_additional_capabilities": ["workflow.analysis", "workflow.orchestration", "review.apple.static", "reporting.delivery"],
+      "allowed_additional_capabilities": ["workflow.analysis", "workflow.orchestration", "verification.apple.auto", "review.apple.static", "reporting.delivery"],
       "expected_capabilities": ["core.intent-lock", "implementation.apple", "verification.apple.affected-tests", "review.independent"],
       "expected_task_type": "code-risky",
       "id": "apple-code-risky",

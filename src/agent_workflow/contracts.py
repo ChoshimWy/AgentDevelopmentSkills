@@ -18,7 +18,7 @@ from .models import ContractError, NodeStatus, require_fields, require_version
 LEGAL_NODE_TRANSITIONS = {
     "pending": {"ready", "blocked", "skipped", "cancelled"},
     "ready": {"running", "blocked", "cancelled", "stale"},
-    "running": {"passed", "failed", "blocked", "cancelled"},
+    "running": {"passed", "failed", "blocked", "skipped", "cancelled"},
     "passed": {"stale"}, "failed": {"stale"}, "blocked": {"ready", "stale"},
     "skipped": {"stale"}, "cancelled": {"stale"}, "stale": {"ready"},
 }
@@ -390,11 +390,16 @@ def validate_run_ledger(value: dict[str, Any]) -> None:
         if outcome["invocation_id"] in invocation_ids:
             raise ContractError("run-ledger adapter invocation ids must be unique per attempt consumption")
         invocation_ids.add(outcome["invocation_id"])
-        expected_attempt_status = {
-            "completed": "passed", "partial": "blocked", "blocked": "blocked", "failed": "failed",
-        }[outcome["status"]]
-        if attempts_by_id[outcome["attempt_id"]]["status"] != expected_attempt_status:
-            raise ContractError("run-ledger adapter-outcome status conflicts with node attempt")
+        attempt_status = attempts_by_id[outcome["attempt_id"]]["status"]
+        if outcome["status"] == "partial":
+            if attempt_status not in {"blocked", "skipped"}:
+                raise ContractError("run-ledger adapter-outcome status conflicts with node attempt")
+        else:
+            expected_attempt_status = {
+                "completed": "passed", "blocked": "blocked", "failed": "failed",
+            }[outcome["status"]]
+            if attempt_status != expected_attempt_status:
+                raise ContractError("run-ledger adapter-outcome status conflicts with node attempt")
         attribution = outcome["failure_attribution"]
         if not isinstance(attribution, dict) or set(attribution) != {"category", "summary"}:
             raise ContractError("run-ledger adapter-outcome failure attribution is invalid")
@@ -456,6 +461,17 @@ def validate_run_ledger(value: dict[str, Any]) -> None:
             raise ContractError("run-ledger blocked outcome conflicts with failed evidence")
         if outcome_status == "failed" and "failed" not in statuses:
             raise ContractError("run-ledger failed outcome requires failed evidence")
+        if outcome_status == "partial" and attempts_by_id[attempt_id]["status"] == "skipped":
+            has_validation_gap = any(
+                item["attempt_id"] == attempt_id
+                and item["kind"] == "validation"
+                and item["status"] == "partial"
+                and isinstance(item["data"].get("suggested_validation"), str)
+                and bool(item["data"]["suggested_validation"])
+                for item in evidence
+            )
+            if not has_validation_gap:
+                raise ContractError("run-ledger skipped partial outcome requires validation gap evidence")
     sequences = [event["sequence"] for event in value["resource_events"]]
     if sequences != sorted(sequences) or len(sequences) != len(set(sequences)):
         raise ContractError("resource-event sequences must be increasing and unique")

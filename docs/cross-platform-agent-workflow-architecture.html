@@ -137,7 +137,7 @@
       <p class="lead">基于现有 iOSAgentSkills 与 Product Design 能力，在单一仓库内统一维护可移植 Core、独立平台包、技术栈包与 Design / QA discipline；安装时按需选择 Apple、Android、Web、Backend、Desktop 等平台，同时保持平台规则与 Core 的严格边界。</p>
       <div class="meta">
         <strong>创建日期</strong><span>2026-07-14</span>
-        <strong>更新日期</strong><span>2026-07-14</span>
+        <strong>更新日期</strong><span>2026-07-15</span>
         <strong>文档状态</strong><span class="status">Architecture Baseline v1.2 / Phase 1、Phase 2A–2C 已形成实现基线</span>
         <strong>来源</strong><span>“Codex 工作流自动判断”讨论 + 当前 iOSAgentSkills 仓库事实</span>
         <strong>目标仓库</strong><span>AgentDevelopmentSkills</span>
@@ -216,7 +216,7 @@
 
       <section id="background" class="card half">
         <h2>2. 背景与问题</h2>
-        <p>现有 iOSAgentSkills 已形成成熟的 Apple 平台工作流：统一主入口、任务分型、CP0–CP3、Fail-Fix-Report、最窄验证、结构化证据、独立 reviewer、Xcode MCP 快车道、wrapper 升级路径和 Apple 私有依赖边界。</p>
+        <p>现有 Apple 工作流包含统一主入口、任务分型、CP0–CP3、Fail-Fix-Report、最窄验证、结构化证据、独立 reviewer、quick-verify、wrapper/queue 分层和 Apple 私有依赖边界。验证不再依赖已打开的 Xcode 窗口或 Xcode MCP；当前 wrapper 已统一项目发现、构建、测试、exact-request 去重/成功缓存与证据归一化入口。Verification Session、三层 fingerprint、same-or-stronger 跨请求复用、优先级与自动 .xctestrun 复用仍是独立 scaffold/后续 daemon 集成合同。</p>
         <p>其中一部分是跨平台通用合同，另一部分高度依赖 Xcode、Swift、CocoaPods、真机/模拟器与 Apple 工具链。P2C 已把 workflow、review、documentation、git 与 Canonical UI IR 基础抽为独立 Discipline，把 Apple binding 留在平台包，并将全局 Codex 配置拆为显式 Runtime Config；单仓不等于规则平铺到同一入口。</p>
       </section>
 
@@ -350,12 +350,14 @@
   "provides": [
     "implementation.apple.ui",
     "verification.apple.affected-tests",
+    "verification.apple.auto",
     "automation.apple.device",
     "performance.apple.profiling"
   ],
   "bindings": {
     "implementation.apple.ui": "ios-feature-implementation",
     "verification.apple.affected-tests": "ios-verification",
+    "verification.apple.auto": "ios-verification",
     "automation.apple.device": "ios-automation"
   }
 }</code></pre>
@@ -383,10 +385,10 @@
         <h3>8.2 Workflow Plan 使用 DAG</h3>
         <pre><code>{
   "id": "ios-validation",
-  "capability": "verification.apple.affected-tests",
-  "requires": ["ios-implementation"],
+  "capability": "verification.apple.auto",
+  "requires": ["ios-affected-tests"],
   "mandatory": true,
-  "permission_profile": "verification-read-execute",
+  "permission_profile": "project-read-execute",
   "status": "pending",
   "fallback": null
 }</code></pre>
@@ -491,7 +493,7 @@ project-router
           <tbody>
             <tr><td>本地事实优先、最小改动、写入前计划</td><td>Swift / Structured Concurrency / MainActor 规则</td></tr>
             <tr><td>任务分型、lite/standard/full、CP0–CP3</td><td>Xcode、SDK、availability、Apple 文档</td></tr>
-            <tr><td>Fail-Fix-Report、独立 reviewer 门禁</td><td>Xcode MCP 快车道与 codex_verify wrapper</td></tr>
+            <tr><td>Fail-Fix-Report、独立 reviewer 门禁</td><td>Verification Session、三层 fingerprint、quick/checkpoint/final lane 与 codex_verify/build-queue</td></tr>
             <tr><td>验证等级与结构化证据原则</td><td>workspace / scheme / device / DerivedData 约束</td></tr>
             <tr><td>通用 code-review / reporting 字段</td><td>CocoaPods、私有 <code>:path</code> Pod、Pods snapshot ownership</td></tr>
             <tr><td>Skill schema、Manifest 和安装注册协议</td><td>SwiftUI/UIKit、iOS 自动化、XCTest、Archive / Export</td></tr>
@@ -503,7 +505,7 @@ project-router
           <li><strong>双路径验证：</strong>同一组代表性任务分别走原入口和 Core 路由，比较工作流与门禁。</li>
           <li><strong>单仓去重：</strong>P2C 已由 <code>disciplines/workflow</code>、<code>review</code>、<code>documentation</code>、<code>git</code>、<code>design</code> 承担通用合同，<code>platforms/apple/</code> 只保留 Apple 专属实现与 binding，禁止双份可安装真源。</li>
           <li><strong>配置显式化：</strong>Codex profiles/shared config 位于 <code>runtime-configs/codex</code>，必须显式 opt-in；选择 Apple 不得隐式改变全局工具行为。</li>
-          <li><strong>迁移期可回退：</strong>源码与隔离安装已以本仓为真源；真实本机旧软链在显式备份迁移前继续保留，安装器不得静默覆盖。</li>
+          <li><strong>迁移期可回退：</strong>源码与隔离安装已以本仓为真源；<code>install.sh</code> 只迁移可精确识别的旧 iOSAgentSkills 软链，按当前用户约束不生成持久配置备份，失败时只使用单进程临时快照回滚受管目录并恢复旧软链，临时数据随安装结束清理，未知本地内容不得静默覆盖。</li>
         </ol>
       </section>
 
@@ -967,7 +969,11 @@ database-migration:&lt;database-id&gt;</code></pre>
       <section id="install" class="card">
         <h2>23. 安装、权限、Lockfile 与一致性测试</h2>
         <p>安装器从同一发布物按需部署 Core 与用户选择的平台包，不应把所有平台 Skill 无条件复制到运行目录。平台选择必须可审计、可重复并写入 Lockfile：</p>
-        <pre><code>agent-skills install --core-only
+        <pre><code>./install.sh --dry-run
+./install.sh
+./install.sh --platform apple --dry-run --json
+
+agent-skills install --core-only
 agent-skills install --platform apple
 agent-skills install --platform apple --platform web
 agent-skills install --platform all
@@ -978,7 +984,8 @@ agent-skills doctor
 agent-skills uninstall --platform desktop --dry-run</code></pre>
         <ul>
           <li>Manifest 声明 <code>schema_version</code>、包版本和 Core compatibility range。</li>
-          <li>安装命令默认执行写入；需要预览时必须显式传入 <code>--dry-run</code>。无论是否 dry-run，冲突时都不得覆盖用户本地自定义 Skill。</li>
+          <li>源码仓选择安装入口为根目录 <code>install.sh</code>；TTY 默认从所有平台 Manifest 生成复选菜单，Apple/iOS 同时满足 Manifest <code>implemented</code> 与 source-installer activation/smoke handler readiness，因而默认显示为 <code>[x]</code>；Android、Web、Backend、Desktop 以 <code>[ ]</code> 和 <code>bootstrap-only</code> 状态展示但暂不可选；使用 <code>↑</code> / <code>↓</code> 移动光标、<code>Space</code> 选择或取消、<code>Enter</code> 确认；非交互模式使用可重复的 <code>--platform</code> 或 <code>--platform all</code>，<code>--json</code> 必须显式选择平台。当前可安装闭包仍为 Apple + Codex Runtime Config，并支持 <code>--dry-run</code> / <code>--target-root</code>；默认输出人类可读摘要，显式 <code>--json</code> 输出 canonical JSON；不联网也不默认执行 pip。dry-run 与真实安装共用 managed-root preflight；除普通文件形式的 macOS Finder 元数据 <code>.DS_Store</code> 外，冲突时不得覆盖用户本地自定义 Skill。</li>
+          <li>按当前迁移合同，<code>install.sh</code> 只直接移除可精确识别的旧 iOSAgentSkills <code>AGENTS.md</code> / <code>skills</code> 软链，不生成旧配置持久备份；未知路径 fail-closed，并保留 Codex 管理的 <code>skills/.system</code>。</li>
           <li>官方平台包来源固定为发布物内 <code>platforms/&lt;id&gt;/</code>；环境变量或用户 registry 只用于显式授权的本地扩展包。</li>
           <li><code>--platform</code> 支持单个平台、通过重复参数选择多个平台，以及 <code>all</code>；只有 <code>implemented</code> 平台可安装，<code>bootstrap-only</code> 平台返回明确阻塞；未选择的平台不得产生 Skill、binding 或权限副作用。</li>
           <li><code>--runtime-config</code> 必须显式选择；平台依赖闭包不得隐式激活 profiles、全局配置或插件开关。</li>
@@ -1023,7 +1030,7 @@ agent-skills uninstall --platform desktop --dry-run</code></pre>
   }
 }</code></pre>
         <p>每份 Workflow Plan 同时生成 fingerprint，包含 project profile、resolved policy、插件锁定、目标模块、环境基线和 DAG identity；只有 fingerprint 相同时才允许复用缓存证据。</p>
-        <div class="callout warn"><strong>事务边界</strong>Phase 2B/2C 源码安装器覆盖单进程内的 staged swap、失败回滚和 rollback 二次失败时的 recovery backup 保留；跨进程互斥、进程崩溃恢复日志、doctor 自动修复以及 upgrade/uninstall 事务属于 Phase 6，当前不得宣称为跨进程原子安装。</div>
+        <div class="callout warn"><strong>事务边界</strong>源码安装器覆盖受管根目录的单进程 staged swap；<code>install.sh</code> 将后置 smoke/activation 纳入底层单进程临时回滚窗口，失败时恢复写入前受管目录或旧软链，但按用户约束不创建持久配置备份。跨进程互斥、进程崩溃恢复日志、doctor 自动修复以及 upgrade/uninstall 事务仍属于 Phase 6，当前不得宣称为跨进程原子安装或发布包完成。</div>
         <h3>23.3 插件权限与信任边界</h3>
         <ul>
           <li>Discovery 默认只读，不执行仓库任意脚本，也不访问凭据。</li>
@@ -1058,11 +1065,11 @@ design-source read/write boundary test</code></pre>
             <tr><td>Phase 2C</td><td><span class="check">√</span> Shared Discipline Extraction &amp; Contract Repair A–G 实现与 Conformance 已完成</td><td>共享 ownership、Migration Audit v2、Apple Normalize、bootstrap-only、Lock v2 与 Runtime Config 已落地；独立最终审查阻塞问题：无</td></tr>
             <tr><td>Phase 3</td><td><span class="todo">□</span> Product Design Provider、Design Source Gateway、完整 Canonical Design IR 链路；P2C 已预抽取 base/Apple extension ownership</td><td>Figma / Sketch / Product Design 到 Apple Agent Packet 可追溯</td></tr>
             <tr><td>Phase 4</td><td><span class="todo">□</span> QA Core 与 Desktop 最小包</td><td>PRD、Bug、Release 三类 QA 流程闭环</td></tr>
-            <tr><td>Phase 5</td><td><span class="todo">□</span> Android、Web、Backend 与更多平台/UI Binding；当前平台包均为 <code>bootstrap-only</code></td><td>真实 Provider 新增无需修改 Core 主合同</td></tr>
+            <tr><td>Phase 5</td><td><span class="todo">□</span> 暂缓 Android、Web、Backend 与更多平台/UI Binding；当前平台包均为 <code>bootstrap-only</code></td><td>先以获准真实 Xcode 工程完成 Apple host readiness，再启动其他平台 Provider；新增 Provider 仍不得修改 Core 主合同</td></tr>
             <tr><td>Phase 6</td><td><span class="todo">□</span> 在 P2C Lock v2 / source hash / asset allowlist / rule trace 基础上完成 doctor、升级卸载、打包与发布治理</td><td>单一发布物可选择平台且可移植、可复现、可回滚、冲突安全</td></tr>
           </tbody>
         </table>
-        <div class="callout info"><strong>推荐扩展顺序</strong>Android → Web TypeScript → Backend Node/Java/Go → Desktop → Unity → Flutter / React Native。</div>
+        <div class="callout info"><strong>推荐扩展顺序</strong>Apple installed-contract smoke → 获准真实 Xcode host smoke → Android → Web TypeScript → Backend Node/Java/Go → Desktop → Unity → Flutter / React Native。Apple host readiness 未通过前，其他平台保持 <code>bootstrap-only</code>。</div>
       </section>
 
       <section id="risk" class="card">

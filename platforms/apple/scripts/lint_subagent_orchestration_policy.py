@@ -98,7 +98,7 @@ def main() -> int:
             "ios-feature-implementation",
             "ios-verification",
             "apple-code-review",
-            "Xcode MCP",
+            "Verification Session",
             "CocoaPods",
         ],
         failures,

@@ -42,10 +42,11 @@ Repository / Task / Target Files
 - **单一全局 AGENTS**：Core、共享 Discipline 与已选平台只贡献带 scope 的 Fragment，按依赖拓扑稳定合成一个受管 `AGENTS.md`；Fragment/Skill 冲突及未受管目标均 fail-closed。
 - **共享 Discipline**：`documentation`、`git`、`workflow`、`review`、`design` 各自拥有独立 Manifest、版本、权限与安装边界；Apple 通过 `package_requires` 获得闭包，不保留重复可安装副本。
 - **平台真值**：Apple 为 `implemented`；Android、Web、Backend、Desktop 为 `bootstrap-only`，只能输出 `bootstrap_required`，不会产生 phantom Binding 或 ready Plan。
-- **迁移审计 v2**：不可变 iOSAgentSkills 来源清单通过 relocation/transformation map 映射到当前包清单；206 项 retained、59 项 relocated、22 项 transformed、1 项 removed，并记录 5 个仓内 addition；License provenance 明确标为 pending。
+- **迁移审计 v2**：不可变 iOSAgentSkills 来源清单通过 relocation/transformation map 映射到当前包清单；195 项 retained、58 项 relocated、34 项 transformed、1 项 removed，并记录 14 个仓内 addition；License provenance 明确标为 pending。
 - **安装完整性**：Install Plan/Lock v2 冻结 package source hash、Capability Provider、flattened asset allowlist、rule trace 及完整 path/hash/canonical mode；篡改、额外文件、symlink、Binding 越界、Provider 权限扩大、兼容越界及 staged TOCTOU 均在 swap 前 fail-closed。
 - **显式 Runtime Config**：Codex profiles/shared config 已迁入 `runtime-configs/codex`；只有显式 `--runtime-config codex` 才会进入安装闭包，选择 Apple 不会隐式改写全局工具行为。
 - **结构化 Adapter**：冻结 Provider binding/hash 与每次外部调用的 `invocation_id`，校验 request/result identity、验证缺口、artifact hash 与独立 reviewer actor。
+- **iOS 自动验证门禁**：Apple code DAG 固定为 `implementation → affected-tests → verification.apple.auto → review → report`；`auto` 必须给出实际执行或已接受证据，否则只能显式返回 `no_test_reason`，测试选择本身不能宣称验证完成。Apple 验证已移除 Xcode MCP 快车道，统一为 `quick-verify` / checkpoint / final lane，经 `codex_verify` + shared build-queue 执行。当前 wrapper 已落地 exact-request fingerprint、in-flight attach、成功缓存、原子入队与结构化 artifact 校验；Verification Session、三层 fingerprint、same-or-stronger 跨请求复用、失败缓存、优先级与 `.xctestrun` 自动复用目前是可执行 scaffold / 后续集成合同，不得当作已执行 daemon 证据。
 - **双路径基线**：`doc-only / code-small / code-medium / code-risky` 四类 legacy/Core route comparison 使用 canonical baseline hash。
 - **跨版本 Conformance**：GitHub Actions 配置 Python 3.11–3.14 matrix。
 
@@ -104,7 +105,24 @@ cd AgentDevelopmentSkills
 PYTHONPATH=src python3 -m agent_workflow.cli detect /path/to/repository
 ```
 
-### 安装 CLI
+### 推荐：源码仓一键安装 Apple 工作流
+
+```bash
+# 只预览，不修改 ~/.codex
+./install.sh --dry-run
+
+# 安装 Apple、共享 Discipline 与 Codex Runtime Config
+./install.sh
+
+# 自动化场景输出 canonical JSON
+./install.sh --platform apple --dry-run --json
+```
+
+`install.sh` 在 TTY 中默认显示 Manifest 驱动的平台复选菜单：Apple/iOS 因 Manifest 为 `implemented` 且已注册 activation/smoke handler，默认显示为 `[x]`；Android、Web、Backend、Desktop 以 `[ ]` 和 `bootstrap-only` 状态列出但暂不可选。使用 `↑` / `↓` 移动光标、`Space` 选择或取消、`Enter` 确认；未来多个平台就绪后可组合选择。默认输出带分区、状态符号及 TTY 配色的人类可读摘要；非交互或自动化场景使用可重复的 `--platform <id>`（或 `--platform all`），传 `--json` 时必须显式选择平台并输出 canonical JSON；dry-run 与真实安装共用 managed-root preflight，避免预览通过但执行失败。默认目标为 `${CODEX_HOME:-$HOME/.codex}`，也支持 `--target-root <path>`。它只直接移除可精确识别的旧 iOSAgentSkills `AGENTS.md` / `skills` 软链，不创建旧配置持久备份；除普通文件形式的 macOS Finder 元数据 `.DS_Store` 外，未知文件、目录或软链继续 fail-closed。迁移时保留 Codex 管理的 `skills/.system`，合并而非清空本机 `config.toml`，并激活 8 个 custom agents、6 个缺省 profile、`codex_verify`、构建日志摘要器与 UI smoke 模板。安装后直接针对目标目录执行 Apple route/plan/review/report smoke；后置 smoke/activation 与受管根共享单进程临时回滚窗口，临时数据完成后删除。
+
+当前入口是 source-checkout installer：不联网、不默认执行 `pip`，不代表 wheel/sdist 已发布，也不提供 upgrade/uninstall。
+
+### 底层安装 CLI
 
 ```bash
 python3 -m pip install -e .
@@ -149,7 +167,7 @@ agent-skills install --platform all
 agent-skills install --platform apple --runtime-config codex
 ```
 
-`--discipline <id>` 支持显式选择共享包；选择 Apple 时会通过版本化 `package_requires` 自动闭包 `documentation`、`git`、`workflow`、`review` 与 `design`。`--runtime-config <id>` 只接受显式选择。`install` 默认执行写入；预览必须显式传 `--dry-run`。未传 `--target-root` 时目标为 `~/.codex`。安装器只管理 `AGENTS.md`、`skills/` 与 `.agent-skills/`；若这些路径不是本安装器创建的（包括当前 iOSAgentSkills 软链），会拒绝覆盖。实际替换本机旧流程与发布级生命周期仍必须在 Phase 6 完成。
+`--discipline <id>` 支持显式选择共享包；选择 Apple 时会通过版本化 `package_requires` 自动闭包 `documentation`、`git`、`workflow`、`review` 与 `design`。`--runtime-config <id>` 只接受显式选择。`install` 默认执行写入；预览必须显式传 `--dry-run`。未传 `--target-root` 时目标为 `~/.codex`。底层安装器只管理 `AGENTS.md`、`skills/` 与 `.agent-skills/`；旧软链迁移与 Codex 全局资产激活统一由根目录 `install.sh` 处理。
 
 ### 4. 生成确定性执行计划（仓内 Apple Provider）
 
@@ -207,6 +225,7 @@ PYTHONPATH=src python3 scripts/run_conformance.py
 PYTHONPATH=src python3 scripts/validate_schemas.py
 PYTHONPATH=src python3 scripts/validate_manifests.py
 PYTHONPATH=src python3 scripts/validate_apple_package.py
+PYTHONPATH=src python3 scripts/run_ios_installed_workflow_smoke.py
 python3 platforms/apple/scripts/lint_skill_schema.py --skills-dir platforms/apple/skills
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 PYTHONPATH=src python3 -m compileall -q src scripts tests
@@ -214,11 +233,11 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 
 当前基线：
 
-- 154 个 unittest
+- 183 个 unittest
 - 18 个 JSON Schema
 - 6 个非法 contract golden
 - 13 个 package Manifest：Core、Apple、4 个 bootstrap-only 平台、5 个共享 Discipline 与 1 个显式 Codex Runtime Config；外部 Provider fixture 仅作兼容回归
-- 288 个 iOSAgentSkills 来源受控文件：206 retained、59 relocated、22 transformed、1 removed，另有 5 additions；当前为 13 个 Apple Skills + 7 个共享 Skills
+- 288 个 iOSAgentSkills 来源受控文件：195 retained、58 relocated、34 transformed、1 removed，另有 14 additions；当前为 13 个 Apple Skills + 7 个共享 Skills
 - 4 个 Apple legacy/Core route comparison cases
 
 ## 架构与实施文档
@@ -243,19 +262,19 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 | Phase 2C | 已完成 | A–G 已落地：共享 Discipline、Design Split、Apple Normalize、bootstrap-only 平台、Lock v2、rule trace 与显式 Runtime Config；全量 Conformance 与独立最终审查通过 |
 | Phase 3 | 待启动（基础边界已预抽取） | P2C 已提供 design system / Canonical UI IR base 与 Apple extension 边界；Product Design Provider、来源 Gateway、完整 Schema/权限/验收仍待实施 |
 | Phase 4 | 待启动 | QA Core 与 Desktop 最小包 |
-| Phase 5 | 待启动（平台占位已真值化） | Android、Web、Backend、Desktop 当前均为 bootstrap-only；真实 Provider、Skills 与 Conformance 仍待实施 |
-| Phase 6 | 待启动（Lock v2 基础已前置） | P2C 已提供安装 Lock v2 与合成 trace；doctor、upgrade/uninstall、跨进程恢复、打包与发布治理仍待实施 |
+| Phase 5 | 暂缓（先完成 iOS host readiness） | Android、Web、Backend、Desktop 继续保持 bootstrap-only；Apple 安装态/自动验证合同已贯通，待获准真实 Xcode 工程完成 host smoke 后再启动其他平台 Provider |
+| Phase 6 | 进行中（源码一键安装已落地） | 根目录 `install.sh` 已贯通 Manifest 驱动的平台菜单、Apple 旧软链迁移、Codex 资产激活、目标目录 smoke 与 activation lock；doctor、upgrade/uninstall、跨进程恢复、打包与发布治理仍待实施 |
 
 ## 当前限制
 
 - Apple 源码态与隔离安装态已不依赖 sibling；sibling 只保留为 P2A 冻结对照，不得继续作为新修改真源。
-- 当前本机若仍由旧 iOSAgentSkills 安装器维护 `~/.codex/AGENTS.md` / `skills` 软链，新安装器会 fail-closed，不会自动覆盖；本次未改写真实 `~/.codex`。
-- Apple 平台资产与共享 Discipline 会进入各自受管包；Codex profiles/shared config 只有显式选择 `runtime-configs/codex` 才进入安装计划。全局 config/profile/bin 的激活、备份、升级与卸载仍由 Phase 6 治理，不能把隔离安装 smoke 等同于完整本机替换。
-- Core 已支持 recorded structured Adapter evidence，但不会自行调用 Skill、Xcode MCP 或 wrapper；真实执行仍由 Agent/iOSAgentSkills 负责。
-- Phase 2A、Phase 2B 与 Phase 2C 均已通过独立 reviewer；P2C A–G 的 154 个 unittest、完整 Conformance 与最终负向复审均已通过，阻塞问题：无。这些证据不代表真实业务工程 build/test 或真实 `~/.codex` 切换已完成。
+- 根目录 `install.sh` 可识别并直接移除旧 iOSAgentSkills `~/.codex/AGENTS.md` / `skills` 软链；按用户约束不生成旧配置持久备份，但未知本地内容仍拒绝覆盖。2026-07-15 已完成真实 `~/.codex` 切换，随后 dry-run 显示 config、12 个受管文件与 6 个 profiles 均已一致。
+- `install.sh` 显式选择 Codex Runtime Config，激活 config/profile/agents/bin/templates；受管激活文件记录在 `.agent-skills/activation-lock.json`，本机 profile 与 config 中的 runtime 偏好保留。doctor、upgrade、uninstall 和发布包生命周期仍归 Phase 6。
+- Core 已支持 recorded structured Adapter evidence，但不会自行调用 Skill、Verification Coordinator 或 wrapper；真实执行仍由 Agent/iOSAgentSkills 负责。`scripts/run_ios_installed_workflow_smoke.py` 证明隔离安装态的 discovery/plan/structured evidence/review/report 合同闭环，不冒充真实业务工程 Xcode build/test。
+- Phase 2A、Phase 2B 与 Phase 2C 的历史独立 reviewer 均已通过；本轮 iOS readiness、source install anchor 与验证闭环优化的 183 个 unittest、完整 Conformance 已通过，安装脚本独立复审结论为“阻塞问题：无”。这些证据不代表真实业务工程 Xcode build/test 已完成。
 - iOSAgentSkills 来源 commit/hash 与每个文件去向可审计，但 License/NOTICE provenance 当前仍为 `pending`；解决前不得把仓库标记为发布就绪。
 - 本地只验证了 Python 3.14.3；Python 3.11–3.14 由 CI matrix 覆盖。
-- wheel / sdist、全局 config/profile/bin 激活与真实本机旧流程切换尚未完成，归入 Phase 6；当前 `pip install -e .` 与源码隔离安装路径已验证。
+- wheel / sdist、doctor、upgrade/uninstall 与跨进程恢复仍未完成；当前源码仓 `install.sh` 已在 fresh、旧软链迁移、重复安装临时目标及真实 `~/.codex` 上验证。
 
 ## 设计原则
 

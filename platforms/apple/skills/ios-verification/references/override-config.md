@@ -2,7 +2,7 @@
 
 当自动发现的 workspace、project、scheme 或 destination 不正确时，在仓库根目录创建配置文件（Codex 使用 `.codex/xcodebuild.env`；CC 用户可直接在项目根目录设置环境变量）。
 
-如果同机同仓会有多个 Codex / Claude CLI 并发处理同一 Xcode 项目，本机安装脚本会先同步全局 wrapper 到 `~/.codex/bin/codex_verify`。若目标项目再把 `config/codex/templates/codex_verify.example.sh` 复制到项目根目录并重命名为 `codex_verify.sh`，则项目脚本优先；否则 `ios-verification` 自动回退到全局 wrapper。wrapper 会自动接入 shared build-queue daemon，把验证型 `xcodebuild` 串行排队执行，并统一使用 Xcode 系统 DerivedData（`~/Library/Developer/Xcode/DerivedData`）。
+如果同机同仓会有多个 Codex / Claude CLI 并发处理同一 Xcode 项目，本机安装脚本会先同步全局 wrapper 到 `~/.codex/bin/codex_verify`。若目标项目再把 `config/codex/templates/codex_verify.example.sh` 复制到项目根目录并重命名为 `codex_verify.sh`，则项目脚本优先；否则 `ios-verification` 自动回退到全局 wrapper。wrapper 会自动接入 shared build-queue daemon，把验证型 `xcodebuild` 串行排队执行，并统一使用 Xcode 系统 DerivedData（`~/Library/Developer/Xcode/DerivedData`）。相同 request fingerprint 的 queued/running 请求只附着原 job；成功结果默认复用，并在输出中标记 `cached=true` 与 source job。
 
 ## 支持的变量
 
@@ -28,6 +28,9 @@ XCODE_UI_SMOKE_SPEC=".codex/ui-smoke.yml"
 CODEX_VERIFY_ARTIFACT_DIR=".codex/build-results/latest"
 CODEX_VERIFY_FORMATTER="auto"
 CODEX_VERIFY_TOOL_INSTALL="auto"
+# 可选：跳过成功证据缓存；仍不绕过 in-flight/destination lock
+CODEX_VERIFY_NO_CACHE="0"
+CODEX_VERIFY_FORCE="0"
 ```
 
 ## 规则
@@ -40,6 +43,8 @@ CODEX_VERIFY_TOOL_INSTALL="auto"
 - 定向 XCTest 不要手工拼 `-workspace` / `-scheme` / `-destination`；应通过 `--build-check` 或 `scripts/build-check.sh` 只传 `-only-testing` / `-skip-testing` 与 action，让脚本从 `.codex/xcodebuild.env` 或自动发现结果注入 workspace、scheme 与 destination
 - 如果显式 `XCODE_SCHEME` 或低层 `codex_verify -- <xcodebuild args>` 里的 `-scheme` 不存在于 shared schemes，wrapper / build-check 会 fail-fast 并打印可用 scheme；不要把环境名和测试动作拼成不存在的 scheme（例如 `Acrux_DEV_TEST`）
 - 验证 wrapper 会把验证型 `xcodebuild` 统一提交到 shared build-queue daemon，并固定使用 Xcode 系统 DerivedData；不要再通过旧 `XCODE_DERIVED_DATA_*` / `CODEX_DERIVED_DATA_SLOT` 公开配置调整缓存策略
+- request fingerprint 包含 HEAD、tracked diff、untracked file hash、workspace/project、scheme、configuration、destination、action、命令、Xcode/SDK 和依赖/xcconfig 输入；相同 in-flight 请求附着原 job，不重复排队
+- `--no-cache` / `CODEX_VERIFY_NO_CACHE=1` 跳过已完成成功证据复用；`--force` / `CODEX_VERIFY_FORCE=1` 强制创建新的执行，但都不能绕过已有 in-flight job、shared queue、destination lock 或系统 DerivedData
 - 默认不做 `clean build`
 - 可选验证仍必须在目标项目根目录的项目环境执行；`.codex/xcodebuild.env` 只负责补充参数，不会把最终验证降级成沙箱构建
 - `codex_verify.sh` / `~/.codex/bin/codex_verify` 负责接入 shared build-queue daemon 与验证入口控制；workspace / scheme / destination 仍由本文件与脚本默认策略决定

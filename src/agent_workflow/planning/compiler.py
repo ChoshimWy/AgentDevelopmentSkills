@@ -88,7 +88,15 @@ class PlanCompiler:
             if extension_ids:
                 previous_ids = extension_ids
 
-        qa_needed = "qa" in policy["task"].get("disciplines", [])
+        # 平台已有非测试选择型验证节点时，不再叠加尚未安装的通用 QA Provider。
+        # 这样平台实现任务不会因未来的共享 QA 扩展缺席而被错误降级。
+        has_platform_verification = any(
+            node["capability"].startswith("verification.")
+            and not node["capability"].endswith(".affected-tests")
+            and node["binding"] is not None
+            for node in nodes
+        )
+        qa_needed = "qa" in policy["task"].get("disciplines", []) and not has_platform_verification
         if qa_needed:
             capability = "qa.targeted"
             resolution = self.registry.resolve_binding(capability)

@@ -103,6 +103,50 @@ class StructuredAdapterContractTests(unittest.TestCase):
     def test_structured_validation_result_is_accepted(self) -> None:
         validate_adapter_result(self.request, self.result())
 
+    def test_automatic_verification_requires_execution_or_accepted_evidence(self) -> None:
+        plan = deepcopy(self.plan)
+        plan["nodes"][0]["capability"] = "verification.apple.auto"
+        plan["nodes"][0]["binding"]["mode"] = "auto"
+        request = build_adapter_request(
+            plan,
+            "apple-verify",
+            context=self.context,
+            invocation_id="verify-auto-invocation-1",
+        )
+        result = self.result()
+        for field in (
+            "request_id", "invocation_id", "plan_fingerprint", "node_id",
+            "capability", "provider", "binding",
+        ):
+            result[field] = request[field]
+        result["evidence"][0]["data"] = {"level": "affected-tests", "tests": 3}
+        with self.assertRaisesRegex(ContractError, "requires executed_validation or accepted_evidence"):
+            validate_adapter_result(request, result)
+        result["evidence"][0]["data"] = {
+            "level": "unit",
+            "executed_validation": [{"kind": "affected-tests", "status": "passed"}],
+        }
+        with self.assertRaisesRegex(ContractError, "selection-only or invalid evidence"):
+            validate_adapter_result(request, result)
+        result["evidence"][0]["data"] = {
+            "level": "unit",
+            "executed_validation": [{"kind": "quick-verify", "status": "failed"}],
+        }
+        with self.assertRaisesRegex(ContractError, "requires successful evidence"):
+            validate_adapter_result(request, result)
+        result["evidence"][0]["data"] = {
+            "level": "unit",
+            "executed_validation": [{"kind": "quick-verify", "status": "passed"}],
+            "accepted_evidence": [],
+        }
+        validate_adapter_result(request, result)
+        result["evidence"][0]["data"] = {
+            "level": "unit",
+            "executed_validation": [],
+            "accepted_evidence": [{"kind": "cached-quick-verify", "status": "passed"}],
+        }
+        validate_adapter_result(request, result)
+
     def test_result_identity_must_match_request(self) -> None:
         for field in ("request_id", "invocation_id", "plan_fingerprint", "node_id", "capability", "provider", "binding"):
             with self.subTest(field=field):
@@ -312,6 +356,14 @@ class AppleProviderAnchorSliceTests(unittest.TestCase):
         }
         if include_downstream:
             results.update({
+                "apple-3": self._result(
+                    "apple-3", "validation",
+                    {
+                        "level": "unit",
+                        "executed_validation": [{"kind": "quick-verify", "status": "passed"}],
+                    },
+                    context=active_context, invocation_id=f"apple-3-invocation-{invocation_suffix}",
+                ),
                 "review-apple": self._result(
                     "review-apple", "review",
                     {"blocking_issues": [], "implementation_actor": "builder-1", "reviewer_actor": "reviewer-1"},
@@ -340,8 +392,8 @@ class AppleProviderAnchorSliceTests(unittest.TestCase):
         self.assertEqual(report["validation"]["mode"], "structured-provider")
         self.assertEqual(report["review"]["status"], "passed")
         self.assertEqual(report["known_risks"], [])
-        self.assertEqual(len(ledger["evidence"]), 7)
-        self.assertEqual(len(ledger["adapter_outcomes"]), 7)
+        self.assertEqual(len(ledger["evidence"]), 8)
+        self.assertEqual(len(ledger["adapter_outcomes"]), 8)
 
     def test_missing_recorded_provider_result_blocks_anchor(self) -> None:
         ledger = RecordedAdapterExecutor({}, context=self.context).run(self.plan)
@@ -395,6 +447,37 @@ class AppleProviderAnchorSliceTests(unittest.TestCase):
         self.assertEqual(first["final_status"], "partial")
         self.assertEqual(resumed["final_status"], "partial")
 
+    def test_auto_no_test_gap_allows_independent_review_and_reports_partial(self) -> None:
+        results = {
+            **self._supporting_results(),
+            "apple-1": self._result("apple-1", "delivery", {"changed_files": ["Fixture.swift"]}),
+            "apple-2": self._result(
+                "apple-2", "validation", {"level": "affected-tests", "tests": 0}
+            ),
+            "review": self._result(
+                "review", "review",
+                {"blocking_issues": [], "implementation_actor": "builder-1", "reviewer_actor": "reviewer-1"},
+            ),
+        }
+        results["apple-3"].update({
+            "status": "partial",
+            "evidence": [],
+            "artifacts": [],
+            "no_test_reason": "fixture has no executable test target",
+            "suggested_validation": "run the smallest approved project smoke",
+        })
+        ledger = RecordedAdapterExecutor(results, context=self.context).run(self.plan)
+        report = delivery_report(self.plan, ledger)
+        latest = {
+            item["node_id"]: item["status"]
+            for item in ledger["node_attempts"]
+        }
+        self.assertEqual(ledger["final_status"], "partial")
+        self.assertEqual(latest["apple-3"], "skipped")
+        self.assertEqual(latest["review-apple"], "passed")
+        self.assertEqual(latest["review"], "passed")
+        self.assertEqual(report["validation"]["status"], "partial")
+
     def test_historical_partial_does_not_override_current_completed_or_blocked(self) -> None:
         initial_results = {
             **self._supporting_results(include_downstream=False),
@@ -442,7 +525,7 @@ class AppleProviderAnchorSliceTests(unittest.TestCase):
             self.assertEqual(recovered_report["blocked_items"], [])
             self.assertEqual(
                 [item["status"] for item in recovered_report["validation"]["evidence"]],
-                ["passed"],
+                ["passed", "passed"],
             )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -467,7 +550,7 @@ class AppleProviderAnchorSliceTests(unittest.TestCase):
             blocked_report = delivery_report(self.plan, blocked)
             self.assertEqual(
                 blocked_report["blocked_items"],
-                ["apple-2", "review-apple", "review", "report"],
+                ["apple-2", "apple-3", "review-apple", "review", "report"],
             )
             self.assertEqual(blocked_report["validation"]["evidence"], [])
             self.assertEqual(blocked_report["validation"]["status"], "blocked")

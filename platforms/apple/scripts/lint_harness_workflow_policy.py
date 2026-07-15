@@ -97,7 +97,7 @@ def main() -> int:
             "ios-verification",
             "code-review",
             "apple-code-review",
-            "Xcode MCP",
+            "Verification Session",
             "codex_verify",
             "本地 `:path`",
         ],

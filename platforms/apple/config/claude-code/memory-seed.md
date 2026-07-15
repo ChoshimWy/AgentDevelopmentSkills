@@ -11,7 +11,7 @@
 
 - 回复语言：zh-CN（代码 / 命令 / API 名保留原文）
 - 实现语言：Swift（优先），结构化并发（async/await），UI 线程 `@MainActor`
-- 已打开 Xcode 且官方 `xcode` MCP 可用时，日常验证先用 `GetTestList` → 一次 `RunSomeTests` / `BuildProject`，失败才读 `GetBuildLog`；同一 fingerprint 不重复 wrapper。直接 `xcodebuild`、可归档证据或高风险升级才通过 wrapper 接入 shared build-queue daemon，并使用系统 DerivedData（`~/Library/Developer/Xcode/DerivedData`）
+- 日常验证使用 `ios-verification(quick-verify)`，由 `codex_verify` + shared build-queue 提供 exact-request fingerprint、in-flight attach 与成功缓存；Verification Session、受影响测试、三层 fingerprint 和 same-or-stronger 跨请求复用当前仍是独立 scaffold/合同，不得伪报已由 daemon 串联。可归档证据或高风险改动升级 checkpoint/final lane。禁止 Xcode MCP 和裸 `xcodebuild`，统一使用系统 DerivedData（`~/Library/Developer/Xcode/DerivedData`）
 - Workspace 优先：同时存在 `.xcworkspace` 和 `.xcodeproj` 时使用前者
 - Scheme 优先：默认选包含 `*Tests` target 的 scheme
 - 设备优先：按需完整验证时，已连接真机 > simulator
@@ -67,7 +67,7 @@
 ## xcodebuild 约束
 
 - 在目标项目环境执行（非沙盒），从项目根目录发起
-- 官方 Xcode MCP 快车道只读/验证，不调用写工具；直接 `xcodebuild` 或需要 wrapper 升级时，验证链路由 wrapper 提交到 shared build-queue daemon；旧 `XCODE_DERIVED_DATA_*` / `CODEX_DERIVED_DATA_SLOT` 公开配置不再支持
+- 验证链路只通过 wrapper 提交到 shared build-queue daemon；不用 Xcode MCP 或其它 GUI 控制路径；旧 `XCODE_DERIVED_DATA_*` / `CODEX_DERIVED_DATA_SLOT` 公开配置不再支持
 - iOS 项目按需完整验证优先真机
 - `.xcworkspace` 优先于 `.xcodeproj`
 

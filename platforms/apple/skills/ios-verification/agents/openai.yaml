@@ -1,5 +1,5 @@
 interface:
   display_name: "iOS 统一验证"
-  short_description: "统一处理 iOS 定向测试、构建验证与证据裁决"
+  short_description: "按 Diff 复用证据并补齐 iOS 最窄验证"
   default_prompt: >-
-    使用 $ios-verification 统一处理 iOS 验证链路：先按 diff 选择最低 verification_level，必要时推导最窄 -only-testing。已打开 Xcode 且官方 xcode MCP 可用时，默认 `GetTestList` → 一次 `RunSomeTests` / `BuildProject`，仅失败时读取 `GetBuildLog` / Issue Navigator；禁止调用 XcodeWrite / XcodeUpdate / XcodeRM 等写工具，也不要为同一 fingerprint 重复 wrapper。仅当 MCP 不可用、需要可归档证据、发布前/高风险/依赖或项目配置变更、多人验证冲突或 MCP 失败难以归因时，才通过目标项目 ./codex_verify.sh 或 ~/.codex/bin/codex_verify 接入 shared build-queue daemon 执行项目环境验证；失败时优先读取 verification-report.json / diagnostics.json / build-summary.txt，只报告第一个 blocking error；最终只在定向验证/no_test_reason 与独立 $code-review 后按需裁决证据是否足够。不要在该 Skill 中编写生产或测试代码，测试代码实现转交 $ios-feature-implementation 的 test-implementation mode。
+    使用 $ios-verification 按当前 Diff 生成 required_evidence，并通过目标项目 ./codex_verify.sh 或 ~/.codex/bin/codex_verify 接入 shared build-queue。日常走 quick-verify，当前 wrapper 只复用 exact-request 成功缓存并附着相同 in-flight 请求；Verification Session、environment/target/evidence fingerprint 与相同或更强跨请求复用仅在独立 scaffold 被实际串联且有结构化证据时声明。可归档证据或高风险改动升级 checkpoint/final lane。不要使用 Xcode MCP 或裸 xcodebuild。失败时依次读取 agent-summary.json、verification-report.json、diagnostics.json、test-summary.json、ui-summary.json 与 xcresult-summary.json，只报告首个 blocking error；Final Gate 必须校验证据新鲜度并等待独立 $code-review。不要在本 Skill 中编写生产或测试代码；测试实现转交 $ios-feature-implementation(test-implementation)，Scenario/Fixture/UI Summary 转交 $ios-automation。

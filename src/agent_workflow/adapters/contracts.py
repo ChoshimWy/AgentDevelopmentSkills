@@ -206,6 +206,22 @@ def validate_adapter_result(request: dict[str, Any], result: dict[str, Any]) -> 
     capability = request["capability"]
     if capability.startswith("verification.") and "validation" not in evidence_kinds and no_test_reason is None:
         raise ContractError("adapter-result verification requires structured validation evidence")
+    if capability.startswith("verification.") and capability.endswith(".auto") and no_test_reason is None:
+        validation = next(item for item in result["evidence"] if item["kind"] == "validation")
+        executed = validation["data"].get("executed_validation")
+        accepted = validation["data"].get("accepted_evidence")
+        executed_valid = (
+            _validate_successful_verification_entries(executed, "executed_validation")
+            if executed is not None else False
+        )
+        accepted_valid = (
+            _validate_successful_verification_entries(accepted, "accepted_evidence")
+            if accepted is not None else False
+        )
+        if not executed_valid and not accepted_valid:
+            raise ContractError(
+                "adapter-result automatic verification requires executed_validation or accepted_evidence"
+            )
     if (capability == "review.independent" or capability.startswith("review.")) and "review" not in evidence_kinds:
         raise ContractError("adapter-result review requires structured review evidence")
     if capability == "review.independent" or capability.startswith("review."):
@@ -232,6 +248,28 @@ def validate_adapter_result(request: dict[str, Any], result: dict[str, Any]) -> 
             raise ContractError("adapter-result successful review evidence must be passed")
     if not result["evidence"] and no_test_reason is None:
         raise ContractError("adapter-result requires structured evidence")
+
+
+def _validate_successful_verification_entries(value: Any, field: str) -> bool:
+    if not isinstance(value, list):
+        raise ContractError(f"adapter-result automatic verification {field} must be an array")
+    if not value:
+        return False
+    selection_only = {"affected-tests", "route", "test-selection"}
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise ContractError(f"adapter-result automatic verification {field} entries must be objects")
+        kind = entry.get("kind")
+        status = entry.get("status")
+        if not _is_nonempty_string(kind) or kind in selection_only:
+            raise ContractError(
+                f"adapter-result automatic verification {field} contains selection-only or invalid evidence"
+            )
+        if status not in {"passed", "completed"}:
+            raise ContractError(
+                f"adapter-result automatic verification {field} requires successful evidence"
+            )
+    return True
 
 
 def _validate_artifacts(value: Any) -> set[str]:

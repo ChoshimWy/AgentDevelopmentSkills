@@ -118,7 +118,13 @@ class FakeAdapterExecutor:
                         target = NodeStatus(behavior)
                     except ValueError:
                         target = NodeStatus.FAILED
-                    if target not in {NodeStatus.PASSED, NodeStatus.FAILED, NodeStatus.BLOCKED, NodeStatus.CANCELLED}:
+                    if target not in {
+                        NodeStatus.PASSED,
+                        NodeStatus.FAILED,
+                        NodeStatus.BLOCKED,
+                        NodeStatus.SKIPPED,
+                        NodeStatus.CANCELLED,
+                    }:
                         target = NodeStatus.FAILED
                     reason = f"fake-adapter-{target.value}"
                 self.machine.transition(attempt, target, reason)
@@ -348,6 +354,8 @@ class RecordedAdapterExecutor(FakeAdapterExecutor):
             return None
         if latest_status == NodeStatus.PASSED and outcome.get("status") == "completed":
             return NodeStatus.PASSED
+        if latest_status == NodeStatus.SKIPPED and outcome.get("status") == "partial":
+            return NodeStatus.SKIPPED
         if latest_status == NodeStatus.BLOCKED and outcome.get("status") == "partial":
             return NodeStatus.BLOCKED
         return None
@@ -448,6 +456,12 @@ class RecordedAdapterExecutor(FakeAdapterExecutor):
                     "artifact_ids": [],
                 },
             )
+        if (
+            result["status"] == "partial"
+            and "no_test_reason" in result
+            and node["capability"].endswith(".auto")
+        ):
+            return "skipped"
         return {
             "completed": "passed",
             "partial": "blocked",

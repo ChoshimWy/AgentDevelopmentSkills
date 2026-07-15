@@ -12,7 +12,13 @@ from ..models import ContractError, NodeStatus
 ALLOWED_TRANSITIONS: dict[NodeStatus, set[NodeStatus]] = {
     NodeStatus.PENDING: {NodeStatus.READY, NodeStatus.BLOCKED, NodeStatus.SKIPPED, NodeStatus.CANCELLED},
     NodeStatus.READY: {NodeStatus.RUNNING, NodeStatus.BLOCKED, NodeStatus.CANCELLED, NodeStatus.STALE},
-    NodeStatus.RUNNING: {NodeStatus.PASSED, NodeStatus.FAILED, NodeStatus.BLOCKED, NodeStatus.CANCELLED},
+    NodeStatus.RUNNING: {
+        NodeStatus.PASSED,
+        NodeStatus.FAILED,
+        NodeStatus.BLOCKED,
+        NodeStatus.SKIPPED,
+        NodeStatus.CANCELLED,
+    },
     NodeStatus.PASSED: {NodeStatus.STALE},
     NodeStatus.FAILED: {NodeStatus.STALE},
     NodeStatus.BLOCKED: {NodeStatus.READY, NodeStatus.STALE},

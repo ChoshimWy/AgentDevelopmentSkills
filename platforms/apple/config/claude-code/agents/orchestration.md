@@ -30,7 +30,7 @@
 
 CP2 Validation Baseline Freeze：锁定验证命令、workspace、scheme、destination。
 
-若已打开 Xcode 且官方 `xcode` MCP 可用，默认快车道为 `GetTestList` → 一次 `RunSomeTests` / `BuildProject` → 仅失败时 `GetBuildLog` / Issue Navigator；不得调用 MCP 写工具，也不为同一 fingerprint 默认重复 wrapper。只有 MCP 不可用、用户要求可归档证据、发布前/高风险/依赖或项目配置变更、多人验证冲突或 MCP 失败难以归因时，才升级 `ios-verification` 的 wrapper 路径。
+所有验证统一进入 `ios-verification`：日常使用 `quick-verify`，由 `codex_verify` + shared build-queue 提供 exact-request fingerprint、in-flight attach 与成功缓存；Verification Session、受影响测试、environment/target/evidence fingerprint 和相同或更强跨请求复用当前仍是独立 scaffold/合同，只有实际串联并产出证据时才能宣称执行。用户要求可归档证据、发布前、高风险、依赖或项目配置变更时升级 checkpoint/final lane。不得使用 Xcode MCP 或裸 `xcodebuild`。
 
 ### Phase 5: 聚合与回写
 主 Agent 审查 reviewer 和 tester 的输出：

@@ -60,6 +60,9 @@
   "queue_job_dir": "/tmp/codex-build-queue/jobs/20260617-...",
   "fingerprint": "short stable fingerprint",
   "cached": false,
+  "request_reuse": "new | attached | cached",
+  "attached_to_in_flight": false,
+  "source_queue_job_id": null,
   "summary": "one concise sentence",
   "first_blocking_error": null,
   "failed_tests": [],
@@ -82,7 +85,7 @@
 }
 ```
 
-`queue_job_id` and `queue_job_dir` are always present in `agent-summary.json`; they are `null` for standalone `build_check.py` runs that did not enter the build-queue wrapper.
+`queue_job_id` and `queue_job_dir` are always present in `agent-summary.json`; they are `null` for standalone `build_check.py` runs that did not enter the build-queue wrapper. `request_reuse`, `attached_to_in_flight` and `source_queue_job_id` are wrapper response fields: an attached caller waits for the original job, while a cache hit returns the original immutable artifacts with `cached=true` instead of mutating them.
 
 ## Verification Report Required Fields
 

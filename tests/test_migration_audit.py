@@ -32,14 +32,14 @@ class MigrationAuditTests(unittest.TestCase):
     def test_generated_v2_audit_matches_current_package_tree(self) -> None:
         validate_migration_audit(ROOT, self.source, self.audit, self.inventory)
         dispositions = [entry["disposition"] for entry in self.audit["entries"]]
-        self.assertEqual(dispositions.count("retained"), 206)
-        self.assertEqual(dispositions.count("relocated"), 59)
-        self.assertEqual(dispositions.count("transformed"), 22)
+        self.assertEqual(dispositions.count("retained"), 195)
+        self.assertEqual(dispositions.count("relocated"), 58)
+        self.assertEqual(dispositions.count("transformed"), 34)
         self.assertEqual(dispositions.count("removed"), 1)
         self.assertEqual(
             [(item["id"], len(item["files"])) for item in self.inventory["packages"]],
             [
-                ("apple", 222),
+                ("apple", 231),
                 ("codex", 9),
                 ("design", 33),
                 ("documentation", 8),
@@ -50,7 +50,7 @@ class MigrationAuditTests(unittest.TestCase):
         )
         self.assertEqual(self.audit["source"]["license"]["status"], "pending")
         apple_inventory = next(item for item in self.inventory["packages"] if item["id"] == "apple")
-        self.assertEqual(len(apple_inventory["capabilities"]), 21)
+        self.assertEqual(len(apple_inventory["capabilities"]), 22)
         self.assertEqual(
             apple_inventory["permissions"]["capability_profiles"]["implementation.apple"],
             "project-write",

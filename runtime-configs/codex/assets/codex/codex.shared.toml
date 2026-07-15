@@ -24,7 +24,7 @@ status_line = ["model-with-reasoning", "used-tokens", "project-name", "context-r
 status_line_use_colors = true
 
 # Local-only skills mode:
-# Keep ~/.codex/skills symlinked to this repository's skills/ directory and
+# Keep ~/.codex/skills managed by the selected local package installation and
 # disable plugin-contributed skills/tools. Do not delete plugin caches; disabling
 # config is the durable guard against account/marketplace sync re-enabling them.
 [plugins."build-ios-apps@openai-curated"]

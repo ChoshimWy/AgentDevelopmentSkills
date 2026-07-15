@@ -1,6 +1,6 @@
 ---
 name: ios-automation
-description: iOS 设备自动化 Skill，覆盖 Simulator 与真机两种目标，用于设备发现、模拟器生命周期、安装启动、语义 snapshot、snapshot-local 元素 refs、accessibility tree、UI smoke、replay 取证、截图取证与常见设备诊断；不要把 Build Settings、签名、Archive/Export、普通业务实现、测试编写或一次性构建验收误判到本 Skill。
+description: iOS 设备自动化 Skill，覆盖 Simulator 与真机两种目标，用于设备发现、模拟器生命周期、Debug/Test-only Scenario 与 Fixture 注入、直接页面启动、语义 snapshot、accessibility tree、UI smoke、区域截图、UI Summary、replay 取证与常见设备诊断；不要把 Build Settings、签名、Archive/Export、普通业务实现、测试编写或一次性构建验收误判到本 Skill。
 ---
 
 # iOS 设备自动化
@@ -28,6 +28,9 @@ Use this Skill when the task needs:
 - Semantic UI snapshot with snapshot-local element refs such as `@e1`。
 - Accessibility tree inspection。
 - UI smoke execution。
+- Debug/Test-only Scenario、Fixture 注入与直接页面路由。
+- 固定设备、语言、主题、Dynamic Type 的可重复 UI 取证。
+- 结构/行为断言、区域截图与 `ui-summary.json`。
 - Replayable exploratory UI flow capture。
 - Screenshot or visual evidence capture。
 - Device discovery and connected-device diagnosis。
@@ -68,6 +71,14 @@ Do not use this Skill when:
 - Explicit `--udid` should override auto-selection.
 - Without `--udid`, prefer an already booted Simulator when appropriate.
 
+### Scenario Rules
+
+- 复杂页面优先使用 Debug/Test-only 启动参数构造状态：`-AgentScenario`、`-AgentScreen`、`-AgentFixture`；不要要求 Agent 手工完成登录、配网、BLE 连接或深层导航。
+- Scenario 必须数据确定、无真实网络/BLE 依赖、可重复启动、可清理，并允许固定 locale、appearance、Dynamic Type 与设备。
+- Scenario/Fixture 是项目显式提供的测试合同；本 Skill 不得在生产路径注入 fixture，也不得猜测不存在的页面路由。
+- UI 验证按结构、行为、视觉区域分层。先检查 accessibility identifier/文案/状态/可操作性，再检查交互，最后只比较关键区域。
+- Scenario、Fixture、Snapshot baseline、locale、appearance 或 Dynamic Type 改变时，相关 UI evidence fingerprint 必须失效。
+
 ### Physical Device Rules
 
 - For build/test destination selection, prefer `xcodebuild -showdestinations` real iOS destinations.
@@ -83,7 +94,7 @@ Do not use this Skill when:
 - Validation-type `xcodebuild` invoked by automation scripts should use the project wrapper / shared build-queue daemon.
 - If no scheme is explicit, prefer schemes bound to unit test targets / bundles such as `*Tests`.
 - Do not use this Skill as the default final validation step for all code changes.
-- If final evidence is required, route through `ios-verification` / `ios-verification`.
+- If final evidence is required, route through `ios-verification`.
 
 ### Evidence Rules
 
@@ -128,12 +139,13 @@ Do not use this Skill when:
 1. Classify target mode: simulator or physical device.
 2. Resolve target identifier and verify availability.
 3. Identify app bundle id, app path, workspace/scheme if needed.
-4. Capture semantic snapshot before UI actions when navigation is needed.
-5. Run the narrowest automation task: install, launch, navigate, inspect, screenshot, diagnose, or UI smoke.
-6. Capture structured evidence; escalate to screenshots/logs only when useful.
-7. Persist replay / UI smoke artifacts if the flow should be rerunnable.
-8. Report result and next action.
-9. If the issue is build/signing/configuration, route to the correct Skill.
+4. Resolve explicit Scenario/Screen/Fixture and deterministic locale/appearance/Dynamic Type inputs when UI state construction is needed.
+5. Capture semantic snapshot before UI actions when navigation is needed.
+6. Run the narrowest automation task: install, launch, navigate, inspect, screenshot, diagnose, or UI smoke.
+7. Capture structure/behavior/visual-region results into `ui-summary.json`; escalate to full screenshots/logs only when useful.
+8. Persist replay / UI smoke artifacts if the flow should be rerunnable.
+9. Report result and next action.
+10. If the issue is build/signing/configuration, route to the correct Skill.
 
 ## Simulator Workflow
 
@@ -193,6 +205,12 @@ Expected input contract:
   "workspace": "optional",
   "scheme": "optional",
   "ui_smoke_spec": ".codex/ui-smoke.yml",
+  "scenario": "device-connected",
+  "screen": "device-control",
+  "fixture_path": "Fixtures/device-connected.json",
+  "locale": "zh-Hans",
+  "appearance": "dark",
+  "dynamic_type": "normal",
   "semantic_ref": "@e1",
   "replay_output": ".codex/ui-smoke-artifacts/",
   "constraints": []
@@ -221,6 +239,7 @@ Return compact structured output:
     "semantic_snapshot": "path-or-summary",
     "replay": "path-or-none",
     "accessibility_tree": "path-or-summary",
+    "ui_summary": "path-to-ui-summary.json",
     "screenshot": "path",
     "app_state": "path-or-summary",
     "logs": "path-or-summary"

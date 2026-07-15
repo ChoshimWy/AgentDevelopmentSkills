@@ -115,7 +115,7 @@ class PlanCompilerTests(unittest.TestCase):
         review = next(node for node in plan["nodes"] if node["id"] == "review")
         self.assertTrue(review["mandatory"])
 
-    def test_design_and_qa_nodes_are_composed(self) -> None:
+    def test_design_and_platform_verification_are_composed_without_duplicate_qa(self) -> None:
         profile = self.discovery.discover(FIXTURES / "apple-app")
         policy = PolicyResolver().resolve(profile, "实现 iOS UI 设计并补测试")
         plan = self.compiler.compile(profile, policy)
@@ -124,8 +124,20 @@ class PlanCompilerTests(unittest.TestCase):
         self.assertIn("design.ir.compile", capabilities)
         self.assertIn("design.apple.binding", capabilities)
         self.assertIn("design.apple.source", capabilities)
-        self.assertIn("qa.targeted", capabilities)
+        self.assertIn("verification.apple.affected-tests", capabilities)
+        self.assertIn("verification.apple.auto", capabilities)
+        self.assertNotIn("qa.targeted", capabilities)
         self.assertIn("review.independent", capabilities)
+        self.assertEqual(plan["status"], "ready")
+
+    def test_apple_implementation_with_tests_is_ready_without_shared_qa_provider(self) -> None:
+        profile = self.discovery.discover(FIXTURES / "apple-app")
+        policy = PolicyResolver().resolve(profile, "实现 iOS 功能并补充测试")
+        plan = self.compiler.compile(profile, policy)
+        self.assertEqual(plan["status"], "ready")
+        self.assertEqual(plan["missing_capabilities"], [])
+        self.assertIn("verification.apple.auto", [node["capability"] for node in plan["nodes"]])
+        self.assertNotIn("qa.targeted", [node["capability"] for node in plan["nodes"]])
 
     def test_apple_specialized_recipes_use_capabilities_not_skill_names(self) -> None:
         profile = self.discovery.discover(FIXTURES / "apple-app")

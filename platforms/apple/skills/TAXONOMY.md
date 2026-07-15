@@ -26,7 +26,7 @@
 - `ios-verification` 统一负责验证前路由、受影响测试选择、定向验证执行、项目环境验证、失败摘要和最终证据裁决。
 - `ios-verification` 不再是所有 Apple Xcode 项目改动的强制收尾；只有用户显式要求、发布前自检、高风险、证据不足或需要项目环境证据时才补强执行。
 - 执行可选 `xcodebuild` 验证时，证据必须来自目标项目根目录的非沙盒项目环境，而不是 sandbox 结果；继续遵守 `.xcworkspace` 优先、优先选择绑定了单元测试 `*Tests` target / bundle 的 scheme、iOS 默认优先已连接真机约束。
-- 已打开 Xcode 且官方 `xcode` MCP 可用时，`ios-verification` 默认用 `GetTestList` → 一次 `RunSomeTests` / `BuildProject` 作为最窄快车道；同一 fingerprint 不与 wrapper 重复执行。直接执行 `xcodebuild`（含 `-list` / `-showdestinations` / build/test）才必须由主 Agent 以非沙盒环境（Codex 使用 `functions.exec_command` + `sandbox_permissions="require_escalated"`）启动目标项目根目录 `codex_verify.sh` 或本机 `~/.codex/bin/codex_verify`，并接入 shared build-queue daemon；可用 `--queue-status` 查看队列。wrapper 用于可归档证据、MCP 不可用或高风险升级；不得直接调用 `xcodebuild`。
+- 所有验证统一由主 Agent 在非沙盒项目环境（Codex 使用 `functions.exec_command` + `sandbox_permissions="require_escalated"`）启动目标项目根目录 `codex_verify.sh` 或本机 `~/.codex/bin/codex_verify`，并接入 shared build-queue daemon；日常开发使用 `quick-verify`，按 Verification Session 和 environment/target/evidence fingerprint 复用相同或更强证据、附着相同 in-flight 请求，可用 `--queue-status` 查看队列。不得使用 Xcode MCP、不得直接调用 `xcodebuild`，也不得为每个 Agent 创建独立 DerivedData。
 - 主入口 `codex-subagent-orchestration` 负责自适应编排：所有生产代码和测试代码实施统一切到 `ios-feature-implementation` 的内部模式，验证相关动作统一切到 `ios-verification`。
 - 除实现链路的 reviewer subAgent 是强制收口角色外，本仓不对 coder / tester / pm / reporter 等其它原生 subAgent 的启动场景、角色拆分或数量做额外限制；主 Agent 可按当前任务与运行时能力自行决定。
 - 多 Agent 编排默认遵守 checkpoint 合同：`CP0` / `CP1` / `CP2` / `CP3`。
@@ -37,7 +37,7 @@
 ## 边界优先级
 
 - 实现链路：`ios-feature-implementation` 是唯一真正实施入口；先在内部选择 `business` / `swiftui` / `liquid-glass` / `uikit` / `mixed-ui` / `advanced-swift` / `refactor` / `sdk-contract` / `test-implementation`，不要把普通页面、业务、高级 Swift、SDK 架构、Liquid Glass、测试代码编写或重构实施拆到独立 Skill。
-- 验证链路：`ios-verification` 是唯一验证入口；内部使用 `route` / `affected-tests` / `execute` / `digest` / `final-gate` 模式完成验证路由、测试面选择、执行、失败归因和证据裁决。
+- 验证链路：`ios-verification` 是唯一验证入口；内部使用 `route` / `affected-tests` / `quick-verify` / `execute` / `digest` / `final-gate` 模式完成证据需求生成、测试面选择、Session/缓存复用、执行、失败归因和证据裁决。
 - 构建链路：`xcode-build` 只处理 Build Settings、签名、Archive / Export、CI/CD、scheme / xcconfig / build script 设计；一次性 build/test 验证转交 `ios-verification`。
 - 诊断链路：`debugging` 只处理运行时症状；`ios-performance` 只处理性能证据与基线，不接泛化 crash 或普通测试补写。
 - SDK 架构、Liquid Glass 与测试代码编写：均归入 `ios-feature-implementation` 内部模式；SDK 模块边界 / Public API / 分发 / 版本演进使用 `sdk-contract`，iOS 26+ 玻璃 API / 回退 / 审查使用 `liquid-glass`，XCTest / XCUITest / test doubles / fixtures 使用 `test-implementation`。
@@ -53,9 +53,9 @@
 
 | Skill | 角色 | 主触发场景 | 不要触发的场景 | 切换到 |
 | --- | --- | --- | --- | --- |
-| `ios-automation` | 设备自动化（Simulator + 真机统一入口） | 模拟器生命周期、安装启动、语义 snapshot、snapshot-local 元素 refs、UI smoke、replay 取证、无障碍、截图、真机诊断 | Build Settings / 签名策略设计、普通业务实现、默认验证收口 | `xcode-build`、`ios-feature-implementation`、`ios-verification` |
+| `ios-automation` | 设备自动化（Simulator + 真机统一入口） | 模拟器生命周期、安装启动、Debug/Test-only Scenario/Fixture、直接页面路由、语义 snapshot、UI smoke、区域截图、UI Summary、无障碍、真机诊断 | Build Settings / 签名策略设计、普通业务实现、默认验证收口 | `xcode-build`、`ios-feature-implementation`、`ios-verification` |
 | `xcode-build` | 构建配置与交付链路 | Build Settings、签名、Archive、导出 IPA、CI/CD、scheme、xcconfig、build script、XCFramework | 一次性 build/test 验证、默认收口审查、测试代码编写 | `ios-verification`、`code-review`、`ios-feature-implementation` |
-| `ios-verification` | 统一验证入口 | 验证前路由、受影响测试选择、定向 XCTest、项目环境 build/test、失败摘要、final evidence gate、重复验证抑制 | 测试代码编写、构建配置设计、运行时调试、性能 profiling、设备导航自动化 | `ios-feature-implementation`、`code-review`、`xcode-build`、`ios-automation`、`debugging`、`ios-performance` |
+| `ios-verification` | 统一验证入口 | Diff 风险与 evidence requirements、受影响测试、quick/checkpoint/final lane、Verification Session、fingerprint/缓存/in-flight 去重、项目环境 build/test、失败摘要与 Final Evidence Gate | 测试代码编写、构建配置设计、运行时调试、性能 profiling、设备导航自动化 | `ios-feature-implementation`、`code-review`、`xcode-build`、`ios-automation`、`debugging`、`ios-performance` |
 
 ## Diagnostics
 

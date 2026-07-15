@@ -28,7 +28,10 @@ def required_platform_capabilities(platform: str, task_type: str, disciplines: l
             return ["automation.apple"]
         return [f"analysis.{platform}"]
     if task_type == "qa-only":
-        return [f"verification.{platform}.affected-tests"]
+        capabilities = [f"verification.{platform}.affected-tests"]
+        if platform == "apple":
+            capabilities.append("verification.apple.auto")
+        return capabilities
     if "build" in disciplines and platform == "apple":
         capabilities = ["build.apple.configuration", "verification.apple.affected-tests"]
     elif "debug" in disciplines and platform == "apple":
@@ -45,6 +48,9 @@ def required_platform_capabilities(platform: str, task_type: str, disciplines: l
         if platform == "apple":
             design_capabilities.append("design.apple.binding")
         capabilities = [*design_capabilities, *capabilities]
+    if platform == "apple" and "verification.apple.affected-tests" in capabilities:
+        affected_index = capabilities.index("verification.apple.affected-tests")
+        capabilities.insert(affected_index + 1, "verification.apple.auto")
     return capabilities
 
 

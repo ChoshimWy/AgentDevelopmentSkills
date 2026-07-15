@@ -6,10 +6,13 @@ import shutil
 import tempfile
 import unittest
 
-from tests.support import MANIFESTS, PROVIDERS
+from tests.support import FIXTURES, MANIFESTS, PROVIDERS
 
 from agent_workflow.canonical_json import dump, load
+from agent_workflow.discovery import DiscoveryEngine
 from agent_workflow.models import ContractError
+from agent_workflow.planning import PlanCompiler
+from agent_workflow.policy import PolicyResolver
 from agent_workflow.registry import ManifestRegistry
 
 
@@ -63,6 +66,25 @@ class RegistryTests(unittest.TestCase):
             dump(value, path)
             with self.assertRaisesRegex(ContractError, "expands permission"):
                 ManifestRegistry.from_directory(root / "platforms")
+
+    def test_legacy_apple_provider_without_auto_cannot_produce_ready_code_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(MANIFESTS, root / "platforms")
+            path = root / "platforms" / "apple" / "provider" / "manifest.json"
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["capabilities"] = [
+                item for item in value["capabilities"]
+                if item["id"] != "verification.apple.auto"
+            ]
+            value["bindings"].pop("verification.apple.auto")
+            dump(value, path)
+            registry = ManifestRegistry.from_directory(root / "platforms")
+            profile = DiscoveryEngine(registry).discover(FIXTURES / "apple-app")
+            policy = PolicyResolver().resolve(profile, "实现 iOS 功能")
+            plan = PlanCompiler(registry).compile(profile, policy)
+            self.assertEqual(plan["status"], "blocked")
+            self.assertIn("verification.apple.auto", plan["missing_capabilities"])
 
     def test_provider_cannot_reuse_another_capability_permission(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

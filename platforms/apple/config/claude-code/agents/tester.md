@@ -8,8 +8,8 @@
 - 真机 / 模拟器验证不属于默认验证执行面；若没有可低成本执行的单测路径，输出 `no_test_reason` 与 `suggested_validation`
 - Worker 模式（升级）：仅在明确授权时补测试代码，优先使用 ios-feature-implementation(test-implementation)，不改无关业务实现
 - 测试命名由 ios-feature-implementation(test-implementation) 负责：`test_[方法]_[条件]_[预期]`
-- 若已打开 Xcode 且官方 `xcode` MCP 可用，先用 `GetTestList` → 一次 `RunSomeTests` / `BuildProject`；仅失败时读取 `GetBuildLog`。验证角色禁止调用 Xcode MCP 写工具，也不要为同一 fingerprint 默认重复 wrapper。
-- 直接 xcodebuild 与需要可归档证据/高风险升级的验证才在项目环境通过 wrapper 接入 shared build-queue daemon，统一串行执行并使用系统 DerivedData
+- 所有验证通过 `ios-verification` + `codex_verify` 接入 shared build-queue；日常使用 `quick-verify`，当前可复用 exact-request 成功缓存并附着相同 in-flight fingerprint；Verification Session / same-or-stronger 跨请求复用仅在独立 scaffold 被实际串联且有证据时声明，不使用 Xcode MCP 或裸 `xcodebuild`
+- 需要可归档证据、发布前、高风险、依赖或项目配置变更时升级 checkpoint/final lane；仍统一串行执行并使用系统 DerivedData
 - 默认复用 `ios-verification`；设备导航/截图/无障碍才复用 `ios-automation` skill
 
 ## 输出字段
