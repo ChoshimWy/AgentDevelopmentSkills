@@ -59,18 +59,42 @@ class InstallScriptTests(unittest.TestCase):
             result = self.run_install(target, "--dry-run")
             report = json.loads(result.stdout)
 
-            self.assertIn("Apple 工作流安装预览", human.stdout)
-            self.assertIn("已选择平台：Apple / iOS", human.stdout)
-            self.assertIn("规划平台：Android、Web、Backend、Desktop", human.stdout)
+            self.assertIn("Apple / iOS 平台安装预览", human.stdout)
+            self.assertNotIn("目标目录：", human.stdout)
+            self.assertNotIn("已选择平台：", human.stdout)
+            self.assertNotIn("规划平台：", human.stdout)
+            self.assertNotIn("Runtime Config：", human.stdout)
+            self.assertNotIn("安装包（", human.stdout)
+            self.assertNotIn("  • Skills：", human.stdout)
+            self.assertNotIn("旧 iOSAgentSkills 软链：", human.stdout)
             self.assertIn("未写入任何文件", human.stdout)
             self.assertIn("移除 --dry-run，重新执行原命令", human.stdout)
             self.assertNotIn("确认后运行：./install.sh", human.stdout)
             self.assertIn("持久备份：不创建", human.stdout)
             self.assertIn("添加 --json", human.stdout)
+            self.assertNotIn("Agent Development Skills", human.stdout)
+            self.assertNotIn("────────────────────────", human.stdout)
+            self.assertTrue(human.stdout.startswith("◇ Apple / iOS 平台安装预览"))
             self.assertNotIn("\033[", human.stdout)
             self.assertEqual(report["status"], "planned")
+            self.assertEqual(report["target_root"], str(target.resolve()))
             self.assertEqual(report["selected_platforms"], ["apple"])
             self.assertEqual(report["selected_runtime_configs"], ["codex"])
+            self.assertEqual(
+                report["selected_packages"],
+                [
+                    "core",
+                    "design",
+                    "documentation",
+                    "git",
+                    "review",
+                    "workflow",
+                    "apple",
+                    "codex",
+                ],
+            )
+            self.assertIsInstance(report["skill_count"], int)
+            self.assertGreater(report["skill_count"], 0)
             self.assertEqual(report["persistent_backup"], False)
             self.assertEqual(
                 [item["id"] for item in report["platform_options"]],
@@ -95,6 +119,11 @@ class InstallScriptTests(unittest.TestCase):
             self.assertFalse(target.exists())
 
             module = load_installer_module()
+            multi_platform_report = {**report, "selected_platforms": ["apple", "web"]}
+            self.assertIn(
+                "Apple / iOS、Web 平台安装预览",
+                module._human_report(multi_platform_report, color=False),
+            )
 
             class TTYBuffer(io.StringIO):
                 def isatty(self) -> bool:
@@ -119,6 +148,7 @@ class InstallScriptTests(unittest.TestCase):
             self.assertIn("Android", prompt_output.getvalue())
             self.assertIn("bootstrap-only", prompt_output.getvalue())
             self.assertIn("尚不可安装", prompt_output.getvalue())
+            self.assertTrue(prompt_output.getvalue().endswith("\033[8F\033[J"))
 
             toggle_output = TTYBuffer()
             toggled, _ = module._select_platforms(
@@ -192,7 +222,13 @@ class InstallScriptTests(unittest.TestCase):
             self.assertNotIn("选择安装平台", rendered)
             self.assertIn("Android (bootstrap-only) 尚不可安装", rendered)
             self.assertIn("请至少选择一个可安装平台", rendered)
-            self.assertIn("Apple 工作流安装预览", rendered)
+            self.assertIn("Apple / iOS 平台安装预览", rendered)
+            final_screen = rendered.rsplit("\033[J", 1)[-1]
+            self.assertNotIn("[x] Apple / iOS", final_screen)
+            self.assertNotIn("↑/↓ 移动", final_screen)
+            self.assertNotIn("Agent Development Skills", final_screen)
+            self.assertNotIn("────────────────────────", final_screen)
+            self.assertIn("Apple / iOS 平台安装预览", final_screen)
             for flag in (termios.ECHO, termios.ICANON, termios.ISIG, termios.IEXTEN):
                 self.assertEqual(terminal_after[3] & flag, terminal_before[3] & flag)
             self.assertEqual(terminal_after[0] & termios.ICRNL, terminal_before[0] & termios.ICRNL)
@@ -270,9 +306,24 @@ class InstallScriptTests(unittest.TestCase):
             first = self.run_install(target, json_output=False)
             second = json.loads(self.run_install(target).stdout)
 
-            self.assertIn("Apple 工作流安装完成", first.stdout)
+            self.assertIn("Apple / iOS 平台安装完成", first.stdout)
+            self.assertNotIn("目标目录：", first.stdout)
+            self.assertNotIn("已选择平台：", first.stdout)
+            self.assertNotIn("规划平台：", first.stdout)
+            self.assertNotIn("Runtime Config：", first.stdout)
+            self.assertNotIn("安装包（", first.stdout)
+            self.assertNotIn("  • Skills：", first.stdout)
+            self.assertNotIn("旧 iOSAgentSkills 软链：", first.stdout)
+            self.assertNotIn("Agent Development Skills", first.stdout)
+            self.assertNotIn("────────────────────────", first.stdout)
+            self.assertTrue(first.stdout.startswith("✓ Apple / iOS 平台安装完成"))
             self.assertIn("Installed workflow smoke：passed", first.stdout)
             self.assertIn("Plan / Review / Final：ready / passed / completed", first.stdout)
+            multi_platform_report = {**second, "selected_platforms": ["apple", "web"]}
+            self.assertIn(
+                "Apple / iOS、Web 平台安装完成",
+                load_installer_module()._human_report(multi_platform_report, color=False),
+            )
             self.assertEqual(second["activation"]["managed_file_updates"], [])
             self.assertEqual(len(second["activation"]["managed_files_unchanged"]), 12)
             self.assertTrue((target / "skills" / "ios-verification" / "SKILL.md").is_file())
@@ -313,6 +364,8 @@ class InstallScriptTests(unittest.TestCase):
                 'model = "keep-me"\n\n[custom]\nvalue = 7\n', encoding="utf-8"
             )
 
+            human_dry_run = self.run_install(target, "--dry-run", json_output=False)
+            self.assertNotIn("旧 iOSAgentSkills 软链：", human_dry_run.stdout)
             dry_run = json.loads(self.run_install(target, "--dry-run").stdout)
             self.assertEqual(dry_run["would_remove_legacy_symlinks"], ["AGENTS.md", "skills"])
             self.assertTrue((target / "AGENTS.md").is_symlink())

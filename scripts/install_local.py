@@ -215,15 +215,6 @@ def _read_terminal_key(stream: Any) -> str | None:
     return None
 
 
-def _display_path(value: str) -> str:
-    path = Path(value)
-    try:
-        relative = path.relative_to(Path.home())
-    except ValueError:
-        return value
-    return "~" if not relative.parts else f"~/{relative.as_posix()}"
-
-
 def _joined(values: list[str]) -> str:
     return "、".join(values) if values else "无"
 
@@ -382,11 +373,13 @@ def _prompt_for_platforms(
                 if not selected:
                     message = "! 请至少选择一个可安装平台"
                     continue
-                output_stream.write("\n")
-                return _validated_platform_selection(
+                selection = _validated_platform_selection(
                     [item["id"] for item in options if item["id"] in selected],
                     options,
                 )
+                output_stream.write(f"\033[{rendered_line_count}F\033[J")
+                output_stream.flush()
+                return selection
 
 
 def _select_platforms(
@@ -415,24 +408,17 @@ def _human_report(report: dict[str, Any], *, color: bool) -> str:
     marker = _styled("◇", ANSI_CYAN, ANSI_BOLD, enabled=color) if planned else _styled(
         "✓", ANSI_GREEN, ANSI_BOLD, enabled=color
     )
-    title = "Apple 工作流安装预览" if planned else "Apple 工作流安装完成"
+    selected_platforms = _display_ids(report["selected_platforms"])
+    title = (
+        f"{selected_platforms} 平台安装预览"
+        if planned
+        else f"{selected_platforms} 平台安装完成"
+    )
     lines = [
-        "",
-        _styled("Agent Development Skills", ANSI_BOLD, ANSI_CYAN, enabled=color),
-        _styled("────────────────────────", ANSI_DIM, enabled=color),
         f"{marker} {_styled(title, ANSI_BOLD, enabled=color)}",
-        "",
-        f"  • 目标目录：{_display_path(report['target_root'])}",
-        f"  • 已选择平台：{_display_ids(report['selected_platforms'])}",
-        f"  • Runtime Config：{_display_ids(report['selected_runtime_configs'])}",
-        f"  • 安装包（{len(report['selected_packages'])}）：{_joined(report['selected_packages'])}",
-        f"  • Skills：{report['skill_count']} 个",
         "",
         _styled("变更摘要", ANSI_BOLD, enabled=color),
     ]
-    deferred = [item["label"] for item in report["platform_options"] if not item["selectable"]]
-    if deferred:
-        lines.insert(7, f"  • 规划平台：{_joined(deferred)}（bootstrap-only，暂不可安装）")
 
     activation = report["activation"]
     config_action = "将合并更新" if planned else "已合并更新"
@@ -457,13 +443,6 @@ def _human_report(report: dict[str, Any], *, color: bool) -> str:
     else:
         lines.append(f"  ✓ Profiles：保留 {len(profile_preserves)} 个，无需创建")
 
-    legacy_key = "would_remove_legacy_symlinks" if planned else "removed_legacy_symlinks"
-    legacy_links = report[legacy_key]
-    if legacy_links:
-        legacy_action = "将替换" if planned else "已替换"
-        lines.append(f"  ↻ 旧 iOSAgentSkills 软链：{legacy_action} {_joined(legacy_links)}")
-    else:
-        lines.append("  ✓ 旧 iOSAgentSkills 软链：无需迁移")
     lines.append("  • 持久备份：不创建（按当前安装策略）")
 
     if planned:
@@ -501,9 +480,6 @@ def _human_error(error: Exception, *, dry_run: bool, color: bool) -> str:
     marker = _styled("✗", ANSI_RED, ANSI_BOLD, enabled=color)
     return "\n".join(
         [
-            "",
-            _styled("Agent Development Skills", ANSI_BOLD, ANSI_CYAN, enabled=color),
-            _styled("────────────────────────", ANSI_DIM, enabled=color),
             f"{marker} {_styled(title, ANSI_BOLD, enabled=color)}",
             "",
             f"  原因：{error}",
