@@ -256,7 +256,7 @@
     "apple": {
       "provider_id": "ios-agent-skills",
       "bindings": {
-        "verification.apple.auto": {"kind": "skill", "name": "ios-verification", "mode": "auto"}
+        "verification.apple.auto": {"kind": "skill", "name": "apple-verification", "mode": "auto"}
       },
       "context": {}
     }
@@ -268,7 +268,7 @@
     },
     "verification.apple.auto": {
       "provider_id": "ios-agent-skills",
-      "binding": {"kind": "skill", "name": "ios-verification", "mode": "auto"}
+      "binding": {"kind": "skill", "name": "apple-verification", "mode": "auto"}
     },
     "review.independent": {
       "provider_id": "review",
@@ -483,7 +483,7 @@ src/agent_workflow/worktree_sessions/
 platforms/apple/daemon/
   worktree-session-request.schema.json
 
-platforms/apple/skills/ios-verification/
+platforms/apple/skills/apple-verification/
   references/worktree-session.md
   scripts/worktree_session.py</code></pre>
       <p><code>worktree-session-context-v1</code> 只作为现有 Adapter request/result 的强类型上下文，不是新的 Evidence 真源。共享能力落地后应提升 Git/Workflow Discipline 的 minor version，并由 Apple <code>package_requires</code> 显式要求新的 Session Capability。未来平台只能复用该 Capability，不得复制脚本；未实现平台 Overlay 时仍返回 <code>bootstrap_required</code>。</p>

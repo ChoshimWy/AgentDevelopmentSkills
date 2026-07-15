@@ -25,7 +25,7 @@ Implement iOS / Apple-platform production and test code through one implementati
 | `sdk-contract` | SDK / Framework public API、模块边界、入口类、Configuration、依赖方向、可测试性、SPM/XCFramework 分发、版本演进 | public surface、module boundaries、distribution、versioning |
 | `test-implementation` | 单元测试、UI 测试、Mock / Stub / Spy / Fake、fixture、Page Object、async 测试、为测试补最小 seam / DI | deterministic tests、test doubles、fixtures、testability seam |
 
-不负责：构建设置/签名/Archive/CI、运行时 crash/leak/hang 定位、性能 profiling / benchmark、验证执行/证据裁决、Apple 官方事实检索、纯视觉方向探索。这些仍交给 `xcode-build`、`debugging`、`ios-performance`、验证链路 Skill、`apple-docs`、`ui-ux-design-system` 等专项 Skill。
+不负责：构建设置/签名/Archive/CI、运行时 crash/leak/hang 定位、性能 profiling / benchmark、验证执行/证据裁决、Apple 官方事实检索、纯视觉方向探索。这些仍交给 `xcode-build`、`apple-debugging`、`ios-performance`、验证链路 Skill、`apple-docs`、`ui-ux-design-system` 等专项 Skill。
 
 ## When to Use
 
@@ -46,9 +46,9 @@ Use this Skill when the user asks to implement, modify, wire, design, or refacto
 Do not use this Skill as the main route when:
 
 - The task is pure code review or PR review; use an independent reviewer subAgent running `code-review`.
-- The task is targeted XCTest execution, build/test failure digest, or final verification evidence without editing production or test code; use `ios-verification`.
+- The task is targeted XCTest execution, build/test failure digest, or final verification evidence without editing production or test code; use `apple-verification`.
 - The task is Xcode Build Settings, signing, Archive/Export, scheme, xcconfig, CI/CD, or packaging mechanics; use `xcode-build`.
-- The task is runtime crash, exception, leak, hang, watchdog, or incorrect runtime behavior diagnosis before implementation; use `debugging`.
+- The task is runtime crash, exception, leak, hang, watchdog, or incorrect runtime behavior diagnosis before implementation; use `apple-debugging`.
 - The task is frame drops, startup, CPU/memory pressure, `xctrace`, Instruments, or benchmark; use `ios-performance`.
 - The task is Apple API / availability / WWDC fact lookup; use `apple-docs` first.
 - The task is product UI visual exploration, design-system direction, branding, color, or typography without code; use design/product skills before implementation.
@@ -61,7 +61,7 @@ Do not use this Skill as the main route when:
 2. Select exactly one primary `implementation_mode`; add `secondary_modes` only when the change genuinely crosses boundaries.
 3. Do not ask the user to choose UIKit vs SwiftUI when the repository already makes it clear.
 4. Do not switch to removed standalone implementation Skills; this Skill owns all implementation modes, including SDK architecture, Liquid Glass, and test code implementation.
-5. If the task was routed from `codex-subagent-orchestration`, preserve its task type, checkpoint, validation baseline, and reviewer handoff requirements.
+5. If the task was routed from `apple-orchestration`, preserve its task type, checkpoint, validation baseline, and reviewer handoff requirements.
 
 ### Shared Implementation Rules
 
@@ -212,7 +212,7 @@ When adding `.swift`, `.h`, `.m`, or `.mm` files and the project requires header
 - Default implementation closure remains: implementation Skill, targeted validation, independent reviewer subAgent running `code-review`.
 - Test code writing is handled by this Skill through `test-implementation`; targeted test selection/execution and evidence handling happen after implementation.
 - UI-only or architecture-only changes may have no low-cost unit test; provide `no_test_reason` and `suggested_validation` instead of silently skipping validation.
-- `ios-verification` is the optional escalation path when the user asks, release confidence is needed, project/dependency configuration changed, or risk/evidence requires it.
+- `apple-verification` is the optional escalation path when the user asks, release confidence is needed, project/dependency configuration changed, or risk/evidence requires it.
 - The implementation Agent must not self-review its own implementation.
 
 ### Token Budget
@@ -282,7 +282,7 @@ Return compact structured output:
   "test_impact": "...",
   "no_test_reason": null,
   "suggested_validation": [],
-  "suggested_next_skill": "ios-verification | code-review | debugging | ios-performance | xcode-build | apple-docs | ui-ux-design-system | blocked",
+  "suggested_next_skill": "apple-verification | code-review | apple-debugging | ios-performance | xcode-build | apple-docs | ui-ux-design-system | blocked",
   "next_action": "run-targeted-tests | code-review | ask-user | blocked"
 }
 ```
@@ -327,11 +327,11 @@ Return `blocked` when:
 
 Use `test-implementation` within this Skill when tests, mocks, stubs, spies, fakes, fixtures, Page Objects, or testability seams must be written or modified.
 
-Escalate to `ios-verification` when exact `-only-testing` selection is non-trivial.
+Escalate to `apple-verification` when exact `-only-testing` selection is non-trivial.
 
 Escalate to `code-review` after targeted validation or a documented `no_test_reason` when static risk review and verification story review are needed; use an independent reviewer subAgent for implementation-chain closure.
 
-Escalate to `debugging` when the task is driven by runtime crash, hang, leak, watchdog, incorrect object lifetime, or runtime-only symptoms.
+Escalate to `apple-debugging` when the task is driven by runtime crash, hang, leak, watchdog, incorrect object lifetime, or runtime-only symptoms.
 
 Escalate to `ios-performance` when the task becomes frame drops, excessive layout/body invalidation, startup, CPU/memory regression, benchmark, `xctrace`, or Instruments.
 
@@ -341,11 +341,11 @@ Escalate to `apple-docs` when official Apple API facts, availability, WWDC guida
 
 Escalate to `ui-ux-design-system` when the task becomes visual direction, design-system language, branding, color, typography, or product design exploration before implementation.
 
-Escalate to `design-context-compiler` when implementation originates from Figma / Sketch evidence but lacks a validated Canonical UI IR, iOS binding set, or task-scoped Agent Packet. Consume the validated packet when present; do not read full design-tool JSON as implementation context.
+Escalate to `apple-design-context-compiler` when implementation originates from Figma / Sketch evidence but lacks a validated Canonical UI IR, iOS binding set, or task-scoped Agent Packet. Consume the validated packet when present; do not read full design-tool JSON as implementation context.
 
 Escalate to `ios-automation` when simulator/device UI smoke, screenshot, accessibility tree, installation, launch, or navigation evidence is required.
 
-Escalate to `ios-verification` when targeted validation execution, build/test failure digest, final evidence judgement, release/high-risk evidence, or exact `-only-testing` selection is needed.
+Escalate to `apple-verification` when targeted validation execution, build/test failure digest, final evidence judgement, release/high-risk evidence, or exact `-only-testing` selection is needed.
 
 ## Reporting Format
 
@@ -392,16 +392,16 @@ Read only the reference files needed by the selected mode:
 
 ## Relationship to Other Skills
 
-- `codex-subagent-orchestration` remains the default iOS main entry and decides when this implementation Skill is needed.
+- `apple-orchestration` remains the default iOS main entry and decides when this implementation Skill is needed.
 - Test code writing is internal to `test-implementation`.
-- Targeted validation, affected-test selection, build/test failure digest, and final evidence judgement route to `ios-verification`.
+- Targeted validation, affected-test selection, build/test failure digest, and final evidence judgement route to `apple-verification`.
 - Static review routes to independent reviewer subAgent `code-review`.
-- Runtime diagnosis routes to `debugging`.
+- Runtime diagnosis routes to `apple-debugging`.
 - Performance evidence routes to `ios-performance`.
 - Build/release configuration routes to `xcode-build`.
 - Device/simulator automation routes to `ios-automation`.
 - Apple official facts route to `apple-docs`.
 - Visual/product design direction routes to `ui-ux-design-system` before implementation.
-- Figma / Sketch Design Evidence, Canonical UI IR, iOS bindings and task-scoped Agent Packet route through `design-context-compiler` before implementation.
+- Figma / Sketch Design Evidence, Canonical UI IR, iOS bindings and task-scoped Agent Packet route through `apple-design-context-compiler` before implementation.
 - SDK architecture and SwiftUI Liquid Glass are internal modes/references of this Skill, not standalone implementation Skills.
-- Optional final evidence routes to `ios-verification` only when required.
+- Optional final evidence routes to `apple-verification` only when required.

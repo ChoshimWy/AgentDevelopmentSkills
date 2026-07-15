@@ -29,7 +29,7 @@ class StructuredAdapterContractTests(unittest.TestCase):
                     "id": "apple-verify",
                     "capability": "verification.apple.affected-tests",
                     "provider": "apple",
-                    "binding": {"kind": "skill", "name": "ios-verification", "mode": "affected-tests"},
+                    "binding": {"kind": "skill", "name": "apple-verification", "mode": "affected-tests"},
                 }
             ],
         }
@@ -84,7 +84,7 @@ class StructuredAdapterContractTests(unittest.TestCase):
         self.assertEqual(self.request["node_id"], "apple-verify")
         self.assertEqual(self.request["capability"], "verification.apple.affected-tests")
         self.assertEqual(self.request["provider"], "apple")
-        self.assertEqual(self.request["binding"]["name"], "ios-verification")
+        self.assertEqual(self.request["binding"]["name"], "apple-verification")
         self.assertEqual(self.request["task_context"], self.context)
         self.assertEqual(self.request["checkpoints"], self.context["checkpoints"])
         self.context["target_modules"].append("MutatedLater")

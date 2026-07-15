@@ -15,6 +15,7 @@ def main() -> int:
     commands = [
         [sys.executable, "scripts/validate_schemas.py"],
         [sys.executable, "scripts/validate_manifests.py"],
+        [sys.executable, "scripts/validate_skill_naming.py"],
         [sys.executable, "scripts/build_migration_audit.py", "--check"],
         [sys.executable, "scripts/validate_apple_package.py"],
         [sys.executable, "scripts/compare_apple_routes.py"],

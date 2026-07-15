@@ -25,7 +25,7 @@ Recommended:
   - Preferred: keep this script in the target Xcode project root as ./codex_verify.sh
   - Fallback: install it globally as ~/.codex/bin/codex_verify
   - Ask all agents to use one of the two entrypoints instead of裸跑 xcodebuild
-  - Let iOSAgentSkills ios-verification delegate into the project wrapper first,
+  - Let iOSAgentSkills apple-verification delegate into the project wrapper first,
     then fall back to the global wrapper automatically
   - For targeted XCTest, prefer --build-check and pass only selectors/actions
     (for example -only-testing:Bundle/Class/test test); keep workspace,
@@ -89,8 +89,8 @@ resolve_worktree_session_helper() {
   local candidate
   for candidate in \
     "${CODEX_WORKTREE_SESSION_HELPER:-}" \
-    "$SCRIPT_DIR/../skills/ios-verification/scripts/worktree_session.py" \
-    "$HOME/.codex/skills/ios-verification/scripts/worktree_session.py"
+    "$SCRIPT_DIR/../skills/apple-verification/scripts/worktree_session.py" \
+    "$HOME/.codex/skills/apple-verification/scripts/worktree_session.py"
   do
     [[ -n "$candidate" ]] || continue
     if [[ -f "$candidate" && ! -L "$candidate" ]]; then

@@ -93,6 +93,6 @@ For failures, return only the minimum useful bundle:
 
 ## Escalation
 
-- If UI smoke fails because the app cannot build or install, route to `ios-verification` or `xcode-build`.
-- If UI smoke reveals crash, hang, leak, or runtime symptoms, route to `debugging`.
+- If UI smoke fails because the app cannot build or install, route to `apple-verification` or `xcode-build`.
+- If UI smoke reveals crash, hang, leak, or runtime symptoms, route to `apple-debugging`.
 - If UI smoke reveals frame drops, memory pressure, or slow launch, route to `ios-performance`.

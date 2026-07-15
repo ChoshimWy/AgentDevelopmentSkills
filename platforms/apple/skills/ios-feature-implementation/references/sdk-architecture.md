@@ -16,7 +16,7 @@ Covers:
 
 Does not cover:
 - Xcode signing, archive/export, build-script, or CI mechanics; route those to `xcode-build`.
-- Runtime crash/leak/hang diagnosis; route those to `debugging`.
+- Runtime crash/leak/hang diagnosis; route those to `apple-debugging`.
 - Pure test implementation; use `test-implementation` mode in `ios-feature-implementation`.
 
 ## Architecture Rules

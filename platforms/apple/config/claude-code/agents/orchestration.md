@@ -26,11 +26,11 @@
 - `Agent(subagent_type="Explore", prompt=<reviewer.md>)` 独立静态审查（未参与实现）
 
 按需启动：
-- `Agent(subagent_type="general-purpose", prompt=<tester.md>)` 验证（或 `Skill("ios-verification")`）
+- `Agent(subagent_type="general-purpose", prompt=<tester.md>)` 验证（或 `Skill("apple-verification")`）
 
 CP2 Validation Baseline Freeze：锁定验证命令、workspace、scheme、destination。
 
-所有验证统一进入 `ios-verification`：日常使用 `quick-verify`，由 `codex_verify` + shared build-queue 提供 exact-request fingerprint、in-flight attach 与成功缓存；Verification Session、受影响测试、environment/target/evidence fingerprint 和相同或更强跨请求复用当前仍是独立 scaffold/合同，只有实际串联并产出证据时才能宣称执行。用户要求可归档证据、发布前、高风险、依赖或项目配置变更时升级 checkpoint/final lane。不得使用 Xcode MCP 或裸 `xcodebuild`。
+所有验证统一进入 `apple-verification`：日常使用 `quick-verify`，由 `codex_verify` + shared build-queue 提供 exact-request fingerprint、in-flight attach 与成功缓存；Verification Session、受影响测试、environment/target/evidence fingerprint 和相同或更强跨请求复用当前仍是独立 scaffold/合同，只有实际串联并产出证据时才能宣称执行。用户要求可归档证据、发布前、高风险、依赖或项目配置变更时升级 checkpoint/final lane。不得使用 Xcode MCP 或裸 `xcodebuild`。
 
 ### Phase 5: 聚合与回写
 主 Agent 审查 reviewer 和 tester 的输出：
@@ -40,7 +40,7 @@ CP2 Validation Baseline Freeze：锁定验证命令、workspace、scheme、desti
 - 若用户要求正式 HTML 文档，只在本阶段整理 source packet；最终生成交给 `html-docs`
 
 ### Phase 6: 默认收口（CP3）
-主 Agent 基于定向验证/必要验证与独立 reviewer subAgent `code-review` 结论裁决默认收口；用户显式要求、发布前自检或高风险时，再按需执行 `Skill("ios-verification")`。
+主 Agent 基于定向验证/必要验证与独立 reviewer subAgent `code-review` 结论裁决默认收口；用户显式要求、发布前自检或高风险时，再按需执行 `Skill("apple-verification")`。
 
 验证默认边界：
 - 默认只执行最窄定向单测：优先 `-only-testing` 到单个 test case / test class，其次最小受影响 test file / bundle

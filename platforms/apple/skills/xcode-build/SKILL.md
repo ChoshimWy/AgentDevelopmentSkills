@@ -50,12 +50,12 @@ Use this Skill when the user asks about:
 
 Do not use this Skill when:
 
-- 用户只是要求“最后编译验证一下”或“跑一次 xcodebuild”；使用 `ios-verification`。
+- 用户只是要求“最后编译验证一下”或“跑一次 xcodebuild”；使用 `apple-verification`。
 - 用户主要在问在哪个 Simulator / 真机上安装、启动、截图、导航；使用 `ios-automation`。
-- 用户需要编写或执行最窄测试；使用 `ios-feature-implementation(test-implementation)`；执行最窄验证使用 `ios-verification`。
+- 用户需要编写或执行最窄测试；使用 `ios-feature-implementation(test-implementation)`；执行最窄验证使用 `apple-verification`。
 - 用户需要代码质量审查；使用 `code-review`。
-- 用户需要分析 crash、泄漏、卡顿；使用 `debugging` / `ios-performance`。
-- 用户需要判断现有验证证据是否足够；使用 `ios-verification`。
+- 用户需要分析 crash、泄漏、卡顿；使用 `apple-debugging` / `ios-performance`。
+- 用户需要判断现有验证证据是否足够；使用 `apple-verification`。
 
 ## Agent Rules
 
@@ -63,9 +63,9 @@ Do not use this Skill when:
 
 - Treat this Skill as build configuration / delivery design, not default final verification.
 - Do not run validation-type `xcodebuild` as the main purpose of this Skill.
-- If actual project-environment verification is required, hand off to `ios-verification`.
+- If actual project-environment verification is required, hand off to `apple-verification`.
 - If device / simulator automation is required, hand off to `ios-automation`.
-- If a build error log must be analyzed, prefer `ios-verification` first.
+- If a build error log must be analyzed, prefer `apple-verification` first.
 
 ### Build Configuration Rules
 
@@ -115,7 +115,7 @@ For Archive / Export work, specify:
 - Default local builds should use Xcode system DerivedData: `~/Library/Developer/Xcode/DerivedData`.
 - Do not introduce temporary public `-derivedDataPath` strategies as default.
 - Do not reintroduce old public `XCODE_DERIVED_DATA_*` or `CODEX_DERIVED_DATA_SLOT` configuration.
-- For validation-type builds, delegate to wrapper / build-queue policy through `ios-verification`.
+- For validation-type builds, delegate to wrapper / build-queue policy through `apple-verification`.
 
 ### File Header Rules
 
@@ -142,7 +142,7 @@ When adding `.swift`, `.h`, `.m`, `.mm` files and headers are required:
 4. Define the desired configuration state.
 5. Propose or apply minimal scoped changes.
 6. Document CI/local impact.
-7. If evidence is required, hand off to `ios-verification` or `ios-verification` rather than running ad-hoc verification inside this Skill.
+7. If evidence is required, hand off to `apple-verification` or `apple-verification` rather than running ad-hoc verification inside this Skill.
 8. If the desired deliverable is a formal HTML build/CI/signing strategy document, prepare a source packet and route final document generation to `html-docs`.
 9. Report residual risk and next action.
 
@@ -191,7 +191,7 @@ Return compact structured output:
   "export_strategy": "...",
   "ci_changes": [],
   "changed_files": [],
-  "validation_handoff": "none | ios-verification | ios-verification",
+  "validation_handoff": "none | apple-verification",
   "known_risks": [],
   "next_action": "none | review | verify | provide_signing_assets | blocked"
 }
@@ -222,7 +222,7 @@ Return `blocked` when:
 
 ## Escalation Rules
 
-Escalate to `ios-verification` when:
+Escalate to `apple-verification` when:
 
 - The user explicitly asks to run real project-environment build verification.
 - Build configuration changes need actual final evidence.
@@ -271,7 +271,7 @@ CI impact:
 - ...
 
 Validation handoff:
-- none | ios-verification
+- none | apple-verification
 
 Known risks:
 - ...
@@ -288,10 +288,10 @@ Next action:
 ## Relationship to Other Skills
 
 - Use this Skill for Build Settings, signing, Archive/Export, CI/CD, XCFramework, and build scripts.
-- Use `ios-verification` for one-off project-environment build verification.
+- Use `apple-verification` for one-off project-environment build verification.
 - Use `ios-automation` for simulator/device execution and app lifecycle automation.
-- Use `ios-feature-implementation(test-implementation)` for unit/UI test writing and `ios-verification` for targeted validation.
+- Use `ios-feature-implementation(test-implementation)` for unit/UI test writing and `apple-verification` for targeted validation.
 - Use `code-review` for static review of configuration changes.
-- Use `ios-verification` for compact build failure attribution.
+- Use `apple-verification` for compact build failure attribution.
 - Use `ios-feature-implementation` with `sdk-contract` mode for SDK distribution and module boundary strategy; keep concrete build/signing/archive mechanics in this Skill.
 - Use `html-docs` for final formal HTML build / CI / signing documents; this Skill provides the configuration source packet and risks.

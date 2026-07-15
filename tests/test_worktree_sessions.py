@@ -34,7 +34,7 @@ from agent_workflow.worktree_sessions.registry import SessionRegistry, new_sessi
 
 
 def load_apple_worktree_module():
-    path = ROOT / "platforms/apple/skills/ios-verification/scripts/worktree_session.py"
+    path = ROOT / "platforms/apple/skills/apple-verification/scripts/worktree_session.py"
     spec = importlib.util.spec_from_file_location("apple_worktree_session", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -49,7 +49,7 @@ def apple_platform_contexts() -> dict:
     return {
         "apple": {
             "bindings": {
-                "verification.apple.auto": {"kind": "skill", "mode": "auto", "name": "ios-verification"},
+                "verification.apple.auto": {"kind": "skill", "mode": "auto", "name": "apple-verification"},
             },
             "context": {},
             "provider_id": "ios-agent-skills",
@@ -64,7 +64,7 @@ def apple_capability_closure() -> dict:
             "provider_id": "review",
         },
         "verification.apple.auto": {
-            "binding": {"kind": "skill", "mode": "auto", "name": "ios-verification"},
+            "binding": {"kind": "skill", "mode": "auto", "name": "apple-verification"},
             "provider_id": "ios-agent-skills",
         },
     }
@@ -323,7 +323,7 @@ class GateTests(unittest.TestCase):
                     "binding": (
                         {"kind": "skill", "mode": "verify", "name": "session-worktree"}
                         if pure_git
-                        else {"kind": "skill", "mode": "auto", "name": "ios-verification"}
+                        else {"kind": "skill", "mode": "auto", "name": "apple-verification"}
                     ),
                     "capability": "verification.git.repository" if pure_git else "verification.apple.auto",
                     "id": "verify",
@@ -660,7 +660,7 @@ mkdir "$CODEX_VERIFY_JOB_DIR/verification-report.json"
             home = parent / "home"
             home.mkdir()
             wrapper = ROOT / "platforms/apple/config/codex/templates/codex_verify.example.sh"
-            helper = ROOT / "platforms/apple/skills/ios-verification/scripts/worktree_session.py"
+            helper = ROOT / "platforms/apple/skills/apple-verification/scripts/worktree_session.py"
             env = {
                 **os.environ,
                 "HOME": str(home),

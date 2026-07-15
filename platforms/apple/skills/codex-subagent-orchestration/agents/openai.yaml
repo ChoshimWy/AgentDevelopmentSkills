@@ -1,6 +1,0 @@
-interface:
-  display_name: "Apple 工作流编排"
-  short_description: "在共享工作流合同上补充 iOS/Xcode/CocoaPods 路由"
-  default_prompt: "先使用 $workflow-orchestration 的通用 checkpoint 与角色合同，再使用 $codex-subagent-orchestration 将实现路由到 $ios-feature-implementation、将验证路由到 $ios-verification；Apple review 必须组合 $code-review 与 $apple-code-review。"
-policy:
-  allow_implicit_invocation: false

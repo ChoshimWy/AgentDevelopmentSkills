@@ -42,10 +42,10 @@ Use this Skill when the task needs:
 Do not use this Skill when:
 
 - The task is Build Settings, signing, certificates, Archive, Export, or CI/CD; use `xcode-build`.
-- The task is one-off project-environment build verification; use `ios-verification`.
-- The task is test writing; use `ios-feature-implementation(test-implementation)`. For affected unit test selection, use `ios-verification`.
+- The task is one-off project-environment build verification; use `apple-verification`.
+- The task is test writing; use `ios-feature-implementation(test-implementation)`. For affected unit test selection, use `apple-verification`.
 - The task is normal feature implementation; use implementation Skills.
-- The task is crash or runtime root-cause analysis; use `debugging`.
+- The task is crash or runtime root-cause analysis; use `apple-debugging`.
 - The task is performance profiling, benchmark, `xctrace`, or Instruments; use `ios-performance`.
 
 ## Agent Rules
@@ -56,7 +56,7 @@ Do not use this Skill when:
 - Once a mode is selected, keep the chain in that mode unless the user asks to switch or the current mode is blocked.
 - Do not mix Simulator UDID, `xcodebuild` destination id, and `devicectl` device identifier.
 - If the problem narrows to signing/certificates/Archive/CI, route to `xcode-build`.
-- If the problem narrows to build verification, route to `ios-verification`.
+- If the problem narrows to build verification, route to `apple-verification`.
 
 ### Simulator Rules
 
@@ -94,7 +94,7 @@ Do not use this Skill when:
 - Validation-type `xcodebuild` invoked by automation scripts should use the project wrapper / shared build-queue daemon.
 - If no scheme is explicit, prefer schemes bound to unit test targets / bundles such as `*Tests`.
 - Do not use this Skill as the default final validation step for all code changes.
-- If final evidence is required, route through `ios-verification`.
+- If final evidence is required, route through `apple-verification`.
 
 ### Evidence Rules
 
@@ -115,7 +115,7 @@ Do not use this Skill when:
 - Do not paste full device logs.
 - Do not dump full accessibility tree unless requested.
 - Include only relevant nodes or failure excerpts.
-- For build/test failure logs, use `ios-verification`.
+- For build/test failure logs, use `apple-verification`.
 
 ## Device Selection Strategy
 
@@ -245,7 +245,7 @@ Return compact structured output:
     "logs": "path-or-summary"
   },
   "first_failure": null,
-  "next_action": "none | retry | route-xcode-build | route-ios-verification | route-debugging | blocked"
+  "next_action": "none | retry | route-xcode-build | route-apple-verification | route-apple-debugging | blocked"
 }
 ```
 
@@ -281,16 +281,16 @@ Escalate to `xcode-build` when:
 
 - Signing, certificates, profiles, Build Settings, Archive, Export, or CI configuration blocks automation.
 
-Escalate to `ios-verification` when:
+Escalate to `apple-verification` when:
 
 - The user asks for final build verification.
 - The issue is project-environment build evidence, not device automation.
 
-Escalate to `ios-feature-implementation(test-implementation)` when test code is needed; escalate to `ios-verification` when targeted validation is needed:
+Escalate to `ios-feature-implementation(test-implementation)` when test code is needed; escalate to `apple-verification` when targeted validation is needed:
 
 - The task is writing XCTest/XCUITest code or selecting affected tests.
 
-Escalate to `debugging` when:
+Escalate to `apple-debugging` when:
 
 - The app launches but crashes, hangs, leaks, or shows runtime symptoms.
 
@@ -298,7 +298,7 @@ Escalate to `ios-performance` when:
 
 - The task becomes startup performance, frame rate, CPU/memory/energy profiling, `xctrace`, or Instruments.
 
-Escalate to `ios-verification` when:
+Escalate to `apple-verification` when:
 
 - Automation-triggered build/test logs need compact failure attribution.
 
@@ -321,7 +321,7 @@ Evidence:
 - screenshot: <path or none>
 - app_state: <path or summary>
 First failure: none | ...
-Next action: none | route-xcode-build | route-debugging | blocked
+Next action: none | route-xcode-build | route-apple-debugging | blocked
 ```
 
 ## Optional Evidence Verification
@@ -329,7 +329,7 @@ Next action: none | route-xcode-build | route-debugging | blocked
 - `ios-automation` is not the default final validation step for all code changes.
 - Default closure remains targeted validation / necessary validation plus independent reviewer subAgent `code-review`.
 - Use automation only when user asks, UI/device evidence is needed, or the main Agent decides device-level evidence is required.
-- If full project-environment build evidence is needed, use `ios-verification` / `ios-verification`.
+- If full project-environment build evidence is needed, use `apple-verification` / `apple-verification`.
 - Any optional full verification evidence must come from target project root, not sandbox-only results.
 
 ## Reference Resources
@@ -346,8 +346,8 @@ Next action: none | route-xcode-build | route-debugging | blocked
 
 - Business, SwiftUI, UIKit, mixed UI, advanced Swift, and refactor implementation: `ios-feature-implementation` with the matching internal mode.
 - Build Settings, signing, Archive/Export, CI/CD: `xcode-build`.
-- Final build verification: `ios-verification`.
-- Test writing: `ios-feature-implementation(test-implementation)`; affected tests and validation: `ios-verification`.
-- Runtime root-cause analysis: `debugging`.
+- Final build verification: `apple-verification`.
+- Test writing: `ios-feature-implementation(test-implementation)`; affected tests and validation: `apple-verification`.
+- Runtime root-cause analysis: `apple-debugging`.
 - Performance profiling: `ios-performance`.
-- Build/test log attribution: `ios-verification`.
+- Build/test log attribution: `apple-verification`.

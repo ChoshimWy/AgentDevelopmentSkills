@@ -184,7 +184,7 @@ Next action: review | publish | revise | blocked
 
 ## Relationship to Other Skills
 
-- iOS workflow docs can summarize outputs from `codex-subagent-orchestration`, `ios-verification`, `code-review`, `ios-feature-implementation`, and related Skills.
+- iOS workflow docs can summarize outputs from `apple-orchestration`, `apple-verification`, `code-review`, `ios-feature-implementation`, and related Skills.
 - App Store release notes route to `app-store-changelog`.
 - Visual design guidance routes to `ui-ux-design-system`.
 - Code implementation routes to iOS implementation Skills.

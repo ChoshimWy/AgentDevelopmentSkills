@@ -36,19 +36,20 @@ Repository / Task / Target Files
 - **Runtime 状态机**：覆盖 retry、timeout、cancel、stale、approval 和 resume。
 - **资源调度**：确定性锁顺序，记录 requested、acquired、released、timed-out 与 cancelled 事件。
 - **可恢复 Ledger**：append-only JSONL、Plan fingerprint 校验和中断恢复。
-- **离线合同校验**：22 个版本化 JSON Schema、Manifest/Provider/Install Plan/Migration Audit 校验和非法 golden 样例。
+- **离线合同校验**：23 个版本化 JSON Schema、Manifest/Provider/Install Plan/Migration Audit 校验和非法 golden 样例。
 - **仓内 Apple Provider**：`platforms/apple/provider/manifest.json` 默认参与源码态和安装态解析；P2A 外部 Provider 路径仍保留为兼容测试，重复 Provider 不静默覆盖。
 - **选择安装**：`agent-skills install` 支持 `--core-only`、单/多平台、`all` 与显式 `--discipline`；版本化 `package_requires` 自动求必需依赖闭包，并记录选择原因和解析边。
 - **单一全局 AGENTS**：Core、共享 Discipline 与已选平台只贡献带 scope 的 Fragment，按依赖拓扑稳定合成一个受管 `AGENTS.md`；Fragment/Skill 冲突及未受管目标均 fail-closed。
 - **共享 Discipline**：`documentation`、`git`、`workflow`、`review`、`design` 各自拥有独立 Manifest、版本、权限与安装边界；Apple 通过 `package_requires` 获得闭包，不保留重复可安装副本。
 - **平台真值**：Apple 为 `implemented`；Android、Web、Backend、Desktop 为 `bootstrap-only`，只能输出 `bootstrap_required`，不会产生 phantom Binding 或 ready Plan。
-- **迁移审计 v2**：不可变 iOSAgentSkills 来源清单通过 relocation/transformation map 映射到当前包清单；195 项 retained、58 项 relocated、34 项 transformed、1 项 removed，并记录 14 个仓内 addition；License provenance 明确标为 pending。
+- **迁移审计 v2**：不可变 iOSAgentSkills 来源清单通过 relocation/transformation map 映射到当前包清单；117 项 retained、113 项 relocated、57 项 transformed、1 项 removed，并记录 20 个仓内 addition；License provenance 明确标为 pending。
 - **安装完整性**：Install Plan/Lock v2 冻结 package source hash、Capability Provider、flattened asset allowlist、rule trace 及完整 path/hash/canonical mode；篡改、额外文件、symlink、Binding 越界、Provider 权限扩大、兼容越界及 staged TOCTOU 均在 swap 前 fail-closed。
 - **显式 Runtime Config**：Codex profiles/shared config 已迁入 `runtime-configs/codex`；只有显式 `--runtime-config codex` 才会进入安装闭包，选择 Apple 不会隐式改写全局工具行为。
 - **结构化 Adapter**：冻结 Provider binding/hash 与每次外部调用的 `invocation_id`，校验 request/result identity、验证缺口、artifact hash 与独立 reviewer actor。
 - **iOS 自动验证门禁**：Apple code DAG 固定为 `implementation → affected-tests → verification.apple.auto → review → report`；`auto` 必须给出实际执行或已接受证据，否则只能显式返回 `no_test_reason`，测试选择本身不能宣称验证完成。Apple 验证已移除 Xcode MCP 快车道，统一为 `quick-verify` / checkpoint / final lane，经 `codex_verify` + shared build-queue 执行。当前 wrapper 已落地 exact-request fingerprint、in-flight attach、成功缓存、原子入队与结构化 artifact 校验；Verification Session、三层 fingerprint、same-or-stronger 跨请求复用、失败缓存、优先级与 `.xctestrun` 自动复用目前是可执行 scaffold / 后续集成合同，不得当作已执行 daemon 证据。
 - **双路径基线**：`doc-only / code-small / code-medium / code-risky` 四类 legacy/Core route comparison 使用 canonical baseline hash。
 - **跨版本 Conformance**：GitHub Actions 配置 Python 3.11–3.14 matrix。
+- **Skill 命名门禁**：`skill-naming-policy.json` 规定共享、平台、目标系统、工具链与显式例外生命周期的稳定命名；`scripts/validate_skill_naming.py` 校验扁平命名空间、目录/frontmatter 一致性、平台前缀、canonical orchestration、deprecated binding 与 bootstrap-only phantom Skill。人类可读规范见 [`docs/skill-naming-convention.html`](docs/skill-naming-convention.html)。
 
 ## 项目结构
 
@@ -71,6 +72,7 @@ AgentDevelopmentSkills/
 ├── runtime-configs/
 │   └── codex/                # 显式 opt-in 的 Codex profiles/shared config
 ├── migration/                # Migration Audit v2 map 与当前包 inventory
+├── skill-naming-policy.json # Skill 命名机器真源
 ├── schemas/                  # 版本化 JSON Schema
 ├── src/agent_workflow/
 │   ├── discovery/            # 只读项目画像
@@ -232,6 +234,7 @@ PYTHONPATH=src python3 scripts/run_conformance.py
 ```bash
 PYTHONPATH=src python3 scripts/validate_schemas.py
 PYTHONPATH=src python3 scripts/validate_manifests.py
+python3 scripts/validate_skill_naming.py
 PYTHONPATH=src python3 scripts/validate_apple_package.py
 PYTHONPATH=src python3 scripts/run_ios_installed_workflow_smoke.py
 python3 platforms/apple/scripts/lint_skill_schema.py --skills-dir platforms/apple/skills
@@ -241,11 +244,11 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 
 当前基线：
 
-- 216 个 unittest
-- 22 个 JSON Schema
+- 233 个 unittest
+- 23 个 JSON Schema
 - 7 个非法 contract golden
 - 13 个 package Manifest：Core、Apple、4 个 bootstrap-only 平台、5 个共享 Discipline 与 1 个显式 Codex Runtime Config；外部 Provider fixture 仅作兼容回归
-- 288 个 iOSAgentSkills 来源受控文件：195 retained、58 relocated、34 transformed、1 removed，另有 20 additions；当前为 13 个 Apple Skills + 8 个共享 Skills
+- 288 个 iOSAgentSkills 来源受控文件：117 retained、113 relocated、57 transformed、1 removed，另有 20 additions；当前为 13 个 Apple Skills + 8 个共享 Skills，历史名称不保留兼容副本
 - 4 个 Apple legacy/Core route comparison cases
 
 ## 架构与实施文档

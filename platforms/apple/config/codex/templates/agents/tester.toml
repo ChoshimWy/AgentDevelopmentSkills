@@ -10,12 +10,12 @@ developer_instructions = """
 硬约束：
 - 默认先做 explorer 式验证分析。
 - 默认只执行最窄定向单测；真机 / 模拟器验证不属于默认验证执行面。
-- 所有验证统一使用 `ios-verification` + `codex_verify` + shared build-queue；日常走 `quick-verify`，当前复用 exact-request 成功缓存并附着相同 in-flight fingerprint。Verification Session / same-or-stronger 跨请求复用仅在独立 scaffold 被实际串联且有结构化证据时声明。
+- 所有验证统一使用 `apple-verification` + `codex_verify` + shared build-queue；日常走 `quick-verify`，当前复用 exact-request 成功缓存并附着相同 in-flight fingerprint。Verification Session / same-or-stronger 跨请求复用仅在独立 scaffold 被实际串联且有结构化证据时声明。
 - 禁止使用 Xcode MCP、第三方 Xcode GUI MCP、AppleScript 或裸 `xcodebuild` 执行验证。
 - 需要可归档证据、发布前/高风险/依赖或项目配置变更时，建议主 Agent 升级 checkpoint/final lane。
 - "failure_attribution_type" 仅用 code_bug/test_bug/env_issue/unknown。
 - 仅在明确需要时声明 needs_test_code，由主 Agent 转交 ios-feature-implementation(test-implementation)。
-- 默认完成态由主 Agent 基于定向验证与独立 reviewer subAgent code-review 决定；ios-verification 仅按需补强。
+- 默认完成态由主 Agent 基于定向验证与独立 reviewer subAgent code-review 决定；apple-verification 仅按需补强。
 
 输出必须显式包含这些字段：
 - "suggested_validation"

@@ -123,7 +123,7 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(first.instructions.count(MANAGED_HEADER), 1)
         self.assertIn("fragment:core.global", first.instructions)
         self.assertIn("fragment:platform.apple.global", first.instructions)
-        self.assertIn("ios-verification", {item["name"] for item in first.plan["skills"]})
+        self.assertIn("apple-verification", {item["name"] for item in first.plan["skills"]})
         self.assertEqual(
             first.plan["bindings"]["implementation.apple"]["binding"]["name"],
             "ios-feature-implementation",
@@ -142,7 +142,7 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(skill_packages["ui-ux-design-system"], "design")
         self.assertEqual(skill_packages["design-ir-compiler"], "design")
         self.assertEqual(skill_packages["apple-design-source"], "apple")
-        self.assertEqual(skill_packages["design-context-compiler"], "apple")
+        self.assertEqual(skill_packages["apple-design-context-compiler"], "apple")
         self.assertEqual(len(skill_packages), len(first.plan["skills"]))
         self.assertNotIn("report.apple.html", first.plan["bindings"])
         self.assertEqual(first.plan["bindings"]["documentation.html"]["package"], "documentation")
@@ -174,7 +174,7 @@ class InstallationTests(unittest.TestCase):
             first = install_bundle(apple, target)
             second = install_bundle(apple, target)
             self.assertEqual(first["fingerprint"], second["fingerprint"])
-            self.assertTrue((target / "skills" / "ios-verification" / "SKILL.md").is_file())
+            self.assertTrue((target / "skills" / "apple-verification" / "SKILL.md").is_file())
             self.assertTrue((target / "skills" / "code-review" / "SKILL.md").is_file())
             self.assertTrue((target / "skills" / "workflow-orchestration" / "SKILL.md").is_file())
             self.assertTrue((target / "skills" / "apple-code-review" / "SKILL.md").is_file())
@@ -259,7 +259,7 @@ class InstallationTests(unittest.TestCase):
 
             shutil.rmtree(target)
             install_bundle(bundle, target)
-            skill_file = target / "skills" / "ios-verification" / "SKILL.md"
+            skill_file = target / "skills" / "apple-verification" / "SKILL.md"
             skill_file.chmod(0o600)
             with self.assertRaisesRegex(ContractError, "modified"):
                 install_bundle(bundle, target)
@@ -313,7 +313,7 @@ class InstallationTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "injected"):
                     install_bundle(core, target)
             self.assertEqual((target / "AGENTS.md").read_bytes(), previous_agents)
-            self.assertTrue((target / "skills" / "ios-verification" / "SKILL.md").is_file())
+            self.assertTrue((target / "skills" / "apple-verification" / "SKILL.md").is_file())
             self.assertEqual(load(target / ".agent-skills" / "install-lock.json")["fingerprint"], apple.plan["fingerprint"])
 
     def test_failed_rollback_preserves_recovery_backup(self) -> None:
@@ -350,7 +350,7 @@ class InstallationTests(unittest.TestCase):
                     install_bundle(core, target)
             recovery_text = str(raised.exception).split("recovery backup preserved at ", 1)[1].split(": restore", 1)[0]
             recovery = Path(recovery_text)
-            self.assertTrue((recovery / "skills" / "ios-verification" / "SKILL.md").is_file())
+            self.assertTrue((recovery / "skills" / "apple-verification" / "SKILL.md").is_file())
             self.assertTrue((target / "AGENTS.md").is_file())
             self.assertFalse((target / "skills").exists())
 

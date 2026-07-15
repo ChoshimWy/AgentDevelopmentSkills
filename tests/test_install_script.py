@@ -326,7 +326,7 @@ class InstallScriptTests(unittest.TestCase):
             )
             self.assertEqual(second["activation"]["managed_file_updates"], [])
             self.assertEqual(len(second["activation"]["managed_files_unchanged"]), 13)
-            self.assertTrue((target / "skills" / "ios-verification" / "SKILL.md").is_file())
+            self.assertTrue((target / "skills" / "apple-verification" / "SKILL.md").is_file())
             self.assertTrue((target / "agents" / "reviewer.toml").is_file())
             self.assertTrue((target / "bin" / "codex_verify").is_file())
             self.assertEqual((target / "bin" / "codex_verify").stat().st_mode & 0o777, 0o755)
@@ -350,7 +350,7 @@ class InstallScriptTests(unittest.TestCase):
             )
             self.assertIn("--worktree-session-request", wrapper_help.stdout)
             subprocess.run(
-                [str(target / "skills" / "ios-verification" / "scripts" / "worktree_session.py"), "--help"],
+                [str(target / "skills" / "apple-verification" / "scripts" / "worktree_session.py"), "--help"],
                 cwd=directory,
                 env=isolated_environment,
                 check=True,

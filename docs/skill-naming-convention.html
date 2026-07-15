@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>跨平台 Skill 命名规范 v1</title>
+  <style>
+    :root{color-scheme:light;--bg:#f7f8fb;--panel:#fff;--soft:#f1f5f9;--text:#172033;--muted:#64748b;--border:#e2e8f0;--accent:#2563eb;--accent-soft:#dbeafe;--code-bg:#0f172a;--code-text:#e5e7eb;--info-bg:#eff6ff;--info-border:#93c5fd;--warn-bg:#fff7ed;--warn-border:#fdba74;--ok-bg:#ecfdf5;--ok-border:#86efac}
+    @media(prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#0b1020;--panel:#111827;--soft:#1f2937;--text:#e5e7eb;--muted:#9ca3af;--border:#374151;--accent:#60a5fa;--accent-soft:rgba(96,165,250,.18);--code-bg:#020617;--code-text:#e2e8f0;--info-bg:rgba(37,99,235,.18);--info-border:rgba(147,197,253,.55);--warn-bg:rgba(245,158,11,.16);--warn-border:rgba(251,191,36,.55);--ok-bg:rgba(16,185,129,.15);--ok-border:rgba(110,231,183,.5)}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.page{width:min(1080px,calc(100% - 32px));margin:32px auto 64px}.hero,.card,nav{background:var(--panel);border:1px solid var(--border);border-radius:16px}.hero{padding:34px}.hero h1{margin:0 0 10px;font-size:clamp(28px,4vw,42px);line-height:1.2}.lead,.muted{color:var(--muted)}.meta{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px}.meta dd{margin:0}nav,.card{margin-top:18px;padding:24px}nav ol{columns:2;margin-bottom:0}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}h2{margin-top:0}h3{margin-top:24px}.chips{display:flex;flex-wrap:wrap;gap:8px}.chip{padding:3px 9px;border-radius:999px;background:var(--accent-soft);color:var(--accent)}table{width:100%;border-collapse:collapse;display:block;overflow-x:auto}th,td{min-width:150px;padding:10px 12px;text-align:left;vertical-align:top;border:1px solid var(--border)}th{background:var(--soft)}pre{overflow:auto;padding:15px;border-radius:10px;background:var(--code-bg);color:var(--code-text)}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}:not(pre)>code{padding:2px 5px;border-radius:5px;background:var(--soft)}.callout{padding:13px 15px;border:1px solid;border-radius:10px}.info{background:var(--info-bg);border-color:var(--info-border)}.warn{background:var(--warn-bg);border-color:var(--warn-border)}.ok{background:var(--ok-bg);border-color:var(--ok-border)}footer{text-align:center;color:var(--muted);padding:22px}@media(max-width:720px){.page{width:min(100% - 20px,1080px);margin-top:10px}.hero,.card,nav{padding:19px;border-radius:12px}nav ol{columns:1}.meta{grid-template-columns:1fr}}
+  </style>
+</head>
+<body><main class="page">
+  <header class="hero">
+    <h1>跨平台 Skill 命名规范 v1</h1>
+    <p class="lead">让 Skill ID 表达稳定职责与平台作用域，而不是绑定当前 Agent runtime、组织方式或临时实现机制。</p>
+    <dl class="meta"><dt>生效日期</dt><dd>2026-07-15</dd><dt>适用范围</dt><dd><code>disciplines/*/skills</code>、<code>platforms/*/skills</code> 与未来 Stack Skills</dd><dt>机器真源</dt><dd><code>skill-naming-policy.json</code></dd><dt>Schema</dt><dd><code>schemas/skill-naming-policy-v1.schema.json</code></dd><dt>门禁</dt><dd><code>python3 scripts/validate_skill_naming.py</code></dd></dl>
+    <div class="chips"><span class="chip">stable scope</span><span class="chip">flat namespace</span><span class="chip">platform prefix</span><span class="chip">fail-closed</span></div>
+  </header>
+  <nav aria-label="目录"><h2>目录</h2><ol><li><a href="#decision">核心决策</a></li><li><a href="#grammar">命名语法</a></li><li><a href="#scope">作用域规则</a></li><li><a href="#platforms">平台入口</a></li><li><a href="#forbidden">禁止项</a></li><li><a href="#migration">重命名规则</a></li><li><a href="#gate">新增门禁</a></li><li><a href="#examples">示例</a></li></ol></nav>
+
+  <section class="card" id="decision"><h2>1. 核心决策</h2>
+    <div class="callout ok"><strong>Canonical Apple entry：</strong><code>apple-orchestration</code>。本版本直接移除旧 runtime/vendor 命名，不保留 alias、shim 或重复 Skill。</div>
+    <ul><li>共享编排使用 <code>workflow-orchestration</code>；平台 overlay 使用 <code>&lt;platform-id&gt;-orchestration</code>。</li><li>平台 ID 必须来自 <code>platforms/&lt;id&gt;/manifest.json</code>。</li><li>Skill 名称处于扁平安装命名空间，目录名、frontmatter <code>name</code> 与 Binding target 必须一致。</li></ul>
+  </section>
+
+  <section class="card" id="grammar"><h2>2. 命名语法</h2><pre><code>^[a-z0-9]+(?:-[a-z0-9]+)*$
+maximum length: 64
+folder name == SKILL.md frontmatter name</code></pre><p>名称应简短、稳定、描述职责；平台 overlay 优先使用稳定作用域加职责。</p></section>
+
+  <section class="card" id="scope"><h2>3. 作用域规则</h2><table><thead><tr><th>类型</th><th>格式</th><th>示例</th><th>说明</th></tr></thead><tbody>
+    <tr><td>跨平台 Discipline</td><td><code>&lt;domain&gt;-&lt;role&gt;</code></td><td><code>workflow-orchestration</code>、<code>code-review</code></td><td>不得伪装成平台入口。</td></tr>
+    <tr><td>平台级能力</td><td><code>&lt;platform-id&gt;-&lt;role&gt;</code></td><td><code>apple-orchestration</code></td><td>覆盖平台 Manifest 全部 targets 时使用。</td></tr>
+    <tr><td>目标系统能力</td><td><code>&lt;target&gt;-&lt;role&gt;</code></td><td><code>ios-automation</code></td><td>能力确实收窄到目标系统时使用。</td></tr>
+    <tr><td>工具链能力</td><td><code>&lt;toolchain&gt;-&lt;role&gt;</code></td><td><code>xcode-build</code></td><td>工具链构成明确触发边界时使用。</td></tr>
+    <tr><td>生态产品能力</td><td><code>&lt;ecosystem&gt;-&lt;role&gt;</code></td><td><code>app-store-changelog</code></td><td>生态名比平台前缀更准确时使用。</td></tr>
+  </tbody></table></section>
+
+  <section class="card" id="platforms"><h2>4. 平台 canonical orchestration</h2><table><thead><tr><th>Manifest ID</th><th>Canonical name</th><th>当前状态</th></tr></thead><tbody>
+    <tr><td>apple</td><td><code>apple-orchestration</code></td><td>implemented</td></tr><tr><td>android</td><td><code>android-orchestration</code></td><td>bootstrap-only，不创建 Skill</td></tr><tr><td>web</td><td><code>web-orchestration</code></td><td>bootstrap-only，不创建 Skill</td></tr><tr><td>backend</td><td><code>backend-orchestration</code></td><td>bootstrap-only，不创建 Skill</td></tr><tr><td>desktop</td><td><code>desktop-orchestration</code></td><td>bootstrap-only，不创建 Skill</td></tr>
+  </tbody></table><div class="callout warn"><strong>禁止 phantom Skill：</strong>预留名称不表示能力已实现。只有安装真实 Provider、Binding、权限与 Conformance 后才能创建 canonical entry。</div></section>
+
+  <section class="card" id="forbidden"><h2>5. 禁止项与受控例外</h2><ul><li>所有新 Skill 禁止使用 <code>codex-</code>、<code>claude-</code>、<code>gemini-</code>、<code>openai-</code> runtime/vendor 前缀。</li><li>禁止把 <code>subagent</code>、并发数量或当前模型写成稳定平台入口。</li><li>例外只能由 policy 显式声明；当前 Apple package 的 <code>deprecated</code> 与 <code>grandfathered</code> 均为空。</li></ul><p>Apple 当前统一使用 <code>apple-orchestration</code>、<code>apple-debugging</code>、<code>apple-design-context-compiler</code> 与 <code>apple-verification</code>；真实只覆盖 iOS 的能力继续使用 <code>ios-</code>。</p></section>
+
+  <section class="card" id="migration"><h2>6. 重命名规则</h2><ol><li>在同一 change set 中移动 Skill 目录，并同步 frontmatter <code>name</code>、Provider Binding、Taxonomy、Agent prompt、当前架构文档与 lint。</li><li>默认直接移除旧名称，不创建 alias、shim 或重复可安装副本；确需兼容时必须由用户或发布策略明确要求，并在 policy 中声明生命周期。</li><li>不可变迁移来源、迁移映射的 <code>source_path</code> 与 legacy comparison fixtures 保留历史名称；所有当前 target path 与 package inventory 使用 canonical 名称。</li><li>重命名完成后运行命名门禁、Skill Schema lint、Migration Audit 和完整 Conformance。</li></ol></section>
+
+  <section class="card" id="gate"><h2>7. 新增或重命名门禁</h2><pre><code>python3 scripts/validate_skill_naming.py
+python3 platforms/apple/scripts/lint_skill_schema.py --skills-dir &lt;package&gt;/skills
+python3 scripts/run_conformance.py</code></pre><p>新增平台时先更新平台 Manifest 与 <code>skill-naming-policy.json</code>。bootstrap-only 平台携带 Skill、implemented 平台缺少 canonical orchestration、Binding 指向旧名称都会失败。</p></section>
+
+  <section class="card" id="examples"><h2>8. 判定示例</h2><table><thead><tr><th>候选</th><th>结论</th><th>原因</th></tr></thead><tbody><tr><td><code>apple-orchestration</code></td><td>允许</td><td>与平台 ID 和职责一致。</td></tr><tr><td><code>ios-orchestration</code></td><td>不作为 Apple canonical</td><td>Apple overlay 覆盖多个 Apple targets。</td></tr><tr><td><code>codex-subagent-orchestration</code></td><td>禁止且已移除</td><td>泄漏 runtime 与实现机制，不保留兼容副本。</td></tr><tr><td><code>android-orchestration</code></td><td>名称预留</td><td>Android 仍为 bootstrap-only，当前禁止创建。</td></tr><tr><td><code>xcode-build</code></td><td>允许</td><td>Xcode 是真实工具链边界。</td></tr></tbody></table></section>
+  <footer>AgentDevelopmentSkills · Skill Naming Policy v1 · 2026-07-15</footer>
+</main></body></html>

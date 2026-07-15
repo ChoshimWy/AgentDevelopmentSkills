@@ -55,7 +55,7 @@ Retrieve Apple official documentation facts for APIs, platform availability, WWD
   "wwdc_refs": [],
   "sample_code_refs": [],
   "known_gaps": [],
-  "next_action": "implementation-skill | debugging | xcode-build | blocked"
+  "next_action": "implementation-skill | apple-debugging | xcode-build | blocked"
 }
 ```
 
@@ -68,7 +68,7 @@ Retrieve Apple official documentation facts for APIs, platform availability, WWD
 ## Escalation Rules
 
 - Escalate to implementation Skills when the next step becomes code changes.
-- Escalate to `debugging` for runtime diagnosis.
+- Escalate to `apple-debugging` for runtime diagnosis.
 - Escalate to `xcode-build` for build, signing, archive, or CI tasks.
 
 ## Token Budget
@@ -80,7 +80,7 @@ Retrieve Apple official documentation facts for APIs, platform availability, WWD
 ## Relationship to Other Skills
 
 - Use implementation Skills for actual code changes.
-- Use `debugging` for runtime investigation.
+- Use `apple-debugging` for runtime investigation.
 - Use `xcode-build` for build and release setup.
 - Use this Skill as supporting evidence for other Apple-platform Skills.
 

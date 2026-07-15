@@ -1,0 +1,4 @@
+interface:
+  display_name: "Design Context Compiler"
+  short_description: "把共享 Canonical UI IR 扩展为 iOS bindings 与 Agent Packet"
+  default_prompt: "先由 $apple-design-source 获取 Apple 设计证据、由共享 $design-ir-compiler 生成 Canonical UI IR，再使用 $apple-design-context-compiler 解析 UIKit/SwiftUI Component Registry 并生成受 context budget 约束的 iOS Agent Packet；不要直接编写产品代码，完成后交给 $ios-feature-implementation。"

@@ -12,7 +12,7 @@ APPLE_ROOT = Path(__file__).resolve().parent.parent
 REPOSITORY_ROOT = APPLE_ROOT.parents[1]
 WORKFLOW_SKILL = REPOSITORY_ROOT / "disciplines" / "workflow" / "skills" / "workflow-orchestration"
 REVIEW_SKILL = REPOSITORY_ROOT / "disciplines" / "review" / "skills" / "code-review"
-APPLE_WORKFLOW_SKILL = APPLE_ROOT / "skills" / "codex-subagent-orchestration"
+APPLE_WORKFLOW_SKILL = APPLE_ROOT / "skills" / "apple-orchestration"
 APPLE_REVIEW_SKILL = APPLE_ROOT / "skills" / "apple-code-review"
 SHARED_AGENT_DIRS = [
     REPOSITORY_ROOT / "disciplines" / "workflow" / "assets" / "codex" / "agents",
@@ -94,7 +94,7 @@ def main() -> int:
             "Apple 工作流 Overlay",
             "workflow-orchestration",
             "ios-feature-implementation",
-            "ios-verification",
+            "apple-verification",
             "code-review",
             "apple-code-review",
             "Verification Session",
@@ -115,7 +115,7 @@ def main() -> int:
             "workflow-orchestration",
             "code-review",
             "apple-code-review",
-            "codex-subagent-orchestration",
+            "apple-orchestration",
         ],
         failures,
     )

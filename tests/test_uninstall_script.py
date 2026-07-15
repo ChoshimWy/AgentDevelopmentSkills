@@ -303,7 +303,7 @@ class UninstallScriptTests(unittest.TestCase):
                     module.run(arguments)
 
             self.assertTrue((target / "AGENTS.md").is_file())
-            self.assertTrue((target / "skills" / "ios-verification" / "SKILL.md").is_file())
+            self.assertTrue((target / "skills" / "apple-verification" / "SKILL.md").is_file())
             self.assertTrue((target / ".agent-skills" / "install-lock.json").is_file())
             self.assertTrue(injected_path.is_file())
             module._managed_state(target)

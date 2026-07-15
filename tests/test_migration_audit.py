@@ -32,9 +32,9 @@ class MigrationAuditTests(unittest.TestCase):
     def test_generated_v2_audit_matches_current_package_tree(self) -> None:
         validate_migration_audit(ROOT, self.source, self.audit, self.inventory)
         dispositions = [entry["disposition"] for entry in self.audit["entries"]]
-        self.assertEqual(dispositions.count("retained"), 194)
-        self.assertEqual(dispositions.count("relocated"), 57)
-        self.assertEqual(dispositions.count("transformed"), 36)
+        self.assertEqual(dispositions.count("retained"), 117)
+        self.assertEqual(dispositions.count("relocated"), 113)
+        self.assertEqual(dispositions.count("transformed"), 57)
         self.assertEqual(dispositions.count("removed"), 1)
         self.assertEqual(
             [(item["id"], len(item["files"])) for item in self.inventory["packages"]],

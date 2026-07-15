@@ -356,8 +356,8 @@
   ],
   "bindings": {
     "implementation.apple.ui": "ios-feature-implementation",
-    "verification.apple.affected-tests": "ios-verification",
-    "verification.apple.auto": "ios-verification",
+    "verification.apple.affected-tests": "apple-verification",
+    "verification.apple.auto": "apple-verification",
     "automation.apple.device": "ios-automation"
   }
 }</code></pre>
@@ -460,9 +460,9 @@ project-router
   },
   "module_markers": ["*.xcworkspace", "*.xcodeproj", "Package.swift"],
   "workflows": {
-    "default": ["codex-subagent-orchestration"],
+    "default": ["apple-orchestration"],
     "implementation": ["ios-feature-implementation"],
-    "verification": ["ios-verification"],
+    "verification": ["apple-verification"],
     "automation": ["ios-automation"],
     "build": ["xcode-build"],
     "performance": ["ios-performance"]
@@ -782,7 +782,7 @@ project-router
   "visual_differences": [],
   "blocking_issues": []
 }</code></pre>
-        <p>现有 Apple 链路可复用 <code>ui-ux-design-system</code>、<code>design-context-compiler</code>、<code>ios-feature-implementation</code>、<code>ios-automation</code> 与 <code>ios-verification</code>；跨平台 Core 应抽象平台无关 Design IR，再由 Apple 包维护 iOS bindings 与最终设备证据。</p>
+        <p>现有 Apple 链路可复用 <code>ui-ux-design-system</code>、<code>apple-design-context-compiler</code>、<code>ios-feature-implementation</code>、<code>ios-automation</code> 与 <code>apple-verification</code>；跨平台 Core 应抽象平台无关 Design IR，再由 Apple 包维护 iOS bindings 与最终设备证据。</p>
       </section>
 
       <section id="capability-contract" class="card">
@@ -954,7 +954,7 @@ database-migration:&lt;database-id&gt;</code></pre>
   "task": {"type": "code-medium", "risk": "medium"},
   "routing": {
     "modules": ["apps/ios"],
-    "workflows": ["workflow-orchestration", "ios-feature-implementation", "ios-verification", "code-review"]
+    "workflows": ["workflow-orchestration", "ios-feature-implementation", "apple-verification", "code-review"]
   },
   "changes": {"files": [], "summary": ""},
   "validation": {"level": "affected_tests", "status": "passed", "artifacts": []},
@@ -1018,7 +1018,7 @@ agent-skills uninstall --platform desktop --dry-run</code></pre>
     {"id": "apple", "directories": [...], "file_count": 227, "files": [...], "files_sha256": "...", "manifest_sha256": "...", "provider_manifest_sha256": "...", "root_mode": 493}
   ],
   "capability_providers": {
-    "analysis.apple": {"package": "apple", "package_version": "0.2.0", "binding": {"kind": "skill", "name": "codex-subagent-orchestration"}, "source_sha256": "..."}
+    "analysis.apple": {"package": "apple", "package_version": "0.2.0", "binding": {"kind": "skill", "name": "apple-orchestration"}, "source_sha256": "..."}
   },
   "assets": [{"package": "apple", "path": "skills/apple-docs/SKILL.md", "sha256": "...", "mode": 420}],
   "asset_summary": {"package_count": 1, "file_count": 1, "skill_count": 1, "content_sha256": "..."},
@@ -1110,7 +1110,7 @@ design-source read/write boundary test</code></pre>
           <li><span class="check">√</span> 能力选择使用 Capability ID，工作流计划使用 DAG。</li>
           <li><span class="check">√</span> Capability Contract、节点状态机、资源锁、审批与 Run Ledger 已定义。</li>
           <li><span class="check">√</span> HTML、Schema、Manifest、Lockfile、Plan 与 Ledger 的真源职责已分离。</li>
-          <li><span class="todo">□</span> 评审确认仓库命名、包边界与 schema 字段。</li>
+          <li><span class="check">√</span> Skill 命名已由 <code>skill-naming-policy.json</code>、<code>skill-naming-policy-v1.schema.json</code>、<code>validate_skill_naming.py</code> 与 <a href="skill-naming-convention.html">跨平台 Skill 命名规范 v1</a> 固化；包边界与 schema 字段继续由对应 Manifest/Schema 评审。</li>
           <li><span class="todo">□</span> 实施阶段用 fixtures 证明 iOS / Android / Web / Backend / Desktop / Monorepo 路由。</li>
           <li><span class="check">√</span> Phase 2 已验证 independent reviewer 门禁与结构化报告；后续各阶段仍需独立复验。</li>
           <li><span class="check">√</span> Phase 2C 已验证 route explain、deny-wins/locked 规则合并、缺失能力、冲突、bootstrap-only 和降级语义。</li>

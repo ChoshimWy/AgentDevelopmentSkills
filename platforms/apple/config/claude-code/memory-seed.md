@@ -11,7 +11,7 @@
 
 - 回复语言：zh-CN（代码 / 命令 / API 名保留原文）
 - 实现语言：Swift（优先），结构化并发（async/await），UI 线程 `@MainActor`
-- 日常验证使用 `ios-verification(quick-verify)`，由 `codex_verify` + shared build-queue 提供 exact-request fingerprint、in-flight attach 与成功缓存；Verification Session、受影响测试、三层 fingerprint 和 same-or-stronger 跨请求复用当前仍是独立 scaffold/合同，不得伪报已由 daemon 串联。可归档证据或高风险改动升级 checkpoint/final lane。禁止 Xcode MCP 和裸 `xcodebuild`，统一使用系统 DerivedData（`~/Library/Developer/Xcode/DerivedData`）
+- 日常验证使用 `apple-verification(quick-verify)`，由 `codex_verify` + shared build-queue 提供 exact-request fingerprint、in-flight attach 与成功缓存；Verification Session、受影响测试、三层 fingerprint 和 same-or-stronger 跨请求复用当前仍是独立 scaffold/合同，不得伪报已由 daemon 串联。可归档证据或高风险改动升级 checkpoint/final lane。禁止 Xcode MCP 和裸 `xcodebuild`，统一使用系统 DerivedData（`~/Library/Developer/Xcode/DerivedData`）
 - Workspace 优先：同时存在 `.xcworkspace` 和 `.xcodeproj` 时使用前者
 - Scheme 优先：默认选包含 `*Tests` target 的 scheme
 - 设备优先：按需完整验证时，已连接真机 > simulator
@@ -23,8 +23,8 @@
 实现 skill -> 定向验证 / no_test_reason -> reviewer subAgent(code-review)
 ```
 
-默认三步收口：实现 -> 定向验证 / no_test_reason -> reviewer subAgent(code-review)；CP3 以定向验证与审查收口为准，ios-verification 仅按需补强。
-- `ios-verification` 默认只执行最窄定向单测：优先 `-only-testing` 到单个 test case / test class，其次最小受影响 test file / bundle。
+默认三步收口：实现 -> 定向验证 / no_test_reason -> reviewer subAgent(code-review)；CP3 以定向验证与审查收口为准，apple-verification 仅按需补强。
+- `apple-verification` 默认只执行最窄定向单测：优先 `-only-testing` 到单个 test case / test class，其次最小受影响 test file / bundle。
 - 若没有可低成本执行的单测路径，则记录 `no_test_reason` 与 `suggested_validation`，不自动升级到真机 / 模拟器验证。
 
 ## Skill 路由速查
@@ -39,12 +39,12 @@
 | Swift 进阶实施 | `ios-feature-implementation` / `advanced-swift` mode |
 | 行为保持型重构 | `ios-feature-implementation` / `refactor` mode |
 | SDK 架构 / Public API 契约 | `ios-feature-implementation` / `sdk-contract` mode |
-| 验证 | `ios-verification` |
+| 验证 | `apple-verification` |
 | 静态审查 | `code-review` |
-| 证据裁决 | `ios-verification` |
-| 构建验证 | `ios-verification` |
+| 证据裁决 | `apple-verification` |
+| 构建验证 | `apple-verification` |
 | Apple 文档 | `apple-docs` |
-| 调试 | `debugging` |
+| 调试 | `apple-debugging` |
 | 性能 | `ios-performance` |
 | 自动化 | `ios-automation` |
 | 构建配置 | `xcode-build` |
@@ -76,7 +76,7 @@
 - CP0 Intent Lock — 不依赖手动 Plan Mode；修复 / 实现任务在首次写入前必须输出目标 / 范围 / 成功标准 / 档位 / 最小计划
 - CP1 Anchor Slice — 首个关键切片验收
 - CP2 Validation Baseline Freeze — 锁定 workspace / scheme / destination
-- CP3 Final Gate — 定向测试/必要验证 + 独立 reviewer subAgent `code-review` 收口；必要时再按需进入 `ios-verification`
+- CP3 Final Gate — 定向测试/必要验证 + 独立 reviewer subAgent `code-review` 收口；必要时再按需进入 `apple-verification`
 
 ## Fail-Fix-Report
 

@@ -1,0 +1,62 @@
+{
+  "$id": "https://agent-workflow.local/schemas/skill-naming-policy-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "global": {
+      "additionalProperties": false,
+      "properties": {
+        "folder_must_match_name": {"type": "boolean"},
+        "forbidden_runtime_prefixes": {"items": {"type": "string"}, "type": "array", "uniqueItems": true},
+        "max_length": {"minimum": 1, "type": "integer"},
+        "name_pattern": {"type": "string"}
+      },
+      "required": ["name_pattern", "max_length", "folder_must_match_name", "forbidden_runtime_prefixes"],
+      "type": "object"
+    },
+    "platforms": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_prefixes": {"items": {"type": "string"}, "minItems": 1, "type": "array", "uniqueItems": true},
+          "canonical_orchestration": {"type": "string"},
+          "deprecated": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {"type": "string"},
+                "remove_in": {"type": "string"},
+                "replacement": {"type": "string"}
+              },
+              "required": ["name", "replacement", "remove_in"],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "grandfathered": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {"type": "string"},
+                "reason": {"type": "string"},
+                "review_by": {"pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "type": "string"}
+              },
+              "required": ["name", "reason", "review_by"],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "provider_binding": {"type": ["string", "null"]}
+        },
+        "required": ["canonical_orchestration", "allowed_prefixes", "grandfathered", "deprecated", "provider_binding"],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "schema_version": {"const": "1.0", "type": "string"},
+    "shared_orchestration": {"const": "workflow-orchestration", "type": "string"}
+  },
+  "required": ["schema_version", "shared_orchestration", "global", "platforms"],
+  "title": "Skill Naming Policy v1",
+  "type": "object"
+}

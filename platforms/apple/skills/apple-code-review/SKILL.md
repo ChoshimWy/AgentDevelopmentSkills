@@ -27,7 +27,7 @@ Extend the shared independent review contract with Apple/Swift-specific correctn
 - `public/open` 与跨模块 API 必须有中文 `///`，说明并发、副作用与失败语义。
 - CocoaPods 私有组件必须修改真实源码并保持主项目本地 `:path` 验证基线；不得审查 `Pods/` 快照代替源码。
 - 最窄定向验证足以覆盖低风险改动时，不得仅因缺少真机/模拟器就判定证据不足。
-- 高风险工程、签名、资源、设备或依赖变更才建议升级 `ios-verification`。
+- 高风险工程、签名、资源、设备或依赖变更才建议升级 `apple-verification`。
 - API 细节参考 `references/api-design.md`。
 
 ## Inputs

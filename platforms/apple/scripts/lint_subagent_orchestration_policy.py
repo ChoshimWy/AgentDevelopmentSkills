@@ -13,7 +13,7 @@ APPLE_ROOT = Path(__file__).resolve().parent.parent
 REPOSITORY_ROOT = APPLE_ROOT.parents[1]
 WORKFLOW_ROOT = REPOSITORY_ROOT / "disciplines" / "workflow"
 REVIEW_ROOT = REPOSITORY_ROOT / "disciplines" / "review"
-APPLE_WORKFLOW = APPLE_ROOT / "skills" / "codex-subagent-orchestration"
+APPLE_WORKFLOW = APPLE_ROOT / "skills" / "apple-orchestration"
 
 
 def display(path: Path) -> str:
@@ -64,6 +64,7 @@ def main() -> int:
     require_binding(workflow_manifest, "workflow.orchestration", "workflow-orchestration", "orchestrate", failures)
     require_binding(workflow_manifest, "reporting.delivery", "workflow-orchestration", "report", failures)
     require_binding(review_manifest, "review.independent", "code-review", None, failures)
+    require_binding(provider_manifest, "analysis.apple", "apple-orchestration", "analysis-only", failures)
     require_binding(provider_manifest, "review.apple.static", "apple-code-review", None, failures)
 
     requires = {item["id"] for item in apple_manifest.get("package_requires", [])}
@@ -87,7 +88,7 @@ def main() -> int:
     )
     require_not_contains(
         shared_skill,
-        ["xcodebuild", "codex_verify", "ios-verification", "ios-feature-implementation"],
+        ["xcodebuild", "codex_verify", "apple-verification", "ios-feature-implementation"],
         failures,
     )
     require_contains(
@@ -96,7 +97,7 @@ def main() -> int:
             "Apple 工作流 Overlay",
             "workflow-orchestration",
             "ios-feature-implementation",
-            "ios-verification",
+            "apple-verification",
             "apple-code-review",
             "Verification Session",
             "CocoaPods",
@@ -105,7 +106,7 @@ def main() -> int:
     )
     require_contains(
         APPLE_WORKFLOW / "agents" / "openai.yaml",
-        ["$workflow-orchestration", "$ios-feature-implementation", "$ios-verification", "$code-review"],
+        ["$workflow-orchestration", "$apple-orchestration", "$ios-feature-implementation", "$apple-verification", "$code-review"],
         failures,
     )
     require_contains(

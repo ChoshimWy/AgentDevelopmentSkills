@@ -13,7 +13,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "platforms/apple/skills/ios-verification/scripts"
+SCRIPTS = ROOT / "platforms/apple/skills/apple-verification/scripts"
 
 
 def load_module(name: str):
@@ -157,7 +157,7 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_rule_diff_routes_to_policy_lint(self) -> None:
-        plan = verification_coordinator.evidence_plan(["skills/ios-verification/SKILL.md"])
+        plan = verification_coordinator.evidence_plan(["skills/apple-verification/SKILL.md"])
         self.assertEqual("dev", plan["lane"])
         self.assertEqual("policy-lint:current-diff", plan["required_evidence"][0]["evidence_id"])
 

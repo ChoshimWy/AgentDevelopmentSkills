@@ -10,7 +10,7 @@ REPOSITORY_ROOT = ROOT.parents[1]
 WORKFLOW_AGENT_DIR = REPOSITORY_ROOT / "disciplines" / "workflow" / "assets" / "codex" / "agents"
 POLICY_SKILLS = [
     "ios-feature-implementation",
-    "debugging",
+    "apple-debugging",
     "ios-performance",
     "xcode-build",
     "ios-automation",
@@ -41,7 +41,7 @@ def main() -> int:
     failures: list[str] = []
     policy_paths = [
         ROOT / "skills" / "TAXONOMY.md",
-        ROOT / "skills" / "codex-subagent-orchestration" / "SKILL.md",
+        ROOT / "skills" / "apple-orchestration" / "SKILL.md",
         ROOT / "config" / "claude-code" / "agents" / "orchestration.md",
         ROOT / "config" / "claude-code" / "memory-seed.md",
         ROOT / "config" / "codex" / "templates" / "agents" / "README.md",
@@ -52,13 +52,13 @@ def main() -> int:
         require_not_contains(
             path,
             [
-                "最终都必须进入 `ios-verification`",
+                "最终都必须进入 `apple-verification`",
                 "任务都不算完成",
                 "四步收口",
                 "固定四步",
                 "未通过 CP3 不得宣告完成",
-                "Apple 相关改动必须进入 ios-verification",
-                "ios-verification / ios-verification",
+                "Apple 相关改动必须进入 apple-verification",
+                "apple-verification / apple-verification",
                 "testing/定向验证",
             ],
             failures,
@@ -80,33 +80,33 @@ def main() -> int:
             "shared build-queue daemon",
             "--queue-status",
             "`实现 skill -> 定向验证 / no_test_reason -> reviewer subAgent(code-review)`",
-            "`ios-verification` 统一负责验证前路由",
+            "`apple-verification` 统一负责验证前路由",
         ],
         failures,
     )
 
     for skill in POLICY_SKILLS:
         skill_md = ROOT / "skills" / skill / "SKILL.md"
-        require_contains(skill_md, ["ios-verification"], failures)
+        require_contains(skill_md, ["apple-verification"], failures)
 
         openai_yaml = ROOT / "skills" / skill / "agents" / "openai.yaml"
         if openai_yaml.exists():
-            require_contains(openai_yaml, ["$ios-verification", "按需"], failures)
+            require_contains(openai_yaml, ["$apple-verification", "按需"], failures)
 
     require_contains(
         ROOT / "skills" / "ios-feature-implementation" / "SKILL.md",
-        ["test-implementation", "ios-verification", "code-review", "no_test_reason"],
+        ["test-implementation", "apple-verification", "code-review", "no_test_reason"],
         failures,
     )
     require_contains(
         ROOT / "skills" / "ios-feature-implementation" / "agents" / "openai.yaml",
-        ["test-implementation", "$code-review", "$ios-verification", "no_test_reason"],
+        ["test-implementation", "$code-review", "$apple-verification", "no_test_reason"],
         failures,
     )
-    require_contains(ROOT / "skills" / "ios-automation" / "SKILL.md", ["Simulator", "真机", "ios-verification"], failures)
-    require_contains(ROOT / "skills" / "xcode-build" / "SKILL.md", ["ios-verification", "Build Settings"], failures)
+    require_contains(ROOT / "skills" / "ios-automation" / "SKILL.md", ["Simulator", "真机", "apple-verification"], failures)
+    require_contains(ROOT / "skills" / "xcode-build" / "SKILL.md", ["apple-verification", "Build Settings"], failures)
 
-    ios_verification = ROOT / "skills" / "ios-verification" / "SKILL.md"
+    ios_verification = ROOT / "skills" / "apple-verification" / "SKILL.md"
     require_contains(
         ios_verification,
         [
@@ -137,7 +137,7 @@ def main() -> int:
         failures,
     )
     require_contains(
-        ROOT / "skills" / "ios-verification" / "references" / "override-config.md",
+        ROOT / "skills" / "apple-verification" / "references" / "override-config.md",
         [
             "项目环境",
             "shared build-queue daemon",
@@ -166,7 +166,7 @@ def main() -> int:
         failures,
     )
     require_contains(
-        ROOT / "skills" / "ios-verification" / "agents" / "openai.yaml",
+        ROOT / "skills" / "apple-verification" / "agents" / "openai.yaml",
         ["quick-verify", "Verification Session", "in-flight 请求", "目标项目 ./codex_verify.sh", "Final Gate"],
         failures,
     )
@@ -175,7 +175,7 @@ def main() -> int:
         ROOT / "config" / "claude-code" / "agents" / "orchestration.md",
         ROOT / "config" / "claude-code" / "agents" / "tester.md",
         ROOT / "config" / "codex" / "templates" / "agents" / "tester.toml",
-        ROOT / "skills" / "ios-verification" / "agents" / "openai.yaml",
+        ROOT / "skills" / "apple-verification" / "agents" / "openai.yaml",
     ):
         require_not_contains(
             policy_path,
@@ -189,7 +189,7 @@ def main() -> int:
         "daemon-protocol.md",
     ):
         require_contains(
-            ROOT / "skills" / "ios-verification" / "references" / reference,
+            ROOT / "skills" / "apple-verification" / "references" / reference,
             ["fingerprint"],
             failures,
         )
@@ -200,11 +200,11 @@ def main() -> int:
         "evidence_cache.py",
         "affected_tests.py",
     ):
-        require_contains(ROOT / "skills" / "ios-verification" / "scripts" / helper, ["#!/usr/bin/env python3"], failures)
+        require_contains(ROOT / "skills" / "apple-verification" / "scripts" / helper, ["#!/usr/bin/env python3"], failures)
     for settings_path in sorted((ROOT / "config" / "claude-code").glob("settings*.json")):
         require_not_contains(settings_path, ["Bash(xcodebuild:*)"], failures)
     require_contains(
-        ROOT / "skills" / "ios-verification" / "scripts" / "build-check.sh",
+        ROOT / "skills" / "apple-verification" / "scripts" / "build-check.sh",
         [
             "CODEX_VERIFY_BYPASS_WRAPPER",
             "TARGET_VERIFY_SCRIPT",
@@ -270,7 +270,7 @@ def main() -> int:
         failures,
     )
     require_contains(
-        ROOT / "skills" / "ios-verification" / "scripts" / "build_check.py",
+        ROOT / "skills" / "apple-verification" / "scripts" / "build_check.py",
         [
             "is_unit_test_preferred_scheme",
             "scheme_has_unit_test_binding",
@@ -301,12 +301,12 @@ def main() -> int:
     )
 
     if failures:
-        print("ios-verification policy lint failed:", file=sys.stderr)
+        print("apple-verification policy lint failed:", file=sys.stderr)
         for failure in failures:
             print(f"- {failure}", file=sys.stderr)
         return 1
 
-    print("ios-verification policy lint passed")
+    print("apple-verification policy lint passed")
     return 0
 
 

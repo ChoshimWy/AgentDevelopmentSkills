@@ -22,7 +22,7 @@ except ModuleNotFoundError:  # Python 3.10 fallback
 
 ROOT = Path(__file__).resolve().parent.parent
 REPOSITORY_ROOT = ROOT.parents[1]
-SKILL_ROOT = ROOT / "skills" / "codex-subagent-orchestration"
+SKILL_ROOT = ROOT / "skills" / "apple-orchestration"
 CODEX_TEMPLATE_AGENTS = ROOT / "config" / "codex" / "templates" / "agents"
 WORKFLOW_ROOT = REPOSITORY_ROOT / "disciplines" / "workflow"
 WORKFLOW_SKILL_ROOT = WORKFLOW_ROOT / "skills" / "workflow-orchestration"
@@ -50,7 +50,7 @@ EXPECTED_DISABLED_PLUGINS = {
 
 FORBIDDEN_SUBAGENT_RESTRICTION_PHRASES = [
     "默认进入编排入口不等于必须 spawn",
-    "默认进入 `codex-subagent-orchestration` 不等于必须 spawn",
+    "默认进入 `apple-orchestration` 不等于必须 spawn",
     "full multi-agent execution",
     "write ownership",
     "write set is safe",
@@ -261,7 +261,7 @@ def main() -> int:
     )
     require_contains(
         SKILL_ROOT / "SKILL.md",
-        ["Apple 工作流 Overlay", "workflow-orchestration", "ios-verification", "apple-code-review"],
+        ["Apple 工作流 Overlay", "workflow-orchestration", "apple-verification", "apple-code-review"],
         failures,
     )
     require_contains(

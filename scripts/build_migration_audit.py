@@ -46,10 +46,11 @@ def _initial_audit(source: dict[str, Any], overrides_document: dict[str, Any]) -
     entries = []
     for item in source["files"]:
         override = overrides.get(item["path"])
+        target_path = override.get("target_path", item["path"]) if override else item["path"]
         target = {
             "mode": item["mode"],
             "package": "apple",
-            "path": item["path"],
+            "path": target_path,
             "sha256": override["package_sha256"] if override else item["sha256"],
         }
         entries.append({
@@ -107,13 +108,14 @@ def _apply_apple_override_records(
     entries = {entry["source_path"]: entry for entry in result["entries"]}
     for override in overrides_document["overrides"]:
         path = override["path"]
+        target_path = override.get("target_path", path)
         source_item = source_files.get(path)
         entry = entries.get(path)
         if source_item is None or entry is None or source_item["sha256"] != override["source_sha256"]:
             raise ContractError(f"Apple migration override source identity is stale: {path}")
         targets = [
             target for target in entry["targets"]
-            if target["package"] == "apple" and target["path"] == path
+            if target["package"] == "apple" and target["path"] == target_path
         ]
         if len(targets) != 1:
             raise ContractError(f"Apple migration override target is missing or ambiguous: {path}")

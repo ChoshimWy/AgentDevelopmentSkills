@@ -18,7 +18,7 @@ Extract traceable Apple-targeted design evidence and hand it to the shared desig
 
 - 开放式设计探索；使用共享 `ui-ux-design-system`。
 - Canonical UI IR；使用共享 `design-ir-compiler`。
-- UIKit/SwiftUI binding；使用 `design-context-compiler`。
+- UIKit/SwiftUI binding；使用 `apple-design-context-compiler`。
 
 ## Agent Rules
 
@@ -41,4 +41,4 @@ Design source identity、target frame/node、Apple target、appearance、locale 
 
 ## Relationship to Other Skills
 
-共享 `ui-ux-design-system` 决策设计方向；`design-ir-compiler` 生成通用 IR；`design-context-compiler` 只负责 Apple binding 与 Agent Packet。
+共享 `ui-ux-design-system` 决策设计方向；`design-ir-compiler` 生成通用 IR；`apple-design-context-compiler` 只负责 Apple binding 与 Agent Packet。
