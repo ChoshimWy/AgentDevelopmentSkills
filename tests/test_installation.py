@@ -83,6 +83,36 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(bundle.plan["permission_profiles"], ["repository-read-only"])
         self.assertNotIn("platform.apple.global", bundle.instructions)
         self.assertNotIn("implementation.apple", bundle.plan["bindings"])
+        common_rule_ids = (
+            "core.default-language",
+            "core.temporal-fact-verification",
+            "core.skill-route-announcement",
+            "core.nearest-source-of-truth",
+            "core.doc-rule-completion",
+        )
+        for rule_id in common_rule_ids:
+            self.assertEqual(bundle.instructions.count(f"rule:{rule_id}"), 1)
+            matches = [
+                item
+                for item in bundle.plan["instructions"]["rule_trace"]
+                if item["id"] == rule_id
+            ]
+            self.assertEqual(len(matches), 1)
+            self.assertEqual(
+                {
+                    key: matches[0][key]
+                    for key in ("decision", "effect", "locked", "package", "scope")
+                },
+                {
+                    "decision": "accepted",
+                    "effect": "allow",
+                    "locked": True,
+                    "package": "core",
+                    "scope": "global",
+                },
+            )
+        self.assertNotIn("Skill Schema v1", bundle.instructions)
+        self.assertNotIn("lint_skill_schema.py", bundle.instructions)
         validate("install-plan", bundle.plan)
 
     def test_apple_bundle_is_deterministic_and_uses_one_agents_document(self) -> None:

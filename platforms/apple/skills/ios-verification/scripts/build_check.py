@@ -178,6 +178,7 @@ class BuildConfig:
     configuration: str
     action: str
     destination: str | None
+    test_plan: str | None
     device_fallback_enabled: bool
     explicit_device_id: str | None
     explicit_device_name: str | None
@@ -217,6 +218,9 @@ class BuildConfig:
         if is_simulator_destination(destination):
             command += ["CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"]
 
+        if self.test_plan and self.action in {"test", "build-for-testing", "test-without-building"}:
+            command += ["-testPlan", self.test_plan]
+
         command += self.xcodebuild_passthrough_args
         command.append(self.action)
         return command
@@ -229,6 +233,7 @@ OVERRIDABLE_ENV_KEYS = (
     "XCODE_CONFIGURATION",
     "XCODE_ACTION",
     "XCODE_DESTINATION",
+    "XCODE_TEST_PLAN",
     "XCODE_DERIVED_DATA",
     "XCODE_DEVICE_FALLBACK",
     "XCODE_DEVICE_ID",
@@ -537,6 +542,11 @@ def resolve_build_config(root: Path, passthrough_args: list[str] | None = None) 
         if any(arg.startswith("-only-testing") for arg in xcodebuild_passthrough_args)
         else env.get("XCODE_ACTION", "build")
     )
+    if os.environ.get("CODEX_WORKTREE_SESSION_ID") and action == "test-without-building":
+        raise RuntimeError(
+            "Apple Worktree Session test-without-building requires a daemon-validated "
+            "immutable build artifact identity and is not yet enabled"
+        )
 
     if not workspace and not project:
         raise RuntimeError(f"No .xcworkspace or .xcodeproj found in {root}")
@@ -549,6 +559,7 @@ def resolve_build_config(root: Path, passthrough_args: list[str] | None = None) 
         configuration=env.get("XCODE_CONFIGURATION", "Debug"),
         action=action,
         destination=env.get("XCODE_DESTINATION"),
+        test_plan=env.get("XCODE_TEST_PLAN"),
         device_fallback_enabled=truthy(env.get("XCODE_DEVICE_FALLBACK"), default=True),
         explicit_device_id=env.get("XCODE_DEVICE_ID"),
         explicit_device_name=env.get("XCODE_DEVICE_NAME"),
@@ -1525,6 +1536,7 @@ def compute_verification_fingerprint(
         "scheme": config.scheme,
         "configuration": config.configuration,
         "action": config.action,
+        "test_plan": config.test_plan,
         "destinations": [attempt.destination for attempt in attempts],
         "commands": [attempt.command_string for attempt in attempts],
         "changed_files": sorted(changed_files),
@@ -1786,6 +1798,7 @@ def write_verification_artifacts(
             "scheme": config.scheme,
             "configuration": config.configuration,
             "action": config.action,
+            "test_plan": config.test_plan,
             "destination": final_destination,
             "destination_type": destination_type(final_destination, config),
             "selected_device_reason": selected_device_reason,

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Session Worktree"
+  short_description: "隔离多 Agent Worktree 并冻结跨仓源码身份"
+  default_prompt: "使用 $session-worktree 从稳定 Commit 创建或检查当前 Agent Session Worktree；不得继承 dirty/staged/stash 内容，不自动提交或清理用户修改。计算 Repository Patch 与多仓 Session Source Identity 后，把生命周期和 Gate 交给 $workflow-orchestration。"

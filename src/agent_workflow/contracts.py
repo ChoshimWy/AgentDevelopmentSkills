@@ -7,7 +7,7 @@ cross-reference and enum rules that are important to the workflow runtime.
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
 from typing import Any
 
@@ -22,6 +22,11 @@ LEGAL_NODE_TRANSITIONS = {
     "passed": {"stale"}, "failed": {"stale"}, "blocked": {"ready", "stale"},
     "skipped": {"stale"}, "cancelled": {"stale"}, "stale": {"ready"},
 }
+
+_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_GIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_REPOSITORY_PATCH = re.compile(r"^repository-patch:[0-9a-f]{64}$")
+_SESSION_SOURCE = re.compile(r"^session-source:[0-9a-f]{64}$")
 
 
 def _base(value: dict[str, Any], fields: set[str], kind: str) -> None:
@@ -50,6 +55,293 @@ def validate_project_profile(value: dict[str, Any]) -> None:
             raise ContractError("project-profile module evidence is invalid")
     for ambiguity in value["ambiguities"]:
         require_fields(ambiguity, {"path", "candidates", "reason"}, "project-profile.ambiguity")
+
+
+def validate_worktree_session_context(value: dict[str, Any]) -> None:
+    fields = {
+        "schema_version", "session_id", "project_id", "selected_platforms", "created_at",
+        "repositories", "dependencies", "source_identity", "platform_contexts",
+        "capability_closure", "verification", "review", "lifecycle",
+    }
+    _exact_object(value, fields, "worktree-session-context")
+    require_version(value)
+    for field in ("session_id", "project_id"):
+        if not isinstance(value[field], str) or not _SESSION_ID.fullmatch(value[field]):
+            raise ContractError(f"worktree-session-context {field} is invalid")
+    if not isinstance(value["created_at"], str) or not value["created_at"]:
+        raise ContractError("worktree-session-context created_at is invalid")
+    platforms = value["selected_platforms"]
+    if (
+        not isinstance(platforms, list)
+        or any(not isinstance(item, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", item) for item in platforms)
+        or platforms != sorted(set(platforms))
+    ):
+        raise ContractError("worktree-session-context selected_platforms must be sorted unique platform ids")
+    contexts = value["platform_contexts"]
+    if not isinstance(contexts, dict) or set(contexts) != set(platforms):
+        raise ContractError("worktree-session-context requires one provider closure per selected platform")
+    for platform, context in contexts.items():
+        _exact_object(context, {"provider_id", "bindings", "context"}, f"worktree-session-context.platform_contexts.{platform}")
+        if not isinstance(context["provider_id"], str) or not context["provider_id"]:
+            raise ContractError("worktree-session-context platform provider_id is invalid")
+        if not isinstance(context["context"], dict) or not isinstance(context["bindings"], dict) or not context["bindings"]:
+            raise ContractError("worktree-session-context platform binding closure is invalid")
+        for capability, binding in context["bindings"].items():
+            if not isinstance(capability, str) or not capability or not _valid_session_binding(binding):
+                raise ContractError("worktree-session-context platform binding closure is invalid")
+    closure = value["capability_closure"]
+    if not isinstance(closure, dict):
+        raise ContractError("worktree-session-context capability_closure is invalid")
+    for capability, provider in closure.items():
+        _exact_object(provider, {"provider_id", "binding"}, "worktree-session-context.capability_closure.provider")
+        if (
+            not isinstance(capability, str)
+            or not capability
+            or not isinstance(provider["provider_id"], str)
+            or not provider["provider_id"]
+            or not _valid_session_binding(provider["binding"])
+        ):
+            raise ContractError("worktree-session-context capability_closure entry is invalid")
+
+    repositories = value["repositories"]
+    if not isinstance(repositories, list) or not repositories:
+        raise ContractError("worktree-session-context repositories must be a non-empty array")
+    repository_ids: list[str] = []
+    worktree_paths: list[str] = []
+    common_dirs: list[str] = []
+    primary_count = 0
+    for repository in repositories:
+        _validate_session_repository(repository)
+        repository_ids.append(repository["repository_id"])
+        worktree_paths.append(repository["worktree_path"])
+        common_dirs.append(repository["git_common_dir"])
+        primary_count += repository["role"] == "primary"
+    if repository_ids != sorted(repository_ids) or len(repository_ids) != len(set(repository_ids)):
+        raise ContractError("worktree-session-context repositories must be sorted by unique repository_id")
+    if len(worktree_paths) != len(set(worktree_paths)) or len(common_dirs) != len(set(common_dirs)):
+        raise ContractError("worktree-session-context repository paths must be unique")
+    if primary_count != 1:
+        raise ContractError("worktree-session-context requires exactly one primary repository")
+
+    dependencies = value["dependencies"]
+    if not isinstance(dependencies, list):
+        raise ContractError("worktree-session-context dependencies must be an array")
+    dependency_ids: list[str] = []
+    for dependency in dependencies:
+        _exact_object(
+            dependency,
+            {"session_id", "dependency_type", "required_source_identity"},
+            "worktree-session-context.dependency",
+        )
+        if (
+            not isinstance(dependency["session_id"], str)
+            or not _SESSION_ID.fullmatch(dependency["session_id"])
+            or dependency["session_id"] == value["session_id"]
+            or dependency["dependency_type"] != "stacked"
+            or not isinstance(dependency["required_source_identity"], str)
+            or not _SESSION_SOURCE.fullmatch(dependency["required_source_identity"])
+        ):
+            raise ContractError("worktree-session-context dependency is invalid")
+        dependency_ids.append(dependency["session_id"])
+    if dependency_ids != sorted(dependency_ids) or len(dependency_ids) != len(set(dependency_ids)):
+        raise ContractError("worktree-session-context dependencies must be sorted and unique")
+
+    identity = value["source_identity"]
+    _exact_object(identity, {"algorithm", "mode", "value"}, "worktree-session-context.source_identity")
+    if identity["algorithm"] != "session-source-v1" or identity["mode"] not in {"working", "committed"}:
+        raise ContractError("worktree-session-context source identity metadata is invalid")
+    if not isinstance(identity["value"], str) or not _SESSION_SOURCE.fullmatch(identity["value"]):
+        raise ContractError("worktree-session-context source identity value is invalid")
+
+    _validate_session_evidence_index(value["verification"], "verification")
+    _validate_session_evidence_index(value["review"], "review")
+    lifecycle = value["lifecycle"]
+    _exact_object(lifecycle, {"state"}, "worktree-session-context.lifecycle")
+    if lifecycle["state"] not in {"created", "active", "checkpointed", "gated", "integrated", "closed", "blocked"}:
+        raise ContractError("worktree-session-context lifecycle state is invalid")
+    committed_states = {"checkpointed", "gated", "integrated", "closed"}
+    if lifecycle["state"] in {"created", "active"} and (
+        identity["mode"] != "working" or any(item["checkpoint"] is not None for item in repositories)
+    ):
+        raise ContractError("worktree-session-context editable state requires working source identity")
+    if lifecycle["state"] in committed_states or identity["mode"] == "committed":
+        if identity["mode"] != "committed" or any(item["checkpoint"] is None for item in repositories):
+            raise ContractError("worktree-session-context committed state requires every repository checkpoint")
+    if lifecycle["state"] in {"gated", "integrated", "closed"} and (
+        value["verification"]["status"] != "passed" or value["review"]["status"] != "passed"
+    ):
+        raise ContractError("worktree-session-context gated state requires passed verification and review")
+
+
+def _validate_session_repository(value: Any) -> None:
+    fields = {
+        "repository_id", "role", "branch", "worktree_path", "git_common_dir",
+        "base", "checkpoint", "change_set",
+    }
+    _exact_object(value, fields, "worktree-session-context.repository")
+    if not isinstance(value["repository_id"], str) or not _SESSION_ID.fullmatch(value["repository_id"]):
+        raise ContractError("worktree-session-context repository_id is invalid")
+    if value["role"] not in {"primary", "dependency"}:
+        raise ContractError("worktree-session-context repository role is invalid")
+    if value["branch"] is not None and (not isinstance(value["branch"], str) or not value["branch"]):
+        raise ContractError("worktree-session-context repository branch is invalid")
+    for field in ("worktree_path", "git_common_dir"):
+        path = value[field]
+        if not isinstance(path, str) or not path or not Path(path).is_absolute():
+            raise ContractError(f"worktree-session-context repository {field} must be absolute")
+    base = value["base"]
+    _exact_object(base, {"ref", "commit", "source", "dirty_worktree_inherited"}, "worktree-session-context.repository.base")
+    if (
+        not isinstance(base["ref"], str)
+        or not base["ref"]
+        or not isinstance(base["commit"], str)
+        or not _GIT_OID.fullmatch(base["commit"])
+        or base["source"] not in {"explicit", "integration-checkpoint", "stacked-checkpoint", "clean-head"}
+        or base["dirty_worktree_inherited"] is not False
+    ):
+        raise ContractError("worktree-session-context repository base is invalid")
+    checkpoint = value["checkpoint"]
+    if checkpoint is not None:
+        _exact_object(checkpoint, {"commit", "tree"}, "worktree-session-context.repository.checkpoint")
+        if any(not isinstance(checkpoint[field], str) or not _GIT_OID.fullmatch(checkpoint[field]) for field in ("commit", "tree")):
+            raise ContractError("worktree-session-context repository checkpoint is invalid")
+    change_set = value["change_set"]
+    _exact_object(
+        change_set,
+        {"algorithm", "patch_hash", "changed_files", "untracked_files"},
+        "worktree-session-context.repository.change_set",
+    )
+    if change_set["algorithm"] != "repository-patch-v1":
+        raise ContractError("worktree-session-context repository patch algorithm is invalid")
+    if not isinstance(change_set["patch_hash"], str) or not _REPOSITORY_PATCH.fullmatch(change_set["patch_hash"]):
+        raise ContractError("worktree-session-context repository patch hash is invalid")
+    for field in ("changed_files", "untracked_files"):
+        paths = change_set[field]
+        if (
+            not isinstance(paths, list)
+            or paths != sorted(set(paths))
+            or any(not isinstance(path, str) or not _safe_session_relative_path(path) for path in paths)
+        ):
+            raise ContractError(f"worktree-session-context repository {field} is invalid")
+
+
+def _validate_session_evidence_index(value: Any, label: str) -> None:
+    _exact_object(value, {"adapter_result_refs", "status"}, f"worktree-session-context.{label}")
+    if value["status"] not in {"pending", "passed", "stale", "blocked"} or not isinstance(value["adapter_result_refs"], list):
+        raise ContractError(f"worktree-session-context {label} is invalid")
+    identities: list[tuple[str, str]] = []
+    for reference in value["adapter_result_refs"]:
+        fields = {
+            "attempt_id", "request_id", "invocation_id", "plan_fingerprint", "node_id",
+            "capability", "provider", "binding", "artifact_hashes",
+        }
+        _exact_object(reference, fields, f"worktree-session-context.{label}.adapter_result_ref")
+        for field in fields - {"binding", "artifact_hashes"}:
+            if not isinstance(reference[field], str) or not reference[field]:
+                raise ContractError(f"worktree-session-context {label} adapter reference is invalid")
+        binding = reference["binding"]
+        if not _valid_session_binding(binding):
+            raise ContractError(f"worktree-session-context {label} binding is invalid")
+        artifacts = reference["artifact_hashes"]
+        if not isinstance(artifacts, list) or not artifacts:
+            raise ContractError(f"worktree-session-context {label} adapter reference requires artifacts")
+        artifact_ids: list[str] = []
+        for artifact in artifacts:
+            _exact_object(artifact, {"artifact_id", "sha256", "uri"}, f"worktree-session-context.{label}.artifact")
+            if (
+                any(not isinstance(artifact[field], str) or not artifact[field] for field in ("artifact_id", "uri"))
+                or not isinstance(artifact["sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"])
+            ):
+                raise ContractError(f"worktree-session-context {label} artifact is invalid")
+            artifact_ids.append(artifact["artifact_id"])
+        if artifact_ids != sorted(artifact_ids) or len(artifact_ids) != len(set(artifact_ids)):
+            raise ContractError(f"worktree-session-context {label} artifact ids must be sorted and unique")
+        identities.append((reference["attempt_id"], reference["invocation_id"]))
+    if identities != sorted(identities) or len(identities) != len(set(identities)):
+        raise ContractError(f"worktree-session-context {label} adapter refs must be sorted and unique")
+
+
+def validate_worktree_session_gate(value: dict[str, Any]) -> None:
+    fields = {
+        "schema_version", "session_id", "source_identity", "checkpoint_commits",
+        "verification_refs", "review_refs", "status", "diagnostics",
+    }
+    _exact_object(value, fields, "worktree-session-gate")
+    require_version(value)
+    if not isinstance(value["session_id"], str) or not _SESSION_ID.fullmatch(value["session_id"]):
+        raise ContractError("worktree-session-gate session_id is invalid")
+    if not isinstance(value["source_identity"], str) or not _SESSION_SOURCE.fullmatch(value["source_identity"]):
+        raise ContractError("worktree-session-gate source_identity is invalid")
+    commits = value["checkpoint_commits"]
+    if (
+        not isinstance(commits, dict)
+        or not commits
+        or list(commits) != sorted(commits)
+        or any(
+            not isinstance(key, str)
+            or not _SESSION_ID.fullmatch(key)
+            or not isinstance(item, str)
+            or not _GIT_OID.fullmatch(item)
+            for key, item in commits.items()
+        )
+    ):
+        raise ContractError("worktree-session-gate checkpoint_commits are invalid")
+    for field in ("verification_refs", "review_refs"):
+        refs = value[field]
+        if not isinstance(refs, list) or refs != sorted(set(refs)) or any(not isinstance(item, str) or not item for item in refs):
+            raise ContractError(f"worktree-session-gate {field} is invalid")
+    if value["status"] not in {"passed", "blocked"} or not isinstance(value["diagnostics"], list):
+        raise ContractError("worktree-session-gate status or diagnostics are invalid")
+    for diagnostic in value["diagnostics"]:
+        _exact_object(diagnostic, {"code", "message"}, "worktree-session-gate.diagnostic")
+        if any(not isinstance(diagnostic[field], str) or not diagnostic[field] for field in ("code", "message")):
+            raise ContractError("worktree-session-gate diagnostic is invalid")
+    if value["status"] == "passed" and (value["diagnostics"] or not value["verification_refs"] or not value["review_refs"]):
+        raise ContractError("worktree-session-gate passed result requires evidence and no diagnostics")
+    if value["status"] == "blocked" and not value["diagnostics"]:
+        raise ContractError("worktree-session-gate blocked result requires diagnostics")
+
+
+def validate_worktree_session_operation_result(value: dict[str, Any]) -> None:
+    _exact_object(value, {"schema_version", "operation", "notice", "session"}, "worktree-session-operation-result")
+    require_version(value)
+    if value["operation"] not in {"create", "checkpoint"} or not isinstance(value["notice"], dict):
+        raise ContractError("worktree-session-operation-result operation or notice is invalid")
+    validate_worktree_session_context(value["session"])
+
+
+def validate_worktree_session_list(value: dict[str, Any]) -> None:
+    _exact_object(value, {"schema_version", "sessions"}, "worktree-session-list")
+    require_version(value)
+    if not isinstance(value["sessions"], list):
+        raise ContractError("worktree-session-list sessions must be an array")
+    for session in value["sessions"]:
+        validate_worktree_session_context(session)
+    session_ids = [session["session_id"] for session in value["sessions"]]
+    if session_ids != sorted(session_ids) or len(session_ids) != len(set(session_ids)):
+        raise ContractError("worktree-session-list sessions must be sorted and unique")
+
+
+def _exact_object(value: Any, fields: set[str], kind: str) -> None:
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ContractError(f"{kind} fields are invalid")
+
+
+def _safe_session_relative_path(value: str) -> bool:
+    path = PurePosixPath(value)
+    return bool(value) and not path.is_absolute() and "\\" not in value and all(part not in {"", ".", ".."} for part in path.parts)
+
+
+def _valid_session_binding(binding: Any) -> bool:
+    return bool(
+        isinstance(binding, dict)
+        and set(binding) in ({"kind", "name"}, {"kind", "name", "mode"})
+        and binding.get("kind") in {"skill", "agent", "script", "tool"}
+        and isinstance(binding.get("name"), str)
+        and binding["name"]
+        and ("mode" not in binding or (isinstance(binding["mode"], str) and binding["mode"]))
+    )
 
 
 def validate_manifest(value: dict[str, Any]) -> None:
@@ -335,7 +627,13 @@ def validate_run_ledger(value: dict[str, Any]) -> None:
         validate_resource_event(event)
     for record in value["approval_records"]:
         validate_approval_record(record)
-    attempts = {attempt["attempt_id"] for attempt in value["node_attempts"]}
+    attempt_ids = [attempt["attempt_id"] for attempt in value["node_attempts"]]
+    if len(attempt_ids) != len(set(attempt_ids)):
+        raise ContractError("run-ledger attempt ids must be globally unique")
+    attempt_keys = [(attempt["node_id"], attempt["attempt_number"]) for attempt in value["node_attempts"]]
+    if len(attempt_keys) != len(set(attempt_keys)):
+        raise ContractError("run-ledger attempt numbers must be unique per node")
+    attempts = set(attempt_ids)
     if any(event["attempt_id"] not in attempts for event in value["resource_events"]):
         raise ContractError("resource-event references unknown attempt")
     if any(record["attempt_id"] not in attempts for record in value["approval_records"]):
@@ -478,8 +776,8 @@ def validate_run_ledger(value: dict[str, Any]) -> None:
     by_node: dict[str, list[int]] = {}
     for attempt in value["node_attempts"]:
         by_node.setdefault(attempt["node_id"], []).append(attempt["attempt_number"])
-    if any(numbers != sorted(numbers) for numbers in by_node.values()):
-        raise ContractError("node attempt numbers must be monotonic")
+    if any(numbers != sorted(numbers) or len(numbers) != len(set(numbers)) for numbers in by_node.values()):
+        raise ContractError("node attempt numbers must be strictly monotonic")
 
 
 def _validate_ledger_object(value: Any, fields: set[str], kind: str) -> None:
@@ -891,6 +1189,10 @@ VALIDATORS: dict[str, Callable[[dict[str, Any]], None]] = {
     "resource-event": validate_resource_event,
     "run-ledger": validate_run_ledger,
     "workflow-plan": validate_workflow_plan,
+    "worktree-session-context": validate_worktree_session_context,
+    "worktree-session-gate": validate_worktree_session_gate,
+    "worktree-session-list": validate_worktree_session_list,
+    "worktree-session-operation-result": validate_worktree_session_operation_result,
 }
 
 

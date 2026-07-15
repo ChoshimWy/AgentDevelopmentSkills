@@ -11,6 +11,7 @@ dependencies = []
 
 [project.scripts]
 agent-skills = "agent_workflow.cli:main"
+agent-session = "agent_workflow.worktree_sessions.cli:main"
 agent-workflow = "agent_workflow.cli:main"
 
 [tool.setuptools]

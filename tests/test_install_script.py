@@ -325,12 +325,75 @@ class InstallScriptTests(unittest.TestCase):
                 load_installer_module()._human_report(multi_platform_report, color=False),
             )
             self.assertEqual(second["activation"]["managed_file_updates"], [])
-            self.assertEqual(len(second["activation"]["managed_files_unchanged"]), 12)
+            self.assertEqual(len(second["activation"]["managed_files_unchanged"]), 13)
             self.assertTrue((target / "skills" / "ios-verification" / "SKILL.md").is_file())
             self.assertTrue((target / "agents" / "reviewer.toml").is_file())
             self.assertTrue((target / "bin" / "codex_verify").is_file())
             self.assertEqual((target / "bin" / "codex_verify").stat().st_mode & 0o777, 0o755)
+            self.assertEqual((target / "bin" / "agent-session").stat().st_mode & 0o777, 0o755)
+            isolated_environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+            subprocess.run(
+                [str(target / "bin" / "agent-session"), "--help"],
+                cwd=directory,
+                env=isolated_environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            wrapper_help = subprocess.run(
+                [str(target / "bin" / "codex_verify"), "--help"],
+                cwd=directory,
+                env=isolated_environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("--worktree-session-request", wrapper_help.stdout)
+            subprocess.run(
+                [str(target / "skills" / "ios-verification" / "scripts" / "worktree_session.py"), "--help"],
+                cwd=directory,
+                env=isolated_environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            repository = Path(directory) / "session-repo"
+            repository.mkdir()
+            for command in (
+                ("init", "-q"),
+                ("config", "user.name", "Installed Session Smoke"),
+                ("config", "user.email", "installed-session@example.invalid"),
+                ("config", "core.hooksPath", "/dev/null"),
+            ):
+                subprocess.run(["git", *command], cwd=repository, check=True, capture_output=True)
+            (repository / "file.txt").write_text("base\n", encoding="utf-8")
+            subprocess.run(["git", "add", "file.txt"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "test(session): [HUMAN] 创建安装态基线"], cwd=repository, check=True)
+            session = subprocess.run(
+                [
+                    str(target / "bin" / "agent-session"), "create", "installed-smoke",
+                    "--repository", str(repository), "--project-id", "installed-smoke",
+                    "--platform", "apple", "--worktree-root", str(Path(directory) / "worktrees"),
+                ],
+                cwd=directory,
+                env=isolated_environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(json.loads(session.stdout)["session"]["selected_platforms"], ["apple"])
             self.assertTrue((target / ".agent-skills" / "activation-lock.json").is_file())
+
+            activation_lock = target / ".agent-skills" / "activation-lock.json"
+            legacy_lock = json.loads(activation_lock.read_text(encoding="utf-8"))
+            legacy_lock["files"] = [
+                item for item in legacy_lock["files"] if item["path"] != "bin/agent-session"
+            ]
+            activation_lock.write_text(json.dumps(legacy_lock), encoding="utf-8")
+            (target / "bin" / "agent-session").unlink()
+            upgraded = json.loads(self.run_install(target).stdout)
+            self.assertIn("bin/agent-session", upgraded["activation"]["managed_file_updates"])
+            self.assertTrue((target / "bin" / "agent-session").is_file())
 
             agents = target / "AGENTS.md"
             original_agents = agents.read_bytes()

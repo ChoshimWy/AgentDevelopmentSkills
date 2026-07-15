@@ -27,10 +27,12 @@ description: iOS / Apple Xcode 项目统一验证 Skill。用于按当前 Diff �
 
 ### Current Implementation Boundary
 
-- The current wrapper implements exact request-fingerprint in-flight attachment, successful-result reuse, atomic queue publication and structured-artifact validation.
+- The current wrapper implements exact request-fingerprint in-flight attachment, successful-result reuse, schema/generation-bound immutable job publication, token/heartbeat-bound daemon ownership, offline startup reconciliation, live-safe read-only doctor, offline-only repair and structured-artifact validation. Legacy terminal history is diagnostic-only unless it satisfies the current immutable publication contract.
+- A committed Apple Worktree Session request is an implemented wrapper/daemon input: pass it with `--worktree-session-request`; submission and daemon pre/post execution validation, frozen destination/test plan export, Slot lease and structured Session summary are enforced. Read `references/worktree-session.md` before using it.
+- Worktree Session source identity is daemon-recomputed, but request `environment_fingerprint` and `target_fingerprints` remain caller-frozen assertions until an upstream coordinator independently derives them; never report those labels alone as verified evidence.
 - `verification_coordinator.py`, `session_store.py`, `fingerprint.py`, `evidence_cache.py` and `affected_tests.py` are executable contract/scaffold tools, but the wrapper/daemon does not yet invoke them as one end-to-end coordinator.
 - Lane-aware priority scheduling, persisted Session mutation, same-or-stronger cross-request evidence reuse, deterministic failure caching, request coalescing and automatic `.xctestrun` registration remain follow-up implementation work. Until then, do not report those behaviors as executed daemon evidence.
-- `build-for-testing` and `test-without-building` remain supported actions only; compatibility and reuse must be proven by structured evidence rather than inferred from this contract.
+- `build-for-testing` remains supported. General non-Worktree `test-without-building` remains an action, but Worktree Session requests fail closed until the daemon consumes a validated immutable build artifact identity; compatibility must never be inferred from a Shared DerivedData path.
 
 ### Core Rules
 
@@ -221,6 +223,8 @@ See `references/evidence-model.md` for dominance and gate rules. `final-gate` mu
 ## Relationship to Other Skills
 
 `workflow-orchestration` owns platform-neutral checkpoints; this Skill owns Apple verification evidence. `ios-automation` supplies UI/runtime artifacts, independent `code-review` supplies review evidence, and `ios-verification(final-gate)` only judges the combined story.
+
+多 Worktree Session 必须先由共享 Git/Workflow 能力冻结 committed source identity，再按 `references/worktree-session.md` 生成 Apple daemon 请求和 Shared DerivedData 产物身份；本 Skill 不复制通用 Git Patch/Registry 实现。
 
 ## Token Budget
 

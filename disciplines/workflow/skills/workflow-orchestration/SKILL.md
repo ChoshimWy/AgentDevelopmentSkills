@@ -29,6 +29,8 @@ Provide platform-neutral task classification, checkpoints, role boundaries, revi
 - 修复/实现任务首次写入前必须完成 `CP0 Intent Lock` 简短计划。
 - 实现链路必须是：实施 → 定向验证或 `no_test_reason` → 独立 reviewer subAgent。
 - reviewer 不可用或存在阻塞问题时不得宣告完成。
+- 多 Session Worktree 的 Registry、Stacked 依赖与状态转换由本 Skill 管理；Git Worktree/Base/Patch 交给 `session-worktree`。
+- Session Final Gate 只能消费 clean Checkpoint Commit 集合，并复用 Adapter Request/Result、Node Attempt 与 Run Ledger 证据；Gate 后不得再生成或改写 Commit。
 - 同类失败按 `fail-fix-report` 最多回环两次；超限后报告 blocked。
 - 不在本 Skill 中硬编码平台 Skill 名、workspace、scheme、device、Gradle task、浏览器或后端部署命令。
 
@@ -50,6 +52,7 @@ Provide platform-neutral task classification, checkpoints, role boundaries, revi
 - `CP3 Final Gate`：验证有效且独立 review 无阻塞。
 
 详见 `references/checkpoint-contract.md` 与 `references/handoff-loop.md`。
+多 Worktree Session 详见 `references/session-gates.md`。
 
 ## Inputs
 

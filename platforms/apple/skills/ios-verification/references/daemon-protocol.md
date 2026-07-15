@@ -1,12 +1,36 @@
 # Verification Coordinator and build-queue Protocol
 
-This is the normative target contract. The current wrapper implements exact-request dedupe/cache and atomic queue publication; lane priority, Session integration, cross-request dominance, failure caching, request coalescing and automatic `.xctestrun` registration remain scaffolded follow-up work.
+This is the normative target contract. The current wrapper implements exact-request dedupe/cache, queue schema/generation checks, atomic ready publication, startup reconciliation and structured queue repair; lane priority, Session integration, cross-request dominance, failure caching, request coalescing and automatic `.xctestrun` registration remain scaffolded follow-up work.
+
+## Queue integrity and recovery
+
+- The queue root carries canonical `queue-meta.json` with the supported schema and generation.
+- A job becomes executable only after all metadata and `command.args0` are hashed into canonical `job-manifest.json`, its digest is frozen, `ready=true` and finally `state=queued` are atomically published from staging. The daemon revalidates the complete inventory and strict NUL-argument shape before claim and immediately before command execution.
+- Missing or unknown state is `invalid`; it must never be interpreted as `queued`.
+- A running daemon owns canonical `daemon-owner.json` and `daemon-heartbeat.json`; its PID is accepted only when generation, 256-bit instance token, queue root and fresh heartbeat all match. Automatic and direct daemon entry share one token-bound `start.lockdir` adoption gate, so only the winning process may publish the owner record. Each `running` job binds the same PID/token and the controlled `active_job` pointer.
+- Before a daemon starts, offline reconciliation marks orphaned `running` jobs failed, rejects expired, incomplete or tampered `queued` jobs, removes stale runtime locks/leases, and quarantines invalid legacy entries by default. The live daemon quarantines an invalid queued job itself instead of invoking offline repair.
+- An incompatible queue schema/generation blocks daemon startup rather than guessing migration compatibility.
+- Missing queue metadata is initialized automatically only for an offline queue containing no staging, active or nonterminal/invalid legacy state. Otherwise publication fails closed and requires an explicit doctor/repair decision.
+- `--queue-doctor` is read-only and safe while the daemon is active. Mutating `--repair` refuses with exit 75 while a validated daemon (or an untrusted live PID) exists; stop the daemon first. Offline `--repair` quarantines invalid entries, while `--repair --delete-invalid` is the explicit destructive variant.
+- `--queue-status --json` emits the same structured health inventory without repairing it.
+- Terminal `succeeded` and `failed` history is retained and never re-executed. A terminal success is cacheable only when its v2 publication manifest/generation and structured artifacts still validate; legacy terminal history is diagnostic-only. Invalid history is removed from the executable set so it cannot delay a newly published valid job, and an attached waiter exits 70 if its job is deleted or quarantined.
+- Every runtime pointer (`active_job`, Slot lease owner) must resolve to a direct, real child of the queue-owned `jobs/` directory. Recovery never writes through an external or symlinked path.
 
 ## Request lifecycle
 
 ```text
 planned -> attached | queued -> running -> succeeded | failed | blocked
 ```
+
+### History incident runbook
+
+1. Run `codex_verify --queue-status --json` or read-only `--queue-doctor`; do not delete records based only on directory age.
+2. If the daemon is healthy and active, let it finish or stop that validated instance first. Online repair is intentionally refused.
+3. Run offline `--queue-doctor --repair` to quarantine invalid/missing-state/stale queued records. Use `--delete-invalid` only when explicit destruction is intended.
+4. Re-run read-only doctor and require `healthy=true` before submitting new verification.
+5. If metadata/generation is incompatible or a live PID has no valid owner heartbeat, keep publication blocked. Investigate/stop the legacy process rather than rewriting metadata or killing an unverified PID.
+
+This makes bad history non-executable and non-cacheable. A new valid job is never required to scan or consume quarantined history, while terminal history may be pruned later under an independent retention policy.
 
 Every request carries:
 

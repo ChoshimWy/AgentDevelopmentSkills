@@ -36,7 +36,7 @@ Repository / Task / Target Files
 - **Runtime 状态机**：覆盖 retry、timeout、cancel、stale、approval 和 resume。
 - **资源调度**：确定性锁顺序，记录 requested、acquired、released、timed-out 与 cancelled 事件。
 - **可恢复 Ledger**：append-only JSONL、Plan fingerprint 校验和中断恢复。
-- **离线合同校验**：18 个版本化 JSON Schema、Manifest/Provider/Install Plan/Migration Audit 校验和非法 golden 样例。
+- **离线合同校验**：22 个版本化 JSON Schema、Manifest/Provider/Install Plan/Migration Audit 校验和非法 golden 样例。
 - **仓内 Apple Provider**：`platforms/apple/provider/manifest.json` 默认参与源码态和安装态解析；P2A 外部 Provider 路径仍保留为兼容测试，重复 Provider 不静默覆盖。
 - **选择安装**：`agent-skills install` 支持 `--core-only`、单/多平台、`all` 与显式 `--discipline`；版本化 `package_requires` 自动求必需依赖闭包，并记录选择原因和解析边。
 - **单一全局 AGENTS**：Core、共享 Discipline 与已选平台只贡献带 scope 的 Fragment，按依赖拓扑稳定合成一个受管 `AGENTS.md`；Fragment/Skill 冲突及未受管目标均 fail-closed。
@@ -241,16 +241,17 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 
 当前基线：
 
-- 183 个 unittest
-- 18 个 JSON Schema
-- 6 个非法 contract golden
+- 216 个 unittest
+- 22 个 JSON Schema
+- 7 个非法 contract golden
 - 13 个 package Manifest：Core、Apple、4 个 bootstrap-only 平台、5 个共享 Discipline 与 1 个显式 Codex Runtime Config；外部 Provider fixture 仅作兼容回归
-- 288 个 iOSAgentSkills 来源受控文件：195 retained、58 relocated、34 transformed、1 removed，另有 14 additions；当前为 13 个 Apple Skills + 7 个共享 Skills
+- 288 个 iOSAgentSkills 来源受控文件：195 retained、58 relocated、34 transformed、1 removed，另有 20 additions；当前为 13 个 Apple Skills + 8 个共享 Skills
 - 4 个 Apple legacy/Core route comparison cases
 
 ## 架构与实施文档
 
 - [跨平台研发工作流架构](docs/cross-platform-agent-workflow-architecture.html)
+- [多 Session Worktree 跨平台架构与 iOS 首期方案](docs/multi-session-worktree-architecture.html)
 - [Phase 1 Core Foundation 实施清单](docs/implementation/phase-1-core-foundation.html)
 - [Phase 2 iOSAgentSkills Compatibility & Monorepo Integration 实施清单](docs/implementation/phase-2-ios-agent-skills-integration.html)
 - [Phase 3 Design Provider & Canonical UI IR 实施清单](docs/implementation/phase-3-design-provider-and-canonical-ir.html)

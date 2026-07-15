@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 from typing import Any
+import zipfile
 
 try:
     import termios
@@ -70,6 +72,7 @@ ACTIVATED_FILES: tuple[tuple[str, str, int], ...] = (
     ("platforms/apple/config/codex/templates/agents/tester.toml", "agents/tester.toml", 0o644),
     ("platforms/apple/config/codex/templates/codex_verify.example.sh", "bin/codex_verify", 0o755),
     ("platforms/apple/tools/digest-xcodebuild-log.sh", "bin/digest-xcodebuild-log", 0o755),
+    ("@generated/agent-session.pyz", "bin/agent-session", 0o755),
     (
         "platforms/apple/config/codex/templates/codex_verify.example.sh",
         "templates/codex_verify.example.sh",
@@ -109,6 +112,28 @@ ANSI_DIM = "\033[2m"
 
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _activation_bytes(source: str) -> bytes:
+    if source != "@generated/agent-session.pyz":
+        return (ROOT / source).read_bytes()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        main = zipfile.ZipInfo("__main__.py", date_time=(1980, 1, 1, 0, 0, 0))
+        main.external_attr = 0o644 << 16
+        archive.writestr(
+            main,
+            "from agent_workflow.worktree_sessions.cli import main\nraise SystemExit(main())\n",
+        )
+        package_root = ROOT / "src" / "agent_workflow"
+        for path in sorted(package_root.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            relative = path.relative_to(ROOT / "src").as_posix()
+            info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
+            info.external_attr = 0o644 << 16
+            archive.writestr(info, path.read_bytes())
+    return b"#!/usr/bin/env python3\n" + buffer.getvalue()
 
 
 def _path_exists(path: Path) -> bool:
@@ -531,7 +556,7 @@ def _activation_records(target: Path) -> list[dict[str, Any]]:
         {
             "path": destination,
             "mode": mode,
-            "sha256": _digest((ROOT / source).read_bytes()),
+            "sha256": _digest(_activation_bytes(source)),
         }
         for source, destination, mode in ACTIVATED_FILES
     ]
@@ -550,12 +575,13 @@ def _validate_activation_lock(target: Path) -> bool:
     if not isinstance(files, list):
         raise ContractError("activation lock files must be a list")
     expected_paths = {destination for _, destination, _ in ACTIVATED_FILES}
+    legacy_paths = expected_paths - {"bin/agent-session"}
     actual_paths = {
         item.get("path")
         for item in files
         if isinstance(item, dict)
     }
-    if len(files) != len(expected_paths) or actual_paths != expected_paths:
+    if frozenset(actual_paths) not in {frozenset(expected_paths), frozenset(legacy_paths)} or len(files) != len(actual_paths):
         raise ContractError("activation lock does not cover the managed file set")
     for item in files:
         path = target / item["path"]
@@ -578,7 +604,7 @@ def _preflight_activation(target: Path, *, adopting_legacy: bool) -> None:
         path = target / destination
         if not _path_exists(path):
             continue
-        if path.is_symlink() or not path.is_file() or path.read_bytes() != (ROOT / source).read_bytes():
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != _activation_bytes(source):
             raise ContractError(f"refusing to overwrite unmanaged activation file: {destination}")
 
 
@@ -620,7 +646,7 @@ def _activation_plan(target: Path, config_candidate: bytes) -> dict[str, Any]:
     unchanged: list[str] = []
     for source, destination, mode in ACTIVATED_FILES:
         path = target / destination
-        expected = (ROOT / source).read_bytes()
+        expected = _activation_bytes(source)
         if path.is_file() and not path.is_symlink() and path.read_bytes() == expected and path.stat().st_mode & 0o777 == mode:
             unchanged.append(destination)
         else:
@@ -643,7 +669,7 @@ def _activate(target: Path, config_candidate: bytes) -> dict[str, Any]:
     writes: list[tuple[Path, bytes, int]] = []
     for source, destination, mode in ACTIVATED_FILES:
         path = target / destination
-        expected = (ROOT / source).read_bytes()
+        expected = _activation_bytes(source)
         if (
             not path.is_file()
             or path.is_symlink()

@@ -1,0 +1,41 @@
+{
+  "$id": "https://agent-workflow.local/schemas/worktree-session-gate-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "checkpoint_commits": {
+      "additionalProperties": {"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$", "type": "string"},
+      "type": "object"
+    },
+    "diagnostics": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {"minLength": 1, "type": "string"},
+          "message": {"minLength": 1, "type": "string"}
+        },
+        "required": ["code", "message"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "review_refs": {"items": {"minLength": 1, "type": "string"}, "type": "array", "uniqueItems": true},
+    "schema_version": {"const": "1.0"},
+    "session_id": {"pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", "type": "string"},
+    "source_identity": {"pattern": "^session-source:[0-9a-f]{64}$", "type": "string"},
+    "status": {"enum": ["passed", "blocked"]},
+    "verification_refs": {"items": {"minLength": 1, "type": "string"}, "type": "array", "uniqueItems": true}
+  },
+  "required": [
+    "schema_version",
+    "session_id",
+    "source_identity",
+    "checkpoint_commits",
+    "verification_refs",
+    "review_refs",
+    "status",
+    "diagnostics"
+  ],
+  "title": "Worktree Session Gate Result v1",
+  "type": "object"
+}

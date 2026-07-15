@@ -19,4 +19,6 @@
 - Install Plan v2 必须冻结包来源 hash、Capability Provider、flattened asset allowlist 与 AGENTS rule trace；Binding 目标必须存在于所选依赖闭包且权限 profile 完全兼容。
 - 必需能力缺失、依赖循环、非法状态转换、权限扩大和未知 Schema 版本必须 fail-closed。
 - iOSAgentSkills Migration Audit v2 必须保持 288 个来源项唯一可追踪；License/NOTICE provenance 为 `pending` 时不得宣称发布就绪。
+- 新增或修改任何 package 的 `skills/*/SKILL.md` 时，保持 Skill Schema v1 frontmatter 与必需章节；影响职责边界、路由或 Capability Binding 时，同步更新对应 Manifest、Provider 或 `platforms/apple/skills/TAXONOMY.md`。
+- Skill 改动后对受影响目录运行 `python3 platforms/apple/scripts/lint_skill_schema.py --skills-dir <package>/skills`；需将警告作为失败时追加 `--strict`。
 - 实现改动执行最窄单元测试和 Conformance；最终由独立 reviewer subAgent 执行 `code-review`。

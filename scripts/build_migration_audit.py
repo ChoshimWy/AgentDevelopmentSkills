@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import hashlib
 from pathlib import Path
 import sys
@@ -95,6 +96,46 @@ def _package_catalog() -> dict[str, tuple[Path, dict[str, Any]]]:
     return result
 
 
+def _apply_apple_override_records(
+    audit_template: dict[str, Any],
+    source: dict[str, Any],
+    overrides_document: dict[str, Any],
+) -> dict[str, Any]:
+    """Refresh audited Apple hashes from the explicit provenance records."""
+    result = deepcopy(audit_template)
+    source_files = {item["path"]: item for item in source["files"]}
+    entries = {entry["source_path"]: entry for entry in result["entries"]}
+    for override in overrides_document["overrides"]:
+        path = override["path"]
+        source_item = source_files.get(path)
+        entry = entries.get(path)
+        if source_item is None or entry is None or source_item["sha256"] != override["source_sha256"]:
+            raise ContractError(f"Apple migration override source identity is stale: {path}")
+        targets = [
+            target for target in entry["targets"]
+            if target["package"] == "apple" and target["path"] == path
+        ]
+        if len(targets) != 1:
+            raise ContractError(f"Apple migration override target is missing or ambiguous: {path}")
+        targets[0]["sha256"] = override["package_sha256"]
+        entry["disposition"] = "transformed"
+        entry["reason"] = override["reason"]
+
+    additions = {
+        (addition["target"]["package"], addition["target"]["path"]): addition
+        for addition in result["additions"]
+    }
+    for override in overrides_document["additions"]:
+        key = ("apple", override["path"])
+        addition = additions.get(key)
+        if addition is None:
+            raise ContractError(f"Apple migration addition is missing from the audit: {override['path']}")
+        addition["target"]["mode"] = override["mode"]
+        addition["target"]["sha256"] = override["package_sha256"]
+        addition["reason"] = override["reason"]
+    return result
+
+
 def _package_files(package_root: Path, roots: list[str]) -> list[dict[str, Any]]:
     files: list[dict[str, Any]] = []
     for root_name in roots:
@@ -126,6 +167,7 @@ def build_documents(audit_template: dict[str, Any] | None = None) -> tuple[dict[
     map_path = ROOT / "migration" / "ios-agent-skills-map-v2.json"
     if audit_template is None:
         audit_template = load(map_path) if map_path.is_file() else _initial_audit(source, overrides_document)
+    audit_template = _apply_apple_override_records(audit_template, source, overrides_document)
     map_document = _with_content_digest({
         key: value for key, value in audit_template.items() if key != "content_sha256"
     })

@@ -51,7 +51,23 @@ class RunLedger:
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(dumps(event))
         if event_type == "node-attempt":
-            self.value["node_attempts"].append(value)
+            # JSONL remains append-only, while the validated materialized view keeps
+            # exactly one current snapshot for each logical attempt.  Resume may
+            # advance an approval-blocked attempt without minting a new attempt id.
+            # Replacing that snapshot avoids ambiguous duplicate identities in the
+            # gate-facing ledger contract without discarding the event history.
+            existing = next(
+                (
+                    index
+                    for index, attempt in enumerate(self.value["node_attempts"])
+                    if attempt["attempt_id"] == value["attempt_id"]
+                ),
+                None,
+            )
+            if existing is None:
+                self.value["node_attempts"].append(value)
+            else:
+                self.value["node_attempts"][existing] = value
         elif event_type == "resource-event":
             self.value["resource_events"].append(value)
         elif event_type == "approval-record":
