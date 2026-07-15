@@ -1,0 +1,31 @@
+{
+  "bindings": {
+    "documentation.html": {"kind": "skill", "name": "html-docs"}
+  },
+  "capabilities": [
+    {
+      "concurrency_keys": ["repository-write:{target-root}"],
+      "id": "documentation.html",
+      "idempotent": false,
+      "permission_profile": "project-write",
+      "side_effects": ["html-documents"],
+      "version": "1.0"
+    }
+  ],
+  "conflicts": [],
+  "detection": {"medium": [], "strong": [], "weak": []},
+  "id": "documentation",
+  "installation": {
+    "asset_roots": [],
+    "instruction_fragments": [],
+    "skill_roots": ["skills"]
+  },
+  "kind": "discipline",
+  "optional_requires": [],
+  "package_requires": [],
+  "permissions": {"detection": "repository-read-only"},
+  "requires": [],
+  "schema_version": "1.0",
+  "targets": [],
+  "version": "0.1.0"
+}

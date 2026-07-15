@@ -2,28 +2,314 @@
   "$id": "https://agent-workflow.local/schemas/plugin-manifest-v1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "bindings": {"type": "object"},
-    "capabilities": {"items": {"type": "object"}, "type": "array"},
-    "conflicts": {"items": {"type": "string"}, "type": "array"},
-    "detection": {
-      "properties": {
-        "medium": {"items": {"type": "string"}, "type": "array"},
-        "strong": {"items": {"type": "string"}, "type": "array"},
-        "weak": {"items": {"type": "string"}, "type": "array"}
-      },
-      "required": ["strong", "medium", "weak"],
+    "bindings": {
       "type": "object"
     },
-    "id": {"type": "string"},
-    "kind": {"enum": ["platform", "stack", "discipline", "adapter"]},
-    "optional_requires": {"items": {"type": "string"}, "type": "array"},
-    "permissions": {"type": "object"},
-    "requires": {"items": {"type": "string"}, "type": "array"},
-    "schema_version": {"const": "1.0"},
-    "targets": {"items": {"type": "string"}, "type": "array"},
-    "version": {"type": "string"}
+    "capabilities": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "conflicts": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "detection": {
+      "properties": {
+        "medium": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "strong": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "weak": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "strong",
+        "medium",
+        "weak"
+      ],
+      "type": "object"
+    },
+    "id": {
+      "type": "string"
+    },
+    "implementation_status": {
+      "enum": [
+        "implemented",
+        "bootstrap-only"
+      ]
+    },
+    "installation": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_roots": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "instruction_fragments": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "merge_strategy": {
+                "enum": [
+                  "append",
+                  "locked"
+                ]
+              },
+              "order": {
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "scope": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "scope",
+              "order",
+              "merge_strategy"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "provider_manifest": {
+          "type": "string"
+        },
+        "skill_roots": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "asset_roots",
+        "instruction_fragments",
+        "skill_roots"
+      ],
+      "type": "object"
+    },
+    "kind": {
+      "enum": [
+        "core",
+        "platform",
+        "stack",
+        "discipline",
+        "adapter",
+        "runtime-config"
+      ]
+    },
+    "manual_only_capabilities": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "manual_only_metadata": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "entrypoint": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "review_by": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entrypoint",
+          "reason",
+          "review_by"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "optional_requires": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "package": {
+      "properties": {
+        "core_compatibility": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "core_compatibility"
+      ],
+      "type": "object"
+    },
+    "package_requires": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "required_capabilities": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "requirement": {
+            "enum": [
+              "required",
+              "optional"
+            ]
+          },
+          "version": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "requirement",
+          "required_capabilities"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "permissions": {
+      "type": "object"
+    },
+    "provider_contract": {
+      "properties": {
+        "advisory_capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allowed_permission_profiles": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allowed_side_effects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "capability_permissions": {
+          "type": "object"
+        },
+        "capability_side_effects": {
+          "type": "object"
+        },
+        "optional_capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "package_compatibility": {
+          "type": "string"
+        },
+        "package_id": {
+          "type": "string"
+        },
+        "required_capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "package_id",
+        "package_compatibility",
+        "required_capabilities",
+        "optional_capabilities",
+        "advisory_capabilities",
+        "allowed_permission_profiles",
+        "allowed_side_effects",
+        "capability_permissions",
+        "capability_side_effects"
+      ],
+      "type": "object"
+    },
+    "requires": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "role": {
+      "enum": [
+        "builtin",
+        "bootstrap",
+        "provider"
+      ]
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "targets": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "version": {
+      "type": "string"
+    }
   },
-  "required": ["schema_version", "id", "kind", "detection", "capabilities"],
+  "required": [
+    "schema_version",
+    "id",
+    "kind",
+    "detection",
+    "capabilities"
+  ],
   "title": "Plugin Manifest v1",
   "type": "object"
 }

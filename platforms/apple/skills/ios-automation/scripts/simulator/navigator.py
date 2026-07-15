@@ -1,0 +1,648 @@
+#!/usr/bin/env python3
+"""
+iOS Simulator Navigator - Smart Element Finder and Interactor
+
+Finds and interacts with UI elements using accessibility data.
+Prioritizes structured navigation over pixel-based interaction.
+
+This script is the core automation tool for iOS simulator navigation. It finds
+UI elements by text, type, or accessibility ID and performs actions on them
+(tap, enter text). Uses semantic element finding instead of fragile pixel coordinates.
+
+Key Features:
+- Find elements by text (fuzzy or exact matching)
+- Find elements by type (Button, TextField, etc.)
+- Find elements by accessibility identifier
+- Tap elements at their center point
+- Enter text into text fields
+- List all tappable elements on screen
+- Automatic element caching for performance
+
+Usage Examples:
+    # Find and tap a button by text
+    python3 scripts/simulator/navigator.py --find-text "Login" --tap --udid <device-id>
+
+    # Enter text into first text field
+    python3 scripts/simulator/navigator.py --find-type TextField --index 0 --enter-text "username" --udid <device-id>
+
+    # Tap element by accessibility ID
+    python3 scripts/simulator/navigator.py --find-id "submitButton" --tap --udid <device-id>
+
+    # List all interactive elements
+    python3 scripts/simulator/navigator.py --list --udid <device-id>
+
+    # Tap at specific coordinates (fallback)
+    python3 scripts/simulator/navigator.py --tap-at 200,400 --udid <device-id>
+
+    # Tap semantic ref from screen_mapper.py --refs
+    python3 scripts/simulator/navigator.py --ref @e1 --tap --udid <device-id>
+
+Output Format:
+    Tapped: Button "Login" at (320, 450)
+    Entered text in: TextField "Username"
+    Not found: text='Submit'
+
+Navigation Priority (best to worst):
+    1. Find by accessibility label/text (most reliable)
+    2. Find by element type + index (good for forms)
+    3. Find by accessibility ID (precise but app-specific)
+    4. Tap at coordinates (last resort, fragile)
+
+Technical Details:
+- Uses IDB's accessibility tree via `idb ui describe-all --json --nested`
+- Caches tree for multiple operations (call with force_refresh to update)
+- Finds elements by parsing tree recursively
+- Calculates tap coordinates from element frame center
+- Uses `idb ui tap` for tapping, `idb ui text` for text entry
+- Extracts data from AXLabel, AXValue, and AXUniqueId fields
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+
+from common import (
+    flatten_tree,
+    get_accessibility_tree,
+    get_device_screen_size,
+    is_semantic_ref_node,
+    resolve_udid,
+    transform_screenshot_coords,
+)
+
+
+@dataclass
+class Element:
+    """Represents a UI element from accessibility tree."""
+
+    type: str
+    label: str | None
+    value: str | None
+    identifier: str | None
+    frame: dict[str, float]
+    traits: list[str]
+    enabled: bool = True
+    ref: str | None = None
+
+    @property
+    def center(self) -> tuple[int, int]:
+        """Calculate center point for tapping."""
+        x = int(self.frame["x"] + self.frame["width"] / 2)
+        y = int(self.frame["y"] + self.frame["height"] / 2)
+        return (x, y)
+
+    @property
+    def description(self) -> str:
+        """Human-readable description."""
+        label = self.label or self.value or self.identifier or "Unnamed"
+        prefix = f"{self.ref} " if self.ref else ""
+        return f'{prefix}{self.type} "{label}"'
+
+
+class Navigator:
+    """Navigates iOS apps using accessibility data."""
+
+    def __init__(self, udid: str | None = None):
+        """Initialize navigator with optional device UDID."""
+        self.udid = udid
+        self._tree_cache = None
+
+    def get_accessibility_tree(self, force_refresh: bool = False) -> dict:
+        """Get accessibility tree (cached for efficiency)."""
+        if self._tree_cache and not force_refresh:
+            return self._tree_cache
+
+        # Delegate to shared utility
+        self._tree_cache = get_accessibility_tree(self.udid, nested=True)
+        return self._tree_cache
+
+    def _flatten_tree(self, node: dict, elements: list[Element] | None = None) -> list[Element]:
+        """Flatten accessibility tree into list of elements."""
+        if elements is None:
+            elements = []
+
+        # Create element from node
+        if node.get("type"):
+            element = Element(
+                type=node.get("type", "Unknown"),
+                label=node.get("AXLabel"),
+                value=node.get("AXValue"),
+                identifier=node.get("AXUniqueId"),
+                frame=node.get("frame", {}),
+                traits=node.get("traits", []),
+                enabled=node.get("enabled", True),
+            )
+            if is_semantic_ref_node(node):
+                element.ref = f"@e{sum(1 for item in elements if item.ref) + 1}"
+            elements.append(element)
+
+        # Process children
+        for child in node.get("children", []):
+            self._flatten_tree(child, elements)
+
+        return elements
+
+    def find_element_by_ref(self, element_ref: str) -> Element | None:
+        """
+        Find an element by semantic ref from the current accessibility snapshot.
+
+        Refs are snapshot-local and should be refreshed after any UI state change.
+        """
+        normalized_ref = element_ref.strip()
+        if re.fullmatch(r"e\d+", normalized_ref):
+            normalized_ref = f"@{normalized_ref}"
+        if not re.fullmatch(r"@e\d+", normalized_ref):
+            return None
+
+        for element in self.list_elements(force_refresh=True):
+            if element.ref == normalized_ref:
+                return element
+        return None
+
+    def list_elements(self, force_refresh: bool = False) -> list[Element]:
+        """Get flat list of all UI elements on current screen."""
+        tree = self.get_accessibility_tree(force_refresh)
+        return self._flatten_tree(tree)
+
+    def find_element(
+        self,
+        text: str | None = None,
+        element_type: str | None = None,
+        identifier: str | None = None,
+        index: int = 0,
+        fuzzy: bool = True,
+    ) -> Element | None:
+        elements = self.find_elements(
+            text=text,
+            element_type=element_type,
+            identifier=identifier,
+            fuzzy=fuzzy,
+        )
+        if elements and index < len(elements):
+            return elements[index]
+        return None
+
+    def find_elements(
+        self,
+        text: str | None = None,
+        element_type: str | None = None,
+        identifier: str | None = None,
+        fuzzy: bool = True,
+        include_disabled: bool = False,
+    ) -> list[Element]:
+        """
+        Find elements by various criteria.
+
+        Args:
+            text: Text to search in label/value
+            element_type: Type of element (Button, TextField, etc.)
+            identifier: Accessibility identifier
+            fuzzy: Use fuzzy matching for text
+            include_disabled: Include disabled elements in matching
+
+        Returns:
+            List of matching elements
+        """
+        tree = self.get_accessibility_tree()
+        elements = self._flatten_tree(tree)
+
+        matches = []
+
+        for elem in elements:
+            # Skip disabled elements
+            if not include_disabled and not elem.enabled:
+                continue
+
+            # Check type
+            if element_type and elem.type != element_type:
+                continue
+
+            # Check identifier (exact match)
+            if identifier and elem.identifier != identifier:
+                continue
+
+            # Check text (in label or value)
+            if text:
+                elem_text = (elem.label or "") + " " + (elem.value or "")
+                if fuzzy:
+                    if text.lower() not in elem_text.lower():
+                        continue
+                elif text not in (elem.label, elem.value):
+                    continue
+
+            matches.append(elem)
+
+        return matches
+
+    def wait_for_expectations(
+        self,
+        expect_id: str | None = None,
+        expect_text: str | None = None,
+        expect_value: str | None = None,
+        timeout: float = 10.0,
+        poll_interval: float = 0.3,
+        fail_on_duplicate_id: bool = True,
+    ) -> tuple[bool, str]:
+        """
+        Poll accessibility tree until expected post-condition is met.
+
+        Returns:
+            (success, message)
+        """
+        deadline = time.monotonic() + max(0.1, timeout)
+        poll_interval = max(0.1, poll_interval)
+        last_message = "Expectation not met"
+
+        while True:
+            elements = self.list_elements(force_refresh=True)
+
+            if expect_id:
+                id_matches = [elem for elem in elements if elem.identifier == expect_id]
+                if fail_on_duplicate_id and len(id_matches) > 1:
+                    return (False, f"Expectation failed: duplicate AXUniqueId '{expect_id}'")
+                if len(id_matches) == 0:
+                    last_message = f"Waiting for id='{expect_id}'"
+                else:
+                    last_message = f"Found id='{expect_id}'"
+
+            if expect_text:
+                text_matches = [
+                    elem
+                    for elem in elements
+                    if expect_text.lower() in ((elem.label or "") + " " + (elem.value or "")).lower()
+                ]
+                if len(text_matches) == 0:
+                    last_message = f"Waiting for text containing '{expect_text}'"
+                elif not expect_id:
+                    last_message = f"Found text containing '{expect_text}'"
+
+            if expect_value:
+                value_matches = [elem for elem in elements if (elem.value or "") == expect_value]
+                if len(value_matches) == 0:
+                    last_message = f"Waiting for value='{expect_value}'"
+                elif not expect_id and not expect_text:
+                    last_message = f"Found value='{expect_value}'"
+
+            id_ok = True
+            text_ok = True
+            value_ok = True
+
+            if expect_id:
+                id_count = sum(1 for elem in elements if elem.identifier == expect_id)
+                if fail_on_duplicate_id and id_count > 1:
+                    return (False, f"Expectation failed: duplicate AXUniqueId '{expect_id}'")
+                id_ok = id_count == 1 if fail_on_duplicate_id else id_count >= 1
+
+            if expect_text:
+                text_ok = any(
+                    expect_text.lower()
+                    in ((elem.label or "") + " " + (elem.value or "")).lower()
+                    for elem in elements
+                )
+
+            if expect_value:
+                value_ok = any((elem.value or "") == expect_value for elem in elements)
+
+            if id_ok and text_ok and value_ok:
+                return (True, "Expectation satisfied")
+
+            if time.monotonic() >= deadline:
+                return (False, f"Expectation timeout: {last_message}")
+
+            time.sleep(poll_interval)
+
+    def tap(self, element: Element) -> bool:
+        """Tap on an element."""
+        x, y = element.center
+        return self.tap_at(x, y)
+
+    def tap_at(self, x: int, y: int) -> bool:
+        """Tap at specific coordinates."""
+        cmd = ["idb", "ui", "tap", str(x), str(y)]
+        if self.udid:
+            cmd.extend(["--udid", self.udid])
+
+        try:
+            subprocess.run(cmd, capture_output=True, check=True)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+    def enter_text(self, text: str, element: Element | None = None) -> bool:
+        """
+        Enter text into element or current focus.
+
+        Args:
+            text: Text to enter
+            element: Optional element to tap first
+
+        Returns:
+            Success status
+        """
+        # Tap element if provided
+        if element:
+            if not self.tap(element):
+                return False
+            # Small delay for focus
+            import time
+
+            time.sleep(0.5)
+
+        # Enter text
+        cmd = ["idb", "ui", "text", text]
+        if self.udid:
+            cmd.extend(["--udid", self.udid])
+
+        try:
+            subprocess.run(cmd, capture_output=True, check=True)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+    def find_and_tap(
+        self,
+        text: str | None = None,
+        element_type: str | None = None,
+        identifier: str | None = None,
+        element_ref: str | None = None,
+        index: int = 0,
+    ) -> tuple[bool, str]:
+        """
+        Find element and tap it.
+
+        Returns:
+            (success, message) tuple
+        """
+        element = (
+            self.find_element_by_ref(element_ref)
+            if element_ref
+            else self.find_element(text, element_type, identifier, index)
+        )
+
+        if not element:
+            criteria = []
+            if element_ref:
+                criteria.append(f"ref='{element_ref}'")
+            if text:
+                criteria.append(f"text='{text}'")
+            if element_type:
+                criteria.append(f"type={element_type}")
+            if identifier:
+                criteria.append(f"id={identifier}")
+            return (False, f"Not found: {', '.join(criteria)}")
+
+        if self.tap(element):
+            return (True, f"Tapped: {element.description} at {element.center}")
+        return (False, f"Failed to tap: {element.description}")
+
+    def find_and_enter_text(
+        self,
+        text_to_enter: str,
+        find_text: str | None = None,
+        element_type: str | None = "TextField",
+        identifier: str | None = None,
+        element_ref: str | None = None,
+        index: int = 0,
+    ) -> tuple[bool, str]:
+        """
+        Find element and enter text into it.
+
+        Returns:
+            (success, message) tuple
+        """
+        element = (
+            self.find_element_by_ref(element_ref)
+            if element_ref
+            else self.find_element(find_text, element_type, identifier, index)
+        )
+
+        if not element:
+            return (False, "TextField not found")
+
+        if element_ref and element.type not in ("TextField", "SecureTextField"):
+            return (False, f"Ref {element_ref} is {element.type}, not a text input")
+
+        if self.enter_text(text_to_enter, element):
+            return (True, f"Entered text in: {element.description}")
+        return (False, "Failed to enter text")
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(description="Navigate iOS apps using accessibility data")
+
+    # Finding options
+    parser.add_argument("--find-text", help="Find element by text (fuzzy match)")
+    parser.add_argument("--find-exact", help="Find element by exact text")
+    parser.add_argument("--find-type", help="Element type (Button, TextField, etc.)")
+    parser.add_argument("--find-id", help="Accessibility identifier")
+    parser.add_argument(
+        "--ref",
+        help="Semantic ref from screen_mapper.py --refs, e.g. @e1. Valid only for current screen",
+    )
+    parser.add_argument("--index", type=int, default=0, help="Which match to use (0-based)")
+
+    # Action options
+    parser.add_argument("--tap", action="store_true", help="Tap the found element")
+    parser.add_argument("--tap-at", help="Tap at coordinates (x,y)")
+    parser.add_argument("--enter-text", help="Enter text into element")
+    parser.add_argument(
+        "--expect-id",
+        help="Expected AXUniqueId after action. Polls until found or timeout.",
+    )
+    parser.add_argument(
+        "--expect-text",
+        help="Expected text (label/value contains) after action. Polls until found or timeout.",
+    )
+    parser.add_argument(
+        "--expect-value",
+        help="Expected exact AXValue after action. Polls until found or timeout.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Expectation timeout in seconds (default: 10)",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=0.3,
+        help="Expectation polling interval in seconds (default: 0.3)",
+    )
+    parser.add_argument(
+        "--fail-on-duplicate-id",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fail when AXUniqueId is duplicated (default: true)",
+    )
+
+    # Coordinate transformation
+    parser.add_argument(
+        "--screenshot-coords",
+        action="store_true",
+        help="Interpret tap coordinates as from a screenshot (requires --screenshot-width/height)",
+    )
+    parser.add_argument(
+        "--screenshot-width",
+        type=int,
+        help="Screenshot width for coordinate transformation",
+    )
+    parser.add_argument(
+        "--screenshot-height",
+        type=int,
+        help="Screenshot height for coordinate transformation",
+    )
+
+    # Other options
+    parser.add_argument(
+        "--udid",
+        help="Device UDID (auto-detects booted simulator if not provided)",
+    )
+    parser.add_argument("--list", action="store_true", help="List all tappable elements")
+
+    args = parser.parse_args()
+
+    # Resolve UDID with auto-detection
+    try:
+        udid = resolve_udid(args.udid)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    navigator = Navigator(udid=udid)
+
+    # List mode
+    if args.list:
+        elements = navigator.list_elements()
+
+        # Filter to tappable elements
+        tappable = [
+            e
+            for e in elements
+            if e.enabled and e.type in ["Button", "Link", "Cell", "TextField", "SecureTextField"]
+        ]
+
+        print(f"Tappable elements ({len(tappable)}):")
+        for elem in tappable[:10]:  # Limit output for tokens
+            ref = f"{elem.ref} " if elem.ref else ""
+            print(f"  {ref}{elem.type}: \"{elem.label or elem.value or 'Unnamed'}\" {elem.center}")
+
+        if len(tappable) > 10:
+            print(f"  ... and {len(tappable) - 10} more")
+        sys.exit(0)
+
+    # Direct tap at coordinates
+    if args.tap_at:
+        coords = args.tap_at.split(",")
+        if len(coords) != 2:
+            print("Error: --tap-at requires x,y format")
+            sys.exit(1)
+
+        x, y = int(coords[0]), int(coords[1])
+
+        # Handle coordinate transformation if requested
+        if args.screenshot_coords:
+            if not args.screenshot_width or not args.screenshot_height:
+                print(
+                    "Error: --screenshot-coords requires --screenshot-width and --screenshot-height"
+                )
+                sys.exit(1)
+
+            device_w, device_h = get_device_screen_size(udid)
+            x, y = transform_screenshot_coords(
+                x,
+                y,
+                args.screenshot_width,
+                args.screenshot_height,
+                device_w,
+                device_h,
+            )
+            print(
+                f"Transformed screenshot coords ({coords[0]}, {coords[1]}) "
+                f"to device coords ({x}, {y})"
+            )
+
+        if navigator.tap_at(x, y):
+            print(f"Tapped at ({x}, {y})")
+        else:
+            print(f"Failed to tap at ({x}, {y})")
+            sys.exit(1)
+
+    # Find and tap
+    elif args.tap:
+        text = args.find_text or args.find_exact
+        fuzzy = args.find_text is not None
+
+        success, message = navigator.find_and_tap(
+            text=text,
+            element_type=args.find_type,
+            identifier=args.find_id,
+            element_ref=args.ref,
+            index=args.index,
+        )
+
+        print(message)
+        if not success:
+            sys.exit(1)
+
+    # Find and enter text
+    elif args.enter_text:
+        text = args.find_text or args.find_exact
+
+        success, message = navigator.find_and_enter_text(
+            text_to_enter=args.enter_text,
+            find_text=text,
+            element_type=args.find_type or "TextField",
+            identifier=args.find_id,
+            element_ref=args.ref,
+            index=args.index,
+        )
+
+        print(message)
+        if not success:
+            sys.exit(1)
+
+    # Just find (no action)
+    else:
+        text = args.find_text or args.find_exact
+        fuzzy = args.find_text is not None
+
+        element = (
+            navigator.find_element_by_ref(args.ref)
+            if args.ref
+            else navigator.find_element(
+                text=text,
+                element_type=args.find_type,
+                identifier=args.find_id,
+                index=args.index,
+                fuzzy=fuzzy,
+            )
+        )
+
+        if element:
+            print(f"Found: {element.description} at {element.center}")
+        else:
+            print("Element not found")
+            sys.exit(1)
+
+    if args.expect_id or args.expect_text or args.expect_value:
+        ok, expectation_message = navigator.wait_for_expectations(
+            expect_id=args.expect_id,
+            expect_text=args.expect_text,
+            expect_value=args.expect_value,
+            timeout=args.timeout,
+            poll_interval=args.poll_interval,
+            fail_on_duplicate_id=args.fail_on_duplicate_id,
+        )
+        print(expectation_message)
+        if not ok:
+            sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

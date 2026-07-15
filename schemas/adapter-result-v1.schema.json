@@ -1,0 +1,70 @@
+{
+  "$id": "https://agent-workflow.local/schemas/adapter-result-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {"minLength": 1, "type": "string"},
+          "kind": {"enum": ["structured-report", "test-report", "review-report", "delivery-report", "diagnostics", "raw-log", "other"]},
+          "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+          "uri": {"minLength": 1, "type": "string"}
+        },
+        "required": ["artifact_id", "kind", "sha256", "uri"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "binding": {
+      "additionalProperties": false,
+      "properties": {"kind": {"enum": ["skill", "agent", "script", "tool"]}, "mode": {"minLength": 1, "type": "string"}, "name": {"minLength": 1, "type": "string"}},
+      "required": ["kind", "name"],
+      "type": "object"
+    },
+    "capability": {"minLength": 1, "type": "string"},
+    "cleanup": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {"detail": {"minLength": 1, "type": "string"}, "resource": {"minLength": 1, "type": "string"}, "status": {"enum": ["not-required", "completed", "failed"]}},
+        "required": ["resource", "status", "detail"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "evidence": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_ids": {"items": {"minLength": 1, "type": "string"}, "type": "array", "uniqueItems": true},
+          "data": {"minProperties": 1, "type": "object"},
+          "kind": {"enum": ["validation", "review", "delivery", "diagnostic"]},
+          "status": {"enum": ["passed", "completed", "partial", "blocked", "failed"]},
+          "summary": {"minLength": 1, "type": "string"}
+        },
+        "required": ["kind", "status", "summary", "data", "artifact_ids"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "failure_attribution": {
+      "additionalProperties": false,
+      "properties": {"category": {"enum": ["none", "code", "environment", "provider", "contract"]}, "summary": {"minLength": 1, "type": "string"}},
+      "required": ["category", "summary"],
+      "type": "object"
+    },
+    "invocation_id": {"minLength": 1, "type": "string"},
+    "no_test_reason": {"minLength": 1, "type": "string"},
+    "node_id": {"minLength": 1, "type": "string"},
+    "plan_fingerprint": {"minLength": 1, "type": "string"},
+    "provider": {"minLength": 1, "type": "string"},
+    "request_id": {"minLength": 1, "type": "string"},
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["completed", "partial", "blocked", "failed"]},
+    "suggested_validation": {"minLength": 1, "type": "string"}
+  },
+  "required": ["schema_version", "request_id", "invocation_id", "plan_fingerprint", "node_id", "capability", "provider", "binding", "status", "evidence", "artifacts", "failure_attribution", "cleanup"],
+  "title": "Structured Adapter Result v1",
+  "type": "object"
+}

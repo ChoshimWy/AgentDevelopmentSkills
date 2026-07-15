@@ -92,14 +92,17 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(attempts[0]["status"], "failed")
 
     def test_timeout_retries_only_to_limit_and_releases_resource(self) -> None:
+        plan = deepcopy(self.plan)
+        verification = next(item for item in plan["nodes"] if item["id"] == "apple-2")
+        verification["resource_keys"] = ["build-queue:{target-root}"]
         executor = FakeAdapterExecutor({"verification.apple.affected-tests": "timed-out"})
-        ledger = executor.run(self.plan)
+        ledger = executor.run(plan)
         attempts = [item for item in ledger["node_attempts"] if item["node_id"] == "apple-2"]
         self.assertEqual(len(attempts), 2)
         self.assertTrue(all(item["status"] == "blocked" for item in attempts))
-        self.assertIsNone(executor.scheduler.owner("xcode-build:apple"))
+        self.assertIsNone(executor.scheduler.owner("build-queue:{target-root}"))
         self.assertEqual(
-            [item["action"] for item in ledger["resource_events"] if item["resource_key"] == "build-queue:apple"].count("timed-out"),
+            [item["action"] for item in ledger["resource_events"] if item["resource_key"] == "build-queue:{target-root}"].count("timed-out"),
             2,
         )
 
@@ -163,6 +166,22 @@ class ExecutorTests(unittest.TestCase):
             self.assertEqual(replayed.value["final_status"], "completed")
             self.assertEqual(path.read_bytes(), original)
 
+    def test_ledger_replay_rejects_unknown_event_type(self) -> None:
+        import json
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.jsonl"
+            ledger = RunLedger(self.plan["fingerprint"], path=path)
+            ledger.append("run-started", {"plan_fingerprint": self.plan["fingerprint"]})
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "event_type": "invented-event",
+                    "run_id": ledger.value["run_id"],
+                    "value": {},
+                }) + "\n")
+            with self.assertRaisesRegex(ContractError, "unknown ledger event type"):
+                RunLedger.replay(path, self.plan["fingerprint"])
+
     def test_resume_retries_failed_nodes_and_preserves_passed_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ledger.jsonl"
@@ -186,7 +205,7 @@ class ExecutorTests(unittest.TestCase):
         executor = FakeAdapterExecutor({"implementation.apple": "cancelled"})
         ledger = executor.run(self.plan)
         self.assertEqual(ledger["final_status"], "cancelled")
-        self.assertIsNone(executor.scheduler.owner("repository-write:apple"))
+        self.assertIsNone(executor.scheduler.owner("repository-write:{target-root}"))
         self.assertIn("cancelled", [item["action"] for item in ledger["resource_events"]])
 
 

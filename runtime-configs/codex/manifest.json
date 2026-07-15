@@ -1,0 +1,20 @@
+{
+  "bindings": {
+    "runtime.codex.configure": {"kind": "script", "mode": "merge", "name": "sync_codex_shared_config.py"}
+  },
+  "capabilities": [
+    {"binding_permission_profile": "project-write", "concurrency_keys": ["runtime-config:{target-root}"], "id": "runtime.codex.configure", "idempotent": true, "permission_profile": "project-write", "side_effects": ["project-files"], "supported_modes": ["merge"], "version": "1.0"}
+  ],
+  "conflicts": [],
+  "detection": {"medium": [], "strong": [], "weak": []},
+  "id": "codex",
+  "installation": {"asset_roots": ["assets"], "instruction_fragments": [], "skill_roots": []},
+  "kind": "runtime-config",
+  "optional_requires": [],
+  "package_requires": [],
+  "permissions": {"detection": "repository-read-only"},
+  "requires": [],
+  "schema_version": "1.0",
+  "targets": [],
+  "version": "0.1.0"
+}

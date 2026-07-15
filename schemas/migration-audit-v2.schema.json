@@ -1,0 +1,88 @@
+{
+  "$id": "https://agent-workflow.local/schemas/migration-audit-v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "target": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"maximum": 511, "minimum": 0, "type": "integer"},
+        "package": {"minLength": 1, "type": "string"},
+        "path": {"minLength": 1, "type": "string"},
+        "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"}
+      },
+      "required": ["package", "path", "sha256", "mode"],
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "additions": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {"minLength": 1, "type": "string"},
+          "target": {"$ref": "#/$defs/target"}
+        },
+        "required": ["target", "reason"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "content_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "entries": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "disposition": {"enum": ["retained", "relocated", "transformed", "removed"]},
+          "reason": {"type": ["string", "null"]},
+          "source_path": {"minLength": 1, "type": "string"},
+          "targets": {"items": {"$ref": "#/$defs/target"}, "type": "array"}
+        },
+        "required": ["source_path", "disposition", "targets", "reason"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema_version": {"const": "2.0"},
+    "source": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+        "content_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "inventory": {"minLength": 1, "type": "string"},
+        "license": {
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {"properties": {"status": {"const": "pending"}}},
+              "then": {"properties": {"notice_path": {"type": "null"}, "notice_sha256": {"type": "null"}, "spdx": {"type": "null"}}}
+            },
+            {
+              "if": {"properties": {"status": {"const": "verified"}}},
+              "then": {"properties": {
+                "notice_path": {"minLength": 1, "type": "string"},
+                "notice_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+                "spdx": {"minLength": 1, "type": "string"}
+              }}
+            }
+          ],
+          "properties": {
+            "notice_path": {"type": ["string", "null"]},
+            "notice_sha256": {"anyOf": [{"pattern": "^[0-9a-f]{64}$", "type": "string"}, {"type": "null"}]},
+            "spdx": {"type": ["string", "null"]},
+            "status": {"enum": ["pending", "verified"]}
+          },
+          "required": ["status", "spdx", "notice_path", "notice_sha256"],
+          "type": "object"
+        },
+        "repository": {"minLength": 1, "type": "string"},
+        "repository_url": {"minLength": 1, "type": "string"}
+      },
+      "required": ["inventory", "repository", "repository_url", "commit", "content_sha256", "license"],
+      "type": "object"
+    }
+  },
+  "required": ["schema_version", "source", "entries", "additions", "content_sha256"],
+  "title": "Migration Audit v2",
+  "type": "object"
+}

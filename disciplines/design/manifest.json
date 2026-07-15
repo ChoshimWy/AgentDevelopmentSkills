@@ -1,0 +1,26 @@
+{
+  "bindings": {
+    "design.ir.compile": {"kind": "skill", "mode": "normalize", "name": "design-ir-compiler"},
+    "design.system": {"kind": "skill", "mode": "design-system", "name": "ui-ux-design-system"}
+  },
+  "capabilities": [
+    {"concurrency_keys": [], "id": "design.system", "idempotent": true, "permission_profile": "repository-read-only", "side_effects": [], "version": "1.0"},
+    {"concurrency_keys": ["repository-write:{target-root}"], "id": "design.ir.compile", "idempotent": true, "permission_profile": "project-write", "side_effects": ["project-files"], "version": "1.0"}
+  ],
+  "conflicts": [],
+  "detection": {"medium": [], "strong": [], "weak": []},
+  "id": "design",
+  "installation": {
+    "asset_roots": ["assets"],
+    "instruction_fragments": [],
+    "skill_roots": ["skills"]
+  },
+  "kind": "discipline",
+  "optional_requires": [],
+  "package_requires": [],
+  "permissions": {"detection": "repository-read-only"},
+  "requires": [],
+  "schema_version": "1.0",
+  "targets": [],
+  "version": "0.1.0"
+}

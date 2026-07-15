@@ -1,3 +1,3 @@
-from .manifests import ManifestRegistry
+from .manifests import ManifestRegistry, ResolvedBinding
 
-__all__ = ["ManifestRegistry"]
+__all__ = ["ManifestRegistry", "ResolvedBinding"]

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-development-skills.local/design/canonical-ui-ir-base-v1.schema.json",
+  "type": "object",
+  "required": ["schema_version", "source", "screens", "tokens", "unknowns"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "source": {"type": "object", "required": ["kind", "identity", "content_sha256"]},
+    "screens": {"type": "array", "items": {"type": "object", "required": ["id", "regions", "states"]}},
+    "tokens": {"type": "object"},
+    "unknowns": {"type": "array", "items": {"type": "object", "required": ["id", "blocking", "reason"]}}
+  },
+  "additionalProperties": true
+}

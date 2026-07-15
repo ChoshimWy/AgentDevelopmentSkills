@@ -1,0 +1,70 @@
+# Shared Codex defaults that are safe to version and reuse across devices.
+# Keep machine-local state (auth/history/sessions/cache/memories files/projects trust)
+# in ~/.codex/config.toml only; do not add them here.
+
+image_model = "gpt-image-2"
+
+# model / reasoning / verbosity / service_tier are machine- and task-specific.
+# Keep them in ~/.codex/config.toml or a named profile so reinstalling this
+# repository never downgrades a user's current model or forces Fast mode.
+
+memories.use_memories = true
+memories.generate_memories = true
+
+[features]
+multi_agent = true
+memories = true
+
+[agents]
+max_threads = 6
+max_depth = 1
+
+[tui]
+status_line = ["model-with-reasoning", "used-tokens", "project-name", "context-remaining", "five-hour-limit", "weekly-limit", "total-input-tokens", "total-output-tokens", "task-progress"]
+status_line_use_colors = true
+
+# Local-only skills mode:
+# Keep ~/.codex/skills symlinked to this repository's skills/ directory and
+# disable plugin-contributed skills/tools. Do not delete plugin caches; disabling
+# config is the durable guard against account/marketplace sync re-enabling them.
+[plugins."build-ios-apps@openai-curated"]
+enabled = false
+
+[plugins."build-macos-apps@openai-curated"]
+enabled = false
+
+[plugins."figma@openai-curated"]
+enabled = false
+
+[plugins."github@openai-curated"]
+enabled = false
+
+[plugins."figma@openai-curated-remote"]
+enabled = false
+
+[plugins."product-design@openai-curated-remote"]
+enabled = false
+
+[plugins."superpowers@openai-curated-remote"]
+enabled = false
+
+[plugins."documents@openai-primary-runtime"]
+enabled = false
+
+[plugins."spreadsheets@openai-primary-runtime"]
+enabled = false
+
+[plugins."presentations@openai-primary-runtime"]
+enabled = false
+
+[plugins."pdf@openai-primary-runtime"]
+enabled = false
+
+[plugins."browser@openai-bundled"]
+enabled = false
+
+[plugins."chrome@openai-bundled"]
+enabled = false
+
+[plugins."computer-use@openai-bundled"]
+enabled = false

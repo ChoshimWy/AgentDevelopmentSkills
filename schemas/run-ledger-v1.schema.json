@@ -2,18 +2,261 @@
   "$id": "https://agent-workflow.local/schemas/run-ledger-v1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "approval_records": {"items": {"type": "object"}, "type": "array"},
-    "artifact_hashes": {"items": {"type": "object"}, "type": "array"},
-    "final_status": {"enum": ["active", "completed", "partial", "blocked", "cancelled"]},
-    "node_attempts": {"items": {"type": "object"}, "type": "array"},
-    "package_lock_hash": {"type": "string"},
-    "plan_fingerprint": {"type": "string"},
-    "resolved_policy_hash": {"type": "string"},
-    "resource_events": {"items": {"type": "object"}, "type": "array"},
-    "run_id": {"type": "string"},
-    "schema_version": {"const": "1.0"}
+    "adapter_outcomes": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "cleanup": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "detail": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "resource": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "not-required",
+                    "completed",
+                    "failed"
+                  ]
+                }
+              },
+              "required": [
+                "resource",
+                "status",
+                "detail"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "failure_attribution": {
+            "additionalProperties": false,
+            "properties": {
+              "category": {
+                "enum": [
+                  "none",
+                  "code",
+                  "environment",
+                  "provider",
+                  "contract"
+                ]
+              },
+              "summary": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "category",
+              "summary"
+            ],
+            "type": "object"
+          },
+          "invocation_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "node_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "request_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "partial",
+              "blocked",
+              "failed"
+            ]
+          }
+        },
+        "required": [
+          "attempt_id",
+          "node_id",
+          "provider",
+          "request_id",
+          "invocation_id",
+          "status",
+          "failure_attribution",
+          "cleanup"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "approval_records": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "artifact_hashes": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "attempt_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "node_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "uri": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt_id",
+          "node_id",
+          "artifact_id",
+          "kind",
+          "sha256",
+          "uri"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "evidence": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_ids": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "attempt_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "data": {
+            "type": "object"
+          },
+          "kind": {
+            "enum": [
+              "validation",
+              "review",
+              "delivery",
+              "diagnostic"
+            ]
+          },
+          "node_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "completed",
+              "partial",
+              "blocked",
+              "failed"
+            ]
+          },
+          "summary": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt_id",
+          "node_id",
+          "provider",
+          "kind",
+          "status",
+          "summary",
+          "data",
+          "artifact_ids"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "final_status": {
+      "enum": [
+        "active",
+        "completed",
+        "partial",
+        "blocked",
+        "cancelled"
+      ]
+    },
+    "node_attempts": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "package_lock_hash": {
+      "type": "string"
+    },
+    "plan_fingerprint": {
+      "type": "string"
+    },
+    "resolved_policy_hash": {
+      "type": "string"
+    },
+    "resource_events": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0"
+    }
   },
-  "required": ["schema_version", "run_id", "plan_fingerprint", "node_attempts", "resource_events", "approval_records", "artifact_hashes", "final_status"],
+  "required": [
+    "schema_version",
+    "run_id",
+    "plan_fingerprint",
+    "node_attempts",
+    "resource_events",
+    "approval_records",
+    "final_status"
+  ],
   "title": "Run Ledger v1",
   "type": "object"
 }

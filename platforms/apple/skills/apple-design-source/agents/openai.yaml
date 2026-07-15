@@ -1,0 +1,4 @@
+interface:
+  display_name: "Apple Design Source"
+  short_description: "提取 Apple 设计源证据并生成可追溯 source packet"
+  default_prompt: "使用 $apple-design-source 提取 Apple 目标的 Sketch/Figma/标注证据，随后交给共享 $ui-ux-design-system 与 $design-ir-compiler；不要直接生成 UIKit/SwiftUI binding 或产品代码。"

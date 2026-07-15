@@ -1,0 +1,4 @@
+interface:
+  display_name: "Canonical Design IR Compiler"
+  short_description: "把设计证据归一化为平台中立 Canonical UI IR"
+  default_prompt: "使用 $design-ir-compiler 将可追溯 Design Evidence 编译为平台中立 Canonical UI IR；保留 provenance、状态、无障碍与 blocking unknown，不生成任何平台代码 binding。"

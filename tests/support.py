@@ -10,3 +10,4 @@ if str(SRC) not in sys.path:
 
 FIXTURES = ROOT / "tests" / "fixtures"
 MANIFESTS = ROOT / "platforms"
+PROVIDERS = FIXTURES / "providers"

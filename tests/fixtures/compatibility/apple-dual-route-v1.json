@@ -1,0 +1,42 @@
+{
+  "cases": [
+    {
+      "allowed_additional_capabilities": ["workflow.analysis", "reporting.delivery"],
+      "expected_capabilities": ["core.intent-lock", "analysis.apple", "review.independent"],
+      "expected_task_type": "doc-only",
+      "id": "apple-doc-only",
+      "legacy_workflow": {"checkpoints": ["CP0", "CP1", "CP2", "CP3"], "independent_review": false, "roles": ["explorer", "builder", "reporter"]},
+      "repository_fixture": "apple-app",
+      "task": "更新 iOS 文档"
+    },
+    {
+      "allowed_additional_capabilities": ["workflow.analysis", "workflow.orchestration", "review.apple.static", "reporting.delivery"],
+      "expected_capabilities": ["core.intent-lock", "implementation.apple", "verification.apple.affected-tests", "review.independent"],
+      "expected_task_type": "code-small",
+      "id": "apple-code-small",
+      "legacy_workflow": {"checkpoints": ["CP0", "CP1", "CP2", "CP3"], "independent_review": true, "roles": ["explorer", "builder", "reporter", "reviewer"]},
+      "repository_fixture": "apple-app",
+      "task": "实现 iOS 单文件小改动"
+    },
+    {
+      "allowed_additional_capabilities": ["workflow.analysis", "workflow.orchestration", "review.apple.static", "reporting.delivery"],
+      "expected_capabilities": ["core.intent-lock", "implementation.apple", "verification.apple.affected-tests", "review.independent"],
+      "expected_task_type": "code-medium",
+      "id": "apple-code-medium",
+      "legacy_workflow": {"checkpoints": ["CP0", "CP1", "CP2", "CP3"], "independent_review": true, "roles": ["explorer", "builder", "reporter", "reviewer"]},
+      "repository_fixture": "apple-app",
+      "task": "实现 iOS 功能"
+    },
+    {
+      "allowed_additional_capabilities": ["workflow.analysis", "workflow.orchestration", "review.apple.static", "reporting.delivery"],
+      "expected_capabilities": ["core.intent-lock", "implementation.apple", "verification.apple.affected-tests", "review.independent"],
+      "expected_task_type": "code-risky",
+      "id": "apple-code-risky",
+      "legacy_workflow": {"checkpoints": ["CP0", "CP1", "CP2", "CP3"], "independent_review": true, "roles": ["explorer", "builder", "reporter", "reviewer"]},
+      "repository_fixture": "apple-app",
+      "task": "修改 iOS 并发权限 contract"
+    }
+  ],
+  "schema_version": "1.0",
+  "source": "iOSAgentSkills AGENTS.md and codex-subagent-orchestration v0.1.0 baseline"
+}

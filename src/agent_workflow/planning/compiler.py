@@ -8,6 +8,7 @@ from typing import Any
 from ..canonical_json import sha256
 from ..contracts import validate_workflow_plan
 from ..models import ContractError
+from ..recipes import required_platform_capabilities
 from ..registry import ManifestRegistry
 
 
@@ -19,6 +20,7 @@ class PlanCompiler:
         nodes: list[dict[str, Any]] = []
         edges: list[dict[str, str]] = []
         missing: list[str] = []
+        bootstrap_required: list[dict[str, Any]] = []
         task_type = policy["task"]["type"]
         routing_blocked = False
 
@@ -29,56 +31,114 @@ class PlanCompiler:
             missing.append("routing.ambiguity-resolution")
             routing_blocked = True
 
-        nodes.append(_node("intent", "core.intent-lock", mandatory=True))
+        intent = self.registry.resolve_binding("core.intent-lock")
+        nodes.append(_node("intent", "core.intent-lock", mandatory=True, resolution=intent))
         previous_ids: list[str] = ["intent"]
 
+        workflow_analysis = self.registry.resolve_binding("workflow.analysis")
+        if workflow_analysis is not None:
+            nodes.append(_node("workflow-analysis", "workflow.analysis", mandatory=True, resolution=workflow_analysis))
+            edges.append({"from": "intent", "to": "workflow-analysis"})
+            previous_ids = ["workflow-analysis"]
+        if task_type.startswith("code"):
+            workflow_orchestration = self.registry.resolve_binding("workflow.orchestration")
+            if workflow_orchestration is not None:
+                nodes.append(
+                    _node(
+                        "workflow-orchestration",
+                        "workflow.orchestration",
+                        mandatory=True,
+                        resolution=workflow_orchestration,
+                    )
+                )
+                for source in previous_ids:
+                    edges.append({"from": source, "to": "workflow-orchestration"})
+                previous_ids = ["workflow-orchestration"]
+
         for platform in policy["selected_platforms"]:
-            capabilities = _required_capabilities(platform, task_type, policy["task"].get("disciplines", []))
-            platform_previous = "intent"
+            capabilities = required_platform_capabilities(
+                platform, task_type, policy["task"].get("disciplines", [])
+            )
+            bootstrap = self.registry.bootstrap_requirement(platform)
+            if capabilities and bootstrap is not None:
+                bootstrap_required.append(bootstrap)
+            platform_previous = previous_ids[0] if len(previous_ids) == 1 else "intent"
             for index, capability in enumerate(capabilities):
                 node_id = f"{platform}-{index + 1}"
-                providers = self.registry.capability_providers(capability)
-                contract = self.registry.capability_contract(capability)
-                provider = providers[0].value["id"] if len(providers) == 1 else None
-                if not providers:
+                resolution = self.registry.resolve_binding(capability, platform=platform)
+                if resolution is None:
                     missing.append(capability)
-                nodes.append(_node(node_id, capability, mandatory=True, provider=provider, contract=contract))
+                nodes.append(_node(node_id, capability, mandatory=True, resolution=resolution))
                 edges.append({"from": platform_previous, "to": node_id})
                 platform_previous = node_id
             previous_ids.append(platform_previous)
 
+        if task_type.startswith("code") or task_type == "review-only":
+            extension_ids: list[str] = []
+            for platform in policy["selected_platforms"]:
+                capability = f"review.{platform}.static"
+                resolution = self.registry.resolve_binding(capability, platform=platform)
+                if resolution is None:
+                    continue
+                node_id = f"review-{platform}"
+                nodes.append(_node(node_id, capability, mandatory=True, resolution=resolution))
+                for source in sorted(set(previous_ids)):
+                    edges.append({"from": source, "to": node_id})
+                extension_ids.append(node_id)
+            if extension_ids:
+                previous_ids = extension_ids
+
         qa_needed = "qa" in policy["task"].get("disciplines", [])
         if qa_needed:
             capability = "qa.targeted"
-            providers = self.registry.capability_providers(capability)
-            if not providers:
+            resolution = self.registry.resolve_binding(capability)
+            if resolution is None:
                 missing.append(capability)
-            nodes.append(_node("qa", capability, mandatory=False, provider=providers[0].value["id"] if len(providers) == 1 else None, contract=self.registry.capability_contract(capability)))
+            nodes.append(_node("qa", capability, mandatory=False, resolution=resolution))
             for source in sorted(set(previous_ids)):
                 edges.append({"from": source, "to": "qa"})
             previous_ids = ["qa"]
 
         review_capability = "review.independent"
-        providers = self.registry.capability_providers(review_capability)
-        if not providers:
+        review_platform = policy["selected_platforms"][0] if len(policy["selected_platforms"]) == 1 else "*"
+        resolution = self.registry.resolve_binding(review_capability, platform=review_platform)
+        if resolution is None:
             missing.append(review_capability)
-        nodes.append(_node("review", review_capability, mandatory=task_type.startswith("code"), provider=providers[0].value["id"] if len(providers) == 1 else None, contract=self.registry.capability_contract(review_capability)))
+        nodes.append(
+            _node(
+                "review",
+                review_capability,
+                mandatory=task_type.startswith("code") or task_type == "review-only",
+                resolution=resolution,
+            )
+        )
         for source in sorted(set(previous_ids)):
             if source != "review":
                 edges.append({"from": source, "to": "review"})
 
+        reporting = self.registry.resolve_binding("reporting.delivery")
+        if reporting is None:
+            reporting = self.registry.resolve_binding("report.apple.delivery", platform=review_platform)
+        if reporting is not None:
+            nodes.append(_node("report", reporting.capability_id, mandatory=True, resolution=reporting))
+            edges.append({"from": "review", "to": "report"})
+
         _topological_order(nodes, edges)
         provider_blocked = any(node["mandatory"] and node["capability"] in missing for node in nodes)
-        status = "blocked" if routing_blocked or provider_blocked else "degraded" if missing else "ready"
+        status = "blocked" if routing_blocked or provider_blocked or bootstrap_required else "degraded" if missing else "ready"
         content = {
             "edges": sorted(edges, key=lambda edge: (edge["from"], edge["to"])),
             "missing_capabilities": sorted(set(missing)),
             "nodes": nodes,
             "profile_fingerprint": sha256(profile),
             "policy_fingerprint": policy.get("fingerprint", sha256(policy)),
+            "registry_fingerprint": self.registry.digest(),
             "schema_version": "1.0",
             "status": status,
+            "workflow": _workflow_contract(task_type),
         }
+        if bootstrap_required:
+            content["bootstrap_required"] = sorted(bootstrap_required, key=lambda item: item["platform"])
         fingerprint = sha256(content)
         plan = {"fingerprint": fingerprint, "plan_id": f"plan-{fingerprint[:12]}", **content}
         validate_workflow_plan(plan)
@@ -90,19 +150,20 @@ def _node(
     capability: str,
     *,
     mandatory: bool,
-    provider: str | None = "core",
-    contract: dict[str, Any] | None = None,
+    resolution: Any | None = None,
 ) -> dict[str, Any]:
-    contract = contract or {}
+    contract = resolution.contract if resolution else {}
     return {
         "approval": None,
+        "binding": resolution.binding if resolution else None,
         "capability": capability,
         "id": node_id,
         "mandatory": mandatory,
         "max_retries": 1 if contract.get("idempotent", True) else 0,
         "idempotent": contract.get("idempotent", True),
         "permission_profile": contract.get("permission_profile", "repository-read-only" if capability == "core.intent-lock" else "project-read-execute"),
-        "provider": provider,
+        "provider": resolution.provider_id if resolution else None,
+        "provider_manifest_digest": resolution.manifest_digest if resolution else None,
         "resource_keys": contract.get("concurrency_keys", []),
         "side_effects": contract.get("side_effects", []),
         "status": "pending",
@@ -110,21 +171,28 @@ def _node(
     }
 
 
-def _required_capabilities(platform: str, task_type: str, disciplines: list[str]) -> list[str]:
-    if task_type == "review-only":
-        return []
-    if task_type in {"doc-only", "investigation"}:
-        return [f"analysis.{platform}"]
-    if task_type == "qa-only":
-        return [f"verification.{platform}.affected-tests"]
-    capabilities = [f"implementation.{platform}", f"verification.{platform}.affected-tests"]
-    if "design" in disciplines:
-        capabilities.insert(0, "design.context")
-    return capabilities
-
-
 def _requires_platform(task_type: str) -> bool:
     return task_type.startswith("code") or task_type in {"qa-only", "investigation"}
+
+
+def _workflow_contract(task_type: str) -> dict[str, Any]:
+    if task_type.startswith("code"):
+        roles = ["explorer", "builder", "reporter", "reviewer"]
+        independent_review = True
+    elif task_type == "review-only":
+        roles = ["reviewer", "reporter"]
+        independent_review = True
+    elif task_type == "qa-only":
+        roles = ["explorer", "test-executor", "reporter", "reviewer"]
+        independent_review = False
+    else:
+        roles = ["explorer", "builder", "reporter"]
+        independent_review = False
+    return {
+        "checkpoints": ["CP0", "CP1", "CP2", "CP3"],
+        "independent_review": independent_review,
+        "roles": roles,
+    }
 
 
 def _topological_order(nodes: list[dict[str, Any]], edges: list[dict[str, str]]) -> list[str]:

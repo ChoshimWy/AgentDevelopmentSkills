@@ -28,6 +28,19 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(profile["platforms"], [])
         self.assertEqual(profile["repository"]["kind"], "unknown")
 
+    def test_apple_workspace_is_detected(self) -> None:
+        profile = self.engine.discover(FIXTURES / "apple-workspace")
+        self.assertEqual(profile["platforms"], ["apple"])
+
+    def test_swift_package_requires_explicit_apple_workspace_signal(self) -> None:
+        profile = self.engine.discover(FIXTURES / "apple-swift-package")
+        self.assertEqual(profile["platforms"], ["apple"])
+
+    def test_monorepo_includes_apple_module(self) -> None:
+        profile = self.engine.discover(FIXTURES / "monorepo")
+        self.assertIn("apple", profile["platforms"])
+        self.assertTrue(any(item["platform"] == "apple" and item["path"] == "apps/ios" for item in profile["modules"]))
+
     def test_android_app(self) -> None:
         profile = self.engine.discover(FIXTURES / "android-app")
         self.assertEqual(profile["platforms"], ["android"])
@@ -144,6 +157,11 @@ class PolicyTests(unittest.TestCase):
     def test_task_classification_adds_design_and_qa(self) -> None:
         task = classify_task("实现 Figma 页面并补充 QA 测试")
         self.assertEqual(task["disciplines"], ["design", "development", "qa"])
+
+    def test_risky_contract_terms_override_small_change_hint(self) -> None:
+        task = classify_task("iOS 单文件 contract 小改动")
+        self.assertEqual(task["type"], "code-risky")
+        self.assertEqual(task["risk"], "high")
 
     def test_policy_merge_strategies_and_lock(self) -> None:
         merged, decisions = merge_policy_layers(

@@ -1,0 +1,26 @@
+{
+  "$id": "https://agent-workflow.local/schemas/adapter-request-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "binding": {
+      "additionalProperties": false,
+      "properties": {"kind": {"enum": ["skill", "agent", "script", "tool"]}, "mode": {"minLength": 1, "type": "string"}, "name": {"minLength": 1, "type": "string"}},
+      "required": ["kind", "name"],
+      "type": "object"
+    },
+    "capability": {"minLength": 1, "type": "string"},
+    "checkpoints": {"type": "object"},
+    "invocation_id": {"minLength": 1, "type": "string"},
+    "node_id": {"minLength": 1, "type": "string"},
+    "plan_fingerprint": {"minLength": 1, "type": "string"},
+    "plan_id": {"minLength": 1, "type": "string"},
+    "provider": {"minLength": 1, "type": "string"},
+    "request_id": {"minLength": 1, "type": "string"},
+    "schema_version": {"const": "1.0"},
+    "task_context": {"type": "object"}
+  },
+  "required": ["schema_version", "request_id", "invocation_id", "plan_id", "plan_fingerprint", "node_id", "capability", "provider", "binding", "task_context", "checkpoints"],
+  "title": "Structured Adapter Request v1",
+  "type": "object"
+}

@@ -1,0 +1,604 @@
+{
+  "$defs": {
+    "directoryEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "maximum": 511,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "fileEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "maximum": 511,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "instructionFragment": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "merge_strategy": {
+          "enum": [
+            "append",
+            "locked"
+          ]
+        },
+        "order": {
+          "type": "integer"
+        },
+        "package": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "scope": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "merge_strategy",
+        "order",
+        "package",
+        "path",
+        "scope",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "package": {
+      "additionalProperties": false,
+      "properties": {
+        "directories": {
+          "items": {
+            "$ref": "#/$defs/directoryEntry"
+          },
+          "type": "array"
+        },
+        "file_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/fileEntry"
+          },
+          "type": "array"
+        },
+        "files_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "provider_manifest_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "root_mode": {
+          "maximum": 511,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "directories",
+        "file_count",
+        "files",
+        "files_sha256",
+        "id",
+        "manifest_sha256",
+        "provider_manifest_sha256",
+        "root_mode"
+      ],
+      "type": "object"
+    },
+    "resolvedDependency": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "required_capabilities": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "requirement": {
+          "enum": [
+            "required",
+            "optional"
+          ]
+        },
+        "to": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^(>=|<=|>|<|==)(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)( (>=|<=|>|<|==)(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*))*$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "requirement",
+        "version",
+        "required_capabilities"
+      ],
+      "type": "object"
+    },
+    "selectedPackage": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "core",
+            "platform",
+            "stack",
+            "discipline",
+            "adapter",
+            "runtime-config"
+          ]
+        },
+        "selection_reasons": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "version",
+        "selection_reasons",
+        "source_sha256"
+      ],
+      "type": "object"
+    },
+    "skill": {
+      "additionalProperties": false,
+      "properties": {
+        "directories": {
+          "items": {
+            "$ref": "#/$defs/directoryEntry"
+          },
+          "type": "array"
+        },
+        "file_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/fileEntry"
+          },
+          "type": "array"
+        },
+        "name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "package": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "root_mode": {
+          "maximum": 511,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "directories",
+        "file_count",
+        "files",
+        "name",
+        "package",
+        "root_mode",
+        "sha256"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://agent-workflow.local/schemas/install-plan-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "lock_schema_version": {
+            "const": "2.0"
+          }
+        },
+        "required": [
+          "lock_schema_version"
+        ]
+      },
+      "then": {
+      "properties": {
+        "asset_summary": {},
+        "assets": {},
+        "capability_providers": {},
+        "instructions": {
+          "properties": {
+            "fragments": {},
+            "path": {},
+            "rule_trace": {},
+            "sha256": {}
+          },
+          "required": [
+            "fragments",
+            "path",
+            "sha256",
+            "rule_trace"
+          ]
+        },
+        "resolved_dependencies": {},
+        "selected_disciplines": {},
+        "selected_packages": {},
+        "selected_runtime_configs": {}
+      },
+        "required": [
+          "selected_packages",
+          "selected_disciplines",
+          "selected_runtime_configs",
+          "resolved_dependencies",
+          "capability_providers",
+          "assets",
+          "asset_summary"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "asset_summary": {
+      "additionalProperties": false,
+      "properties": {
+        "content_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "file_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "package_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skill_count": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "content_sha256",
+        "file_count",
+        "package_count",
+        "skill_count"
+      ],
+      "type": "object"
+    },
+    "assets": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "maximum": 511,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "package": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "package",
+          "path",
+          "sha256"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "bindings": {
+      "type": "object"
+    },
+    "capability_providers": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "type": "object"
+          },
+          "package": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "package_version": {
+            "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "source_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding",
+          "package",
+          "package_version",
+          "source_sha256"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "core_version": {
+      "type": "string"
+    },
+    "fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "instructions": {
+      "properties": {
+        "fragments": {
+          "items": {
+            "$ref": "#/$defs/instructionFragment"
+          },
+          "type": "array"
+        },
+        "path": {
+          "type": "string"
+        },
+        "rule_trace": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "content_sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "decision": {
+                "enum": [
+                  "accepted",
+                  "replaced",
+                  "deny-wins"
+                ]
+              },
+              "effect": {
+                "enum": [
+                  "allow",
+                  "deny"
+                ]
+              },
+              "id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "locked": {
+                "type": "boolean"
+              },
+              "package": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "scope": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "effect",
+              "locked",
+              "package",
+              "scope",
+              "content_sha256",
+              "decision"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fragments",
+        "path",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "lock_schema_version": {
+      "const": "2.0"
+    },
+    "managed_roots": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "manager": {
+      "type": "string"
+    },
+    "packages": {
+      "items": {
+        "$ref": "#/$defs/package"
+      },
+      "type": "array"
+    },
+    "permission_profiles": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "resolved_dependencies": {
+      "items": {
+        "$ref": "#/$defs/resolvedDependency"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "selected_disciplines": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "selected_packages": {
+      "items": {
+        "$ref": "#/$defs/selectedPackage"
+      },
+      "type": "array"
+    },
+    "selected_platforms": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "selected_runtime_configs": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "side_effects": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "skills": {
+      "items": {
+        "$ref": "#/$defs/skill"
+      },
+      "type": "array"
+    },
+    "status": {
+      "enum": [
+        "planned",
+        "installed"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "manager",
+    "core_version",
+    "selected_platforms",
+    "packages",
+    "bindings",
+    "permission_profiles",
+    "side_effects",
+    "instructions",
+    "skills",
+    "managed_roots",
+    "status",
+    "fingerprint"
+  ],
+  "title": "Install Plan v1",
+  "type": "object"
+}

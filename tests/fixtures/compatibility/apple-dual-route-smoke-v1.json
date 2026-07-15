@@ -1,0 +1,55 @@
+{
+  "checkpoints": ["CP0", "CP1", "CP2", "CP3"],
+  "allowed_additional_capabilities": ["workflow.analysis", "reporting.delivery"],
+  "expected_core_capabilities": ["core.intent-lock", "analysis.apple", "review.independent"],
+  "legacy": {
+    "core_cli_used": false,
+    "execution_evidence": {
+      "evidence_artifact": "tests/fixtures/compatibility/apple-dual-route-smoke-v1.json",
+      "executed_at": "2026-07-14",
+      "executor": "independent legacy-route subAgent",
+      "route": "iOSAgentSkills/codex-subagent-orchestration doc-only lite",
+      "static_reads": ["Package.swift", "Package.xcworkspace/contents.xcworkspacedata", "Sources/AppleFixture/App.swift"]
+    },
+    "final_status": "completed",
+    "logical_roles": ["explorer", "builder", "reporter"],
+    "orchestration_level": "lite",
+    "rules_evidence": [
+      "skills/codex-subagent-orchestration/SKILL.md:99-121",
+      "skills/codex-subagent-orchestration/SKILL.md:146-195",
+      "skills/ios-verification/SKILL.md:69-84",
+      "skills/ios-verification/SKILL.md:291-306"
+    ],
+    "side_effects": {
+      "files_written": false,
+      "network_accessed": false,
+      "swift_executed": false,
+      "xcode_executed": false
+    },
+    "task_type": "doc-only",
+    "validation_level": "none"
+  },
+  "project_facts": {
+    "file_sha256": {
+      "Package.swift": "203508d873989c984f58b4638cc78f86236f7e0a41067e9e5d499c4d3116594c",
+      "Package.xcworkspace/contents.xcworkspacedata": "e755b701a84991669926fd488c35113007437db40c59094ffa9738de6aebe2de",
+      "Sources/AppleFixture/App.swift": "f2c002175821b9b6f8908a48c3a99ff4ef10e3d36f45e8a7cb3918e9a689fc68"
+    },
+    "package": {
+      "minimum_ios": "16",
+      "name": "AppleFixture",
+      "path": "Package.swift",
+      "products": ["AppleFixture"],
+      "targets": ["AppleFixture"],
+      "tools_version": "5.9"
+    },
+    "sources": ["Sources/AppleFixture/App.swift"],
+    "tests": [],
+    "workspace": "Package.xcworkspace",
+    "workspace_file_references": 0
+  },
+  "repository_fixture": "apple-swift-package",
+  "schema_version": "1.0",
+  "source": "2026-07-14 read-only iOSAgentSkills legacy route smoke",
+  "task": "更新 iOS 文档：记录 apple-swift-package fixture 的工程形态与最窄验证入口；仅输出报告，不修改文件、不执行 Xcode 或 Swift"
+}

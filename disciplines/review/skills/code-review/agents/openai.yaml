@@ -1,0 +1,6 @@
+interface:
+  display_name: "独立代码审查"
+  short_description: "跨平台只读审查 diff、影响面、业务不变量与验证故事"
+  default_prompt: "使用 $code-review 作为未参与实现的独立 reviewer，先输出按严重度排序的发现；平台专属检查交给已解析 review extension。无阻塞时明确写 阻塞问题：无。"
+policy:
+  allow_implicit_invocation: false

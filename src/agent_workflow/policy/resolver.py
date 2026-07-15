@@ -33,14 +33,26 @@ def classify_task(task: str) -> dict[str, Any]:
         task_type = "investigation"
     elif any(term in lowered for term in ("跨平台", "contract", "schema", "migration", "并发", "权限")):
         task_type = "code-risky"
+    elif any(term in lowered for term in ("单文件", "小改动", "small change", "code-small")):
+        task_type = "code-small"
     else:
         task_type = "code-medium"
-    risk = "high" if task_type == "code-risky" else "medium" if task_type.startswith("code") else "low"
+    risk = "high" if task_type == "code-risky" else "medium" if task_type == "code-medium" else "low"
     disciplines = ["development"]
     if any(term in lowered for term in ("ui", "design", "figma", "sketch", "设计")):
         disciplines.append("design")
     if any(term in lowered for term in ("test", "qa", "测试", "回归")):
         disciplines.append("qa")
+    if any(term in lowered for term in ("build setting", "xcconfig", "签名", "archive", "构建配置")):
+        disciplines.append("build")
+    if any(term in lowered for term in ("crash", "崩溃", "调试", "debug", "异常")):
+        disciplines.append("debug")
+    if any(term in lowered for term in ("performance", "性能", "掉帧", "内存", "instruments")):
+        disciplines.append("performance")
+    if any(term in lowered for term in ("automation", "自动化", "simulator", "真机", "设备")):
+        disciplines.append("automation")
+    if any(term in lowered for term in ("html", "prd", "正式方案", "正式报告", "接口说明", "handoff")):
+        disciplines.append("documentation")
     return {"disciplines": sorted(set(disciplines)), "risk": risk, "type": task_type}
 
 

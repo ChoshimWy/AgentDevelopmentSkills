@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(xcrun:*)",
+      "Bash(swift:*)",
+      "Bash(xcode-select:*)",
+      "Read",
+      "Edit",
+      "Write",
+      "Skill",
+      "Task",
+      "Agent",
+      "WebSearch",
+      "WebFetch"
+    ]
+  },
+  "mcpServers": {
+    "codegraph": {
+      "command": "codegraph",
+      "args": ["serve", "--mcp"]
+    },
+    "appleDeveloperDocs": {
+      "command": "npx",
+      "args": ["-y", "@kimsungwhee/apple-docs-mcp@1.0.26"]
+    }
+  }
+}

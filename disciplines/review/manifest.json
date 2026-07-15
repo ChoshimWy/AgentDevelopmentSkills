@@ -1,0 +1,24 @@
+{
+  "bindings": {
+    "review.independent": {"kind": "skill", "name": "code-review"}
+  },
+  "capabilities": [
+    {"concurrency_keys": [], "id": "review.independent", "idempotent": true, "permission_profile": "repository-read-only", "side_effects": [], "version": "1.0"}
+  ],
+  "conflicts": [],
+  "detection": {"medium": [], "strong": [], "weak": []},
+  "id": "review",
+  "installation": {
+    "asset_roots": ["assets"],
+    "instruction_fragments": [],
+    "skill_roots": ["skills"]
+  },
+  "kind": "discipline",
+  "optional_requires": [],
+  "package_requires": [],
+  "permissions": {"detection": "repository-read-only"},
+  "requires": [],
+  "schema_version": "1.0",
+  "targets": [],
+  "version": "0.1.0"
+}

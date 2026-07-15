@@ -1,0 +1,6 @@
+interface:
+  display_name: "跨平台工作流编排"
+  short_description: "执行 CP0–CP3、角色协作、fail-fix-report 与独立 review 门禁"
+  default_prompt: "使用 $workflow-orchestration 按 analyze / orchestrate / report 模式处理任务；通用层只维护 checkpoint、角色、失败回环和交付合同，平台 API、构建、验证与设备动作必须交给已选平台 Capability。"
+policy:
+  allow_implicit_invocation: false

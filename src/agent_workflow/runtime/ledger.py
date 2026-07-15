@@ -26,6 +26,8 @@ class RunLedger:
         self.value: dict[str, Any] = {
             "approval_records": [],
             "artifact_hashes": [],
+            "adapter_outcomes": [],
+            "evidence": [],
             "final_status": "active",
             "node_attempts": [],
             "package_lock_hash": package_lock_hash,
@@ -37,6 +39,12 @@ class RunLedger:
         }
 
     def append(self, event_type: str, value: dict[str, Any]) -> None:
+        supported = {
+            "adapter-evidence", "adapter-outcome", "approval-record", "artifact-hash",
+            "node-attempt", "resource-event", "run-blocked", "run-finalized", "run-resumed", "run-started",
+        }
+        if event_type not in supported:
+            raise ContractError(f"unknown ledger event type: {event_type}")
         event = {"event_type": event_type, "run_id": self.value["run_id"], "value": value}
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -50,6 +58,10 @@ class RunLedger:
             self.value["approval_records"].append(value)
         elif event_type == "artifact-hash":
             self.value["artifact_hashes"].append(value)
+        elif event_type == "adapter-evidence":
+            self.value["evidence"].append(value)
+        elif event_type == "adapter-outcome":
+            self.value["adapter_outcomes"].append(value)
         elif event_type == "run-finalized":
             self.value["final_status"] = value["status"]
         elif event_type == "run-started":
@@ -76,5 +88,6 @@ class RunLedger:
             if event["run_id"] != ledger.value["run_id"]:
                 raise ValueError("ledger contains multiple run ids")
             ledger.append(event["event_type"], event["value"])
+        validate_run_ledger(ledger.value)
         ledger.path = ledger_path
         return ledger

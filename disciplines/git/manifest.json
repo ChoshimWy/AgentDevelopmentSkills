@@ -1,0 +1,40 @@
+{
+  "bindings": {
+    "git.github.pr": {"kind": "skill", "name": "gh-pr-flow"},
+    "git.workflow": {"kind": "skill", "name": "git-workflow"}
+  },
+  "capabilities": [
+    {
+      "concurrency_keys": ["repository-write:{target-root}"],
+      "id": "git.workflow",
+      "idempotent": false,
+      "permission_profile": "project-write",
+      "side_effects": ["git-state"],
+      "version": "1.0"
+    },
+    {
+      "concurrency_keys": ["repository-write:{target-root}", "remote-repository:{origin}"],
+      "id": "git.github.pr",
+      "idempotent": false,
+      "permission_profile": "remote-repository-write",
+      "side_effects": ["git-state", "remote-repository"],
+      "version": "1.0"
+    }
+  ],
+  "conflicts": [],
+  "detection": {"medium": [], "strong": [], "weak": []},
+  "id": "git",
+  "installation": {
+    "asset_roots": [],
+    "instruction_fragments": [],
+    "skill_roots": ["skills"]
+  },
+  "kind": "discipline",
+  "optional_requires": [],
+  "package_requires": [],
+  "permissions": {"detection": "repository-read-only"},
+  "requires": [],
+  "schema_version": "1.0",
+  "targets": [],
+  "version": "0.1.0"
+}

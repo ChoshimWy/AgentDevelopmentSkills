@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEVICE_HELPERS="$SCRIPT_DIR/../../ios-automation/scripts/device/device_helpers.sh"
+# shellcheck source=/dev/null
+source "$DEVICE_HELPERS"
+
+ORIGINAL_ARGS=("$@")
+ROOT="$PWD"
+FORWARDED_ARGS=("${ORIGINAL_ARGS[@]}")
+if [[ $# -gt 0 && "$1" != -* ]]; then
+  ROOT="$1"
+  FORWARDED_ARGS=("${ORIGINAL_ARGS[@]:1}")
+fi
+ROOT="$(cd "$ROOT" && pwd)"
+
+if [[ -z "${CODEX_VERIFY_BYPASS_WRAPPER:-}" ]]; then
+  TARGET_VERIFY_SCRIPT="$ROOT/codex_verify.sh"
+  GLOBAL_VERIFY_SCRIPT="${CODEX_GLOBAL_VERIFY_WRAPPER:-$HOME/.codex/bin/codex_verify}"
+  if [[ -f "$TARGET_VERIFY_SCRIPT" ]]; then
+    exec bash "$TARGET_VERIFY_SCRIPT" --build-check "$SCRIPT_DIR/build-check.sh" "$ROOT" "${FORWARDED_ARGS[@]}"
+  elif [[ -x "$GLOBAL_VERIFY_SCRIPT" ]]; then
+    exec "$GLOBAL_VERIFY_SCRIPT" --build-check "$SCRIPT_DIR/build-check.sh" "$ROOT" "${FORWARDED_ARGS[@]}"
+  fi
+fi
+
+env_or_file_value() {
+  local key="$1"
+  if [[ ${!key+x} == x ]]; then
+    printf '%s' "${!key}"
+    return 0
+  fi
+  read_xcode_env_value "$ROOT" "$key" || true
+}
+
+XCODE_DESTINATION_VALUE="$(env_or_file_value XCODE_DESTINATION)"
+XCODE_DEVICE_ID_VALUE="$(env_or_file_value XCODE_DEVICE_ID)"
+XCODE_DEVICE_NAME_VALUE="$(env_or_file_value XCODE_DEVICE_NAME)"
+XCODE_PREFER_MODEL_VALUE="$(env_or_file_value XCODE_PREFER_MODEL)"
+XCODE_DEVICE_FALLBACK_VALUE="$(env_or_file_value XCODE_DEVICE_FALLBACK)"
+XCODE_WORKSPACE_VALUE="$(env_or_file_value XCODE_WORKSPACE)"
+XCODE_PROJECT_VALUE="$(env_or_file_value XCODE_PROJECT)"
+XCODE_SCHEME_VALUE="$(env_or_file_value XCODE_SCHEME)"
+
+XCODE_DEVICE_FALLBACK_VALUE="${XCODE_DEVICE_FALLBACK_VALUE:-1}"
+
+if [[ -z "$XCODE_DESTINATION_VALUE" && -z "$XCODE_PREFER_MODEL_VALUE" && -z "$XCODE_DEVICE_ID_VALUE" && -z "$XCODE_DEVICE_NAME_VALUE" ]]; then
+  if inferred_prefer_model="$(infer_preferred_model_from_targeted_device_family "$ROOT" "$XCODE_PROJECT_VALUE" || true)"; [[ -n "$inferred_prefer_model" ]]; then
+    XCODE_PREFER_MODEL_VALUE="$inferred_prefer_model"
+    export XCODE_PREFER_MODEL="$inferred_prefer_model"
+  fi
+fi
+
+set_selected_target_env() {
+  export XCODE_SELECTED_DEVICE_NAME="$1"
+  export XCODE_SELECTED_DEVICE_ID="$2"
+  export XCODE_SELECTED_DEVICE_STATE="$3"
+  export XCODE_SELECTED_DEVICE_MODEL="${4:-}"
+  export XCODE_SELECTED_DEVICE_REASON="$5"
+}
+
+destination_field() {
+  local destination="$1"
+  local key="$2"
+  printf '%s\n' "$destination" | tr ',' '\n' | awk -F= -v target="$key" '
+    {
+      field=$1
+      value=substr($0, index($0, "=") + 1)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", field)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      if (field == target) {
+        print value
+        exit
+      }
+    }
+  '
+}
+
+set_simulator_target_env() {
+  export XCODE_DESTINATION="platform=iOS Simulator,id=$SELECTED_DEVICE_IDENTIFIER"
+  export XCODE_VALIDATION_PLATFORM='ios-simulator'
+  set_selected_target_env "$SELECTED_DEVICE_NAME" "$SELECTED_DEVICE_IDENTIFIER" "$SELECTED_DEVICE_STATE" "$SELECTED_DEVICE_MODEL" "$SELECTED_DEVICE_REASON"
+}
+
+fallback_to_available_simulator_or_macos() {
+  local fallback_context="$1"
+  if select_xcode_simulator_destination "$ROOT" "$XCODE_WORKSPACE_VALUE" "$XCODE_PROJECT_VALUE" "$XCODE_SCHEME_VALUE" "" "" "$XCODE_PREFER_MODEL_VALUE"; then
+    SELECTED_DEVICE_REASON="$fallback_context; $SELECTED_DEVICE_REASON"
+    set_simulator_target_env
+    return 0
+  fi
+  if supports_xcode_platform "$ROOT" "$XCODE_WORKSPACE_VALUE" "$XCODE_PROJECT_VALUE" "$XCODE_SCHEME_VALUE" 'macOS'; then
+    export XCODE_VALIDATION_PLATFORM='macos'
+    set_selected_target_env 'macOS Host' 'macOS' 'macos' '' "$fallback_context; no iOS Simulator destination available; using macOS host build"
+    return 0
+  fi
+  return 1
+}
+
+unset XCODE_SELECTED_DEVICE_NAME XCODE_SELECTED_DEVICE_ID XCODE_SELECTED_DEVICE_STATE XCODE_SELECTED_DEVICE_MODEL XCODE_SELECTED_DEVICE_REASON || true
+unset XCODE_FALLBACK_DEVICE_NAME XCODE_FALLBACK_DEVICE_ID XCODE_FALLBACK_DEVICE_STATE XCODE_FALLBACK_DEVICE_MODEL XCODE_FALLBACK_DEVICE_REASON XCODE_FALLBACK_DEVICE_ERROR || true
+unset XCODE_VALIDATION_PLATFORM || true
+
+if [[ -z "$XCODE_DESTINATION_VALUE" ]]; then
+  if [[ -n "$XCODE_DEVICE_ID_VALUE" && -z "$XCODE_DEVICE_NAME_VALUE" && -z "$XCODE_PREFER_MODEL_VALUE" ]]; then
+    export XCODE_DEVICE_ID="$XCODE_DEVICE_ID_VALUE"
+    export XCODE_DEVICE_NAME=""
+    export XCODE_PREFER_MODEL=""
+    export XCODE_VALIDATION_PLATFORM='ios-device'
+    set_selected_target_env "$XCODE_DEVICE_ID_VALUE" "$XCODE_DEVICE_ID_VALUE" 'explicit' '' 'using explicit device identifier'
+  else
+    if select_xcode_destination "$ROOT" "$XCODE_WORKSPACE_VALUE" "$XCODE_PROJECT_VALUE" "$XCODE_SCHEME_VALUE" "$XCODE_DEVICE_NAME_VALUE" "$XCODE_DEVICE_ID_VALUE" "$XCODE_PREFER_MODEL_VALUE" 'connected-only'; then
+      export XCODE_DEVICE_ID="$SELECTED_DEVICE_IDENTIFIER"
+      export XCODE_DEVICE_NAME=""
+      export XCODE_PREFER_MODEL=""
+      export XCODE_VALIDATION_PLATFORM='ios-device'
+      set_selected_target_env "$SELECTED_DEVICE_NAME" "$SELECTED_DEVICE_IDENTIFIER" "$SELECTED_DEVICE_STATE" "$SELECTED_DEVICE_MODEL" "$SELECTED_DEVICE_REASON"
+    else
+      case "$SELECT_DEVICE_ERROR" in
+        "no connected physical iOS destinations available"*|"no physical iOS destinations available"*|"xcrun devicectl list devices failed"*)
+          if ! fallback_to_available_simulator_or_macos 'no connected physical iOS destination available'; then
+            echo "Initial validation blocked: no connected physical iOS destination, no iOS Simulator destination, and no macOS destination available ($SELECT_DEVICE_ERROR)" >&2
+            exit 1
+          fi
+          ;;
+        *)
+          echo "Initial physical-device validation blocked: $SELECT_DEVICE_ERROR" >&2
+          exit 1
+          ;;
+      esac
+    fi
+  fi
+else
+  export XCODE_DESTINATION="$XCODE_DESTINATION_VALUE"
+  if is_simulator_destination_text "$XCODE_DESTINATION_VALUE"; then
+    simulator_name="$(destination_field "$XCODE_DESTINATION_VALUE" name || true)"
+    simulator_id="$(destination_field "$XCODE_DESTINATION_VALUE" id || true)"
+    if select_xcode_simulator_destination "$ROOT" "$XCODE_WORKSPACE_VALUE" "$XCODE_PROJECT_VALUE" "$XCODE_SCHEME_VALUE" "$simulator_name" "$simulator_id" "$XCODE_PREFER_MODEL_VALUE"; then
+      set_simulator_target_env
+    else
+      echo "Initial simulator validation blocked: $SELECT_DEVICE_ERROR" >&2
+      exit 1
+    fi
+  fi
+fi
+
+if [[ -n "$XCODE_DESTINATION_VALUE" ]] && is_simulator_destination_text "$XCODE_DESTINATION_VALUE" && [[ "$XCODE_DEVICE_FALLBACK_VALUE" != '0' ]]; then
+  if [[ -n "$XCODE_DEVICE_ID_VALUE" && -z "$XCODE_DEVICE_NAME_VALUE" && -z "$XCODE_PREFER_MODEL_VALUE" ]]; then
+    export XCODE_DEVICE_ID="$XCODE_DEVICE_ID_VALUE"
+    export XCODE_DEVICE_NAME=""
+    export XCODE_PREFER_MODEL=""
+    export XCODE_FALLBACK_DEVICE_NAME="$XCODE_DEVICE_ID_VALUE"
+    export XCODE_FALLBACK_DEVICE_ID="$XCODE_DEVICE_ID_VALUE"
+    export XCODE_FALLBACK_DEVICE_STATE='explicit'
+    export XCODE_FALLBACK_DEVICE_REASON='using explicit device identifier'
+  else
+    if select_xcode_destination "$ROOT" "$XCODE_WORKSPACE_VALUE" "$XCODE_PROJECT_VALUE" "$XCODE_SCHEME_VALUE" "$XCODE_DEVICE_NAME_VALUE" "$XCODE_DEVICE_ID_VALUE" "$XCODE_PREFER_MODEL_VALUE" 'connected-only'; then
+      export XCODE_DEVICE_ID="$SELECTED_DEVICE_IDENTIFIER"
+      export XCODE_DEVICE_NAME=""
+      export XCODE_PREFER_MODEL=""
+      export XCODE_FALLBACK_DEVICE_NAME="$SELECTED_DEVICE_NAME"
+      export XCODE_FALLBACK_DEVICE_ID="$SELECTED_DEVICE_IDENTIFIER"
+      export XCODE_FALLBACK_DEVICE_STATE="$SELECTED_DEVICE_STATE"
+      export XCODE_FALLBACK_DEVICE_MODEL="$SELECTED_DEVICE_MODEL"
+      export XCODE_FALLBACK_DEVICE_REASON="$SELECTED_DEVICE_REASON"
+    else
+      export XCODE_FALLBACK_DEVICE_ERROR="$SELECT_DEVICE_ERROR"
+    fi
+  fi
+fi
+
+exec python3 "$SCRIPT_DIR/build_check.py" "$@"

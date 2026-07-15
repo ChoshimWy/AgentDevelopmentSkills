@@ -1,0 +1,4 @@
+interface:
+  display_name: "跨平台 UI/UX 设计系统"
+  short_description: "定义平台无关视觉、token、组件、状态与无障碍合同"
+  default_prompt: "使用 $ui-ux-design-system 整理平台无关设计方向与设计系统；需要设计源读取时交给平台 extension，需要 Canonical UI IR 时交给 $design-ir-compiler，不直接实现产品代码。"
