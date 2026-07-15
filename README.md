@@ -116,11 +116,19 @@ PYTHONPATH=src python3 -m agent_workflow.cli detect /path/to/repository
 
 # 自动化场景输出 canonical JSON
 ./install.sh --platform apple --dry-run --json
+
+# 预览卸载，不修改目标目录
+./uninstall.sh --platform apple --dry-run
+
+# 卸载当前 source installer 管理的全部平台与激活资产
+./uninstall.sh --platform all
 ```
 
 `install.sh` 在 TTY 中默认显示 Manifest 驱动的平台复选菜单：Apple/iOS 因 Manifest 为 `implemented` 且已注册 activation/smoke handler，默认显示为 `[x]`；Android、Web、Backend、Desktop 以 `[ ]` 和 `bootstrap-only` 状态列出但暂不可选。使用 `↑` / `↓` 移动光标、`Space` 选择或取消、`Enter` 确认；确认后清除整个平台菜单，未来多个平台就绪后可组合选择。默认人类可读结果直接从所选平台的预览/完成状态开始，不重复显示产品标题与分隔线，并保留变更摘要与安装态验证；目标目录、规划平台、Runtime Config、安装包、Skill 数量及旧软链迁移状态等完整元信息仅由 `--json` 输出。非交互或自动化场景使用可重复的 `--platform <id>`（或 `--platform all`），传 `--json` 时必须显式选择平台并输出 canonical JSON；dry-run 与真实安装共用 managed-root preflight，避免预览通过但执行失败。默认目标为 `${CODEX_HOME:-$HOME/.codex}`，也支持 `--target-root <path>`。它只直接移除可精确识别的旧 iOSAgentSkills `AGENTS.md` / `skills` 软链，不创建旧配置持久备份；除普通文件形式的 macOS Finder 元数据 `.DS_Store` 外，未知文件、目录或软链继续 fail-closed。迁移时保留 Codex 管理的 `skills/.system`，合并而非清空本机 `config.toml`，并激活 8 个 custom agents、6 个缺省 profile、`codex_verify`、构建日志摘要器与 UI smoke 模板。安装后直接针对目标目录执行 Apple route/plan/review/report smoke；后置 smoke/activation 与受管根共享单进程临时回滚窗口，临时数据完成后删除。
 
-当前入口是 source-checkout installer：不联网、不默认执行 `pip`，不代表 wheel/sdist 已发布，也不提供 upgrade/uninstall。
+`uninstall.sh` 只接受 Lock、AGENTS、Skills、package snapshot 与 activation file 均未被修改的受管安装；dry-run 与真实卸载执行相同 preflight。卸载使用单进程临时回滚窗口，移除受管根与 activation lock 记录的 custom agents/bin/templates，保留 Codex 自身的 `skills/.system`、现有 profiles、未归属本工具的目录内容，以及 ownership 未记录的 activation 父目录；`config.toml` 只定向移除仍指向受管 `AGENTS.md` 的根级 `model_instructions_file` assignment，保留其余原始 bytes、注释、排版和文件 mode。旧 iOSAgentSkills 软链因安装时未创建持久备份而不会自动恢复。当前仅支持一次卸载当前安装中全部已选平台；未来多平台的部分卸载与剩余规则重组仍属于 Phase 6 后续范围。
+
+当前入口仍是 source-checkout lifecycle：不联网、不默认执行 `pip`，不代表 wheel/sdist 已发布；doctor、upgrade、多平台部分卸载与跨进程恢复仍未实现。
 
 ### 底层安装 CLI
 
@@ -263,18 +271,18 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 | Phase 3 | 待启动（基础边界已预抽取） | P2C 已提供 design system / Canonical UI IR base 与 Apple extension 边界；Product Design Provider、来源 Gateway、完整 Schema/权限/验收仍待实施 |
 | Phase 4 | 待启动 | QA Core 与 Desktop 最小包 |
 | Phase 5 | 暂缓（先完成 iOS host readiness） | Android、Web、Backend、Desktop 继续保持 bootstrap-only；Apple 安装态/自动验证合同已贯通，待获准真实 Xcode 工程完成 host smoke 后再启动其他平台 Provider |
-| Phase 6 | 进行中（源码一键安装已落地） | 根目录 `install.sh` 已贯通 Manifest 驱动的平台菜单、Apple 旧软链迁移、Codex 资产激活、目标目录 smoke 与 activation lock；doctor、upgrade/uninstall、跨进程恢复、打包与发布治理仍待实施 |
+| Phase 6 | 进行中（源码安装/全量卸载已落地） | 根目录 `install.sh` 已贯通平台选择、资产激活与安装态 smoke；`uninstall.sh` 已提供 dry-run、完整性拒绝、事务回滚与全量卸载。doctor、upgrade、多平台部分卸载、跨进程恢复、打包与发布治理仍待实施 |
 
 ## 当前限制
 
 - Apple 源码态与隔离安装态已不依赖 sibling；sibling 只保留为 P2A 冻结对照，不得继续作为新修改真源。
 - 根目录 `install.sh` 可识别并直接移除旧 iOSAgentSkills `~/.codex/AGENTS.md` / `skills` 软链；按用户约束不生成旧配置持久备份，但未知本地内容仍拒绝覆盖。2026-07-15 已完成真实 `~/.codex` 切换，随后 dry-run 显示 config、12 个受管文件与 6 个 profiles 均已一致。
-- `install.sh` 显式选择 Codex Runtime Config，激活 config/profile/agents/bin/templates；受管激活文件记录在 `.agent-skills/activation-lock.json`，本机 profile 与 config 中的 runtime 偏好保留。doctor、upgrade、uninstall 和发布包生命周期仍归 Phase 6。
+- `install.sh` 显式选择 Codex Runtime Config，激活 config/profile/agents/bin/templates；受管激活文件记录在 `.agent-skills/activation-lock.json`，本机 profile 与 config 中的 runtime 偏好保留。`uninstall.sh` 可安全移除受管安装和激活文件，但不会推断删除既有 profile/shared config，也不会恢复未备份的旧软链。
 - Core 已支持 recorded structured Adapter evidence，但不会自行调用 Skill、Verification Coordinator 或 wrapper；真实执行仍由 Agent/iOSAgentSkills 负责。`scripts/run_ios_installed_workflow_smoke.py` 证明隔离安装态的 discovery/plan/structured evidence/review/report 合同闭环，不冒充真实业务工程 Xcode build/test。
 - Phase 2A、Phase 2B 与 Phase 2C 的历史独立 reviewer 均已通过；本轮 iOS readiness、source install anchor 与验证闭环优化的 183 个 unittest、完整 Conformance 已通过，安装脚本独立复审结论为“阻塞问题：无”。这些证据不代表真实业务工程 Xcode build/test 已完成。
 - iOSAgentSkills 来源 commit/hash 与每个文件去向可审计，但 License/NOTICE provenance 当前仍为 `pending`；解决前不得把仓库标记为发布就绪。
 - 本地只验证了 Python 3.14.3；Python 3.11–3.14 由 CI matrix 覆盖。
-- wheel / sdist、doctor、upgrade/uninstall 与跨进程恢复仍未完成；当前源码仓 `install.sh` 已在 fresh、旧软链迁移、重复安装临时目标及真实 `~/.codex` 上验证。
+- wheel / sdist、doctor、upgrade、多平台部分卸载与跨进程恢复仍未完成；当前源码仓 install → dry-run uninstall → transactional uninstall 已在临时目标验证，尚未对真实 `~/.codex` 执行卸载。
 
 ## 设计原则
 
