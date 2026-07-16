@@ -19,6 +19,14 @@ import tempfile
 from typing import Any
 import zipfile
 
+
+if sys.version_info < (3, 11):
+    detected_version = ".".join(str(part) for part in sys.version_info[:3])
+    raise SystemExit(
+        f"AgentDevelopmentSkills requires Python 3.11+; current interpreter is Python {detected_version}. "
+        "Launch scripts/install_local.py with Python 3.11 or newer."
+    )
+
 try:
     import termios
     import tty

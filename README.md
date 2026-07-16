@@ -126,11 +126,38 @@ PYTHONPATH=src python3 -m agent_workflow.cli detect /path/to/repository
 ./uninstall.sh --platform all
 ```
 
+### 远程一键安装发布合同（Bootstrap Anchor）
+
+发布后面向用户的入口采用两个薄 bootstrap；当前尚未发布公开 distribution host，因此以下 URL 仅表示冻结后的交付形态，不是已可用地址：
+
+```bash
+# macOS / Linux / WSL2
+curl -fsSL --proto '=https' --tlsv1.2 https://<distribution-host>/install.sh | bash
+```
+
+```powershell
+# Windows PowerShell；当前 release manifest 尚未声明 windows artifact，会 fail-closed
+iwr -useb https://<distribution-host>/install.ps1 | iex
+```
+
+`install.sh` / `install.ps1` 先下载 canonical `release-manifest.json`，读取版本固定的 `asset_base_url`，再按 manifest 声明的 size + SHA-256 校验共享 `bootstrap_install.py` 后执行；共享 Core 按 host 选择唯一 artifact，验证 size + SHA-256，并拒绝非 HTTPS/降级重定向、ZIP 规范化别名、大小写或 Unicode normalization 冲突、symlink、path traversal 和解压上限越界。默认 production artifact 当前仅声明 `darwin` / `linux`，WSL2 复用 Linux；Windows bootstrap 已进入 CI，但在 Windows 权限、路径与事务 Conformance 完成前不得把 `windows` 写入 production manifest。
+
+开发态可生成确定性 ZIP、bootstrap assets 与 manifest：
+
+```bash
+# 正式 stable/beta 构建拒绝 dirty source
+python3 scripts/build_release_bundle.py --output dist/release
+
+# 仅供未提交工作区验证
+python3 scripts/build_release_bundle.py \
+  --allow-dirty --channel development --output /tmp/agent-skills-release
+```
+
 `install.sh` 在 TTY 中默认显示 Manifest 驱动的平台复选菜单：Apple/iOS 因 Manifest 为 `implemented` 且已注册 activation/smoke handler，默认显示为 `[x]`；Android、Web、Backend、Desktop 以 `[ ]` 和 `bootstrap-only` 状态列出但暂不可选。使用 `↑` / `↓` 移动光标、`Space` 选择或取消、`Enter` 确认；确认后清除整个平台菜单，未来多个平台就绪后可组合选择。默认人类可读结果直接从所选平台的预览/完成状态开始，不重复显示产品标题与分隔线，并保留变更摘要与安装态验证；目标目录、规划平台、Runtime Config、安装包、Skill 数量及旧软链迁移状态等完整元信息仅由 `--json` 输出。非交互或自动化场景使用可重复的 `--platform <id>`（或 `--platform all`），传 `--json` 时必须显式选择平台并输出 canonical JSON；dry-run 与真实安装共用 managed-root preflight，避免预览通过但执行失败。默认目标为 `${CODEX_HOME:-$HOME/.codex}`，也支持 `--target-root <path>`。它只直接移除可精确识别的旧 iOSAgentSkills `AGENTS.md` / `skills` 软链，不创建旧配置持久备份；除普通文件形式的 macOS Finder 元数据 `.DS_Store` 外，未知文件、目录或软链继续 fail-closed。迁移时保留 Codex 管理的 `skills/.system`，合并而非清空本机 `config.toml`，并激活 8 个 custom agents、6 个缺省 profile、`codex_verify`、构建日志摘要器与 UI smoke 模板。安装后直接针对目标目录执行 Apple route/plan/review/report smoke；后置 smoke/activation 与受管根共享单进程临时回滚窗口，临时数据完成后删除。
 
 `uninstall.sh` 只接受 Lock、AGENTS、Skills、package snapshot 与 activation file 均未被修改的受管安装；dry-run 与真实卸载执行相同 preflight。卸载使用单进程临时回滚窗口，移除受管根与 activation lock 记录的 custom agents/bin/templates，保留 Codex 自身的 `skills/.system`、现有 profiles、未归属本工具的目录内容，以及 ownership 未记录的 activation 父目录；`config.toml` 只定向移除仍指向受管 `AGENTS.md` 的根级 `model_instructions_file` assignment，保留其余原始 bytes、注释、排版和文件 mode。旧 iOSAgentSkills 软链因安装时未创建持久备份而不会自动恢复。当前仅支持一次卸载当前安装中全部已选平台；未来多平台的部分卸载与剩余规则重组仍属于 Phase 6 后续范围。
 
-当前入口仍是 source-checkout lifecycle：不联网、不默认执行 `pip`，不代表 wheel/sdist 已发布；doctor、upgrade、多平台部分卸载与跨进程恢复仍未实现。
+仓库内执行 `./install.sh` 时继续走 source-checkout fast path，不联网且不默认执行 `pip`；只有托管/管道执行且找不到同目录 `scripts/install_local.py` 时才进入远程 bootstrap。确定性 ZIP/manifest 已具备，但公开 distribution host、stable release、wheel/sdist、doctor、upgrade、多平台部分卸载与跨进程恢复仍未完成。
 
 ### 底层安装 CLI
 

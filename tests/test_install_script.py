@@ -52,6 +52,41 @@ class InstallScriptTests(unittest.TestCase):
             text=True,
         )
 
+    def test_wrapper_honors_explicit_python_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "selected-python.txt"
+            explicit_python = Path(directory) / "python with spaces"
+            explicit_python.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$@\" > \"$AGENT_SKILLS_TEST_MARKER\"\n",
+                encoding="utf-8",
+            )
+            explicit_python.chmod(0o755)
+
+            completed = subprocess.run(
+                ["/bin/bash", str(INSTALL), "--platform", "apple", "--dry-run"],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "AGENT_SKILLS_PYTHON": str(explicit_python),
+                    "AGENT_SKILLS_TEST_MARKER": str(marker),
+                },
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            invoked_arguments = marker.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(invoked_arguments[0], str(ROOT / "scripts/install_local.py"))
+            self.assertEqual(invoked_arguments[1:], ["--platform", "apple", "--dry-run"])
+
+    def test_installer_rejects_old_python_before_importing_project_modules(self) -> None:
+        source = (ROOT / "scripts/install_local.py").read_text(encoding="utf-8")
+        version_guard = source.index("if sys.version_info < (3, 11):")
+        project_import = source.index("from agent_workflow.canonical_json import")
+        self.assertLess(version_guard, project_import)
+
     def test_dry_run_is_source_checkout_only_and_does_not_create_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "missing" / ".codex"

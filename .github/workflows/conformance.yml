@@ -9,6 +9,38 @@ permissions:
   contents: read
 
 jobs:
+  bootstrap-distribution:
+    name: Bootstrap (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run distribution contract tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest tests.test_distribution -v
+      - name: Validate POSIX bootstrap syntax
+        if: runner.os != 'Windows'
+        run: bash -n install.sh
+      - name: Validate PowerShell bootstrap syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: $null = [scriptblock]::Create((Get-Content -Raw ./install.ps1))
+      - name: Execute PowerShell source-checkout bootstrap
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $output = & ./install.ps1 --platform apple --dry-run --json
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed with exit code $LASTEXITCODE" }
+          $report = $output | ConvertFrom-Json
+          if ($report.status -ne "planned") { throw "unexpected install.ps1 report status" }
+
   conformance:
     runs-on: ubuntu-latest
     strategy:
