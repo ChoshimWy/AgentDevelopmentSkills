@@ -397,6 +397,7 @@ class InstallScriptTests(unittest.TestCase):
                 text=True,
             )
             self.assertIn("--worktree-session-request", wrapper_help.stdout)
+
             subprocess.run(
                 [str(target / "skills" / "apple-verification" / "scripts" / "worktree_session.py"), "--help"],
                 cwd=directory,

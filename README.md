@@ -140,7 +140,7 @@ curl -fsSL --proto '=https' --tlsv1.2 https://<distribution-host>/install.sh | b
 iwr -useb https://<distribution-host>/install.ps1 | iex
 ```
 
-`install.sh` / `install.ps1` 先下载 canonical `release-manifest.json`，读取版本固定的 `asset_base_url`，再按 manifest 声明的 size + SHA-256 校验共享 `bootstrap_install.py` 后执行；共享 Core 按 host 选择唯一 artifact，验证 size + SHA-256，并拒绝非 HTTPS/降级重定向、ZIP 规范化别名、大小写或 Unicode normalization 冲突、symlink、path traversal 和解压上限越界。默认 production artifact 当前仅声明 `darwin` / `linux`，WSL2 复用 Linux；Windows bootstrap 已进入 CI，但在 Windows 权限、路径与事务 Conformance 完成前不得把 `windows` 写入 production manifest。
+`install.sh` / `install.ps1` 只负责运行时定位、先下载 canonical `release-manifest.json`、读取其中版本固定的 `asset_base_url`，再按 manifest 声明的 size + SHA-256 校验共享 `bootstrap_install.py` 后执行并透传参数；共享 Core 按 host 选择唯一 artifact，验证 size + SHA-256，拒绝非 HTTPS/降级重定向、ZIP 规范化别名、大小写或 Unicode normalization 冲突、symlink、path traversal 和解压上限越界，再从临时目录调用同一 `scripts/install_local.py`。默认发布 artifact 当前仅声明 `darwin` / `linux`，WSL2 复用 Linux；Windows bootstrap 已进入源码与 CI 的 source-checkout 真实执行门禁，但在 Windows 权限/路径/事务 Conformance 完成前不得把 `windows` 写入 production manifest。
 
 开发态可生成确定性 ZIP、bootstrap assets 与 manifest：
 
@@ -307,7 +307,7 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 | Phase 3 | 已完成；Conformance 与独立 reviewer 均通过 | Product Design / Figma 显式 Provider、只读 Gateway、共享 Evidence/IR/Registry/Packet、Apple Packet v2 与 UI report 已贯通；live Connector 仍需显式授权 |
 | Phase 4 | 已完成；CP0–CP3、Conformance 与独立 reviewer 均通过 | QA Core、三类 QA workflow、Desktop 最小 Provider/Adapter、环境画像、真实 Plan/RunLedger 聚合与 goldens 已落地 |
 | Phase 5 | 暂缓（先完成 iOS host readiness） | Android、Web、Backend 继续保持 bootstrap-only；Desktop 后续仅扩展更多 framework Adapter/UI Binding |
-| Phase 6 | 进行中（源码安装/全量卸载已落地） | 根目录 `install.sh` 已贯通平台选择、资产激活与安装态 smoke；`uninstall.sh` 已提供 dry-run、完整性拒绝、事务回滚与全量卸载。doctor、upgrade、多平台部分卸载、跨进程恢复、打包与发布治理仍待实施 |
+| Phase 6 | 进行中（source lifecycle + verified bootstrap anchor） | 两个薄 bootstrap、共享下载/校验 Core、deterministic ZIP 与 release manifest 已落地；源码安装/全量卸载继续可用。公开托管、Windows production artifact、doctor、upgrade、多平台部分卸载、跨进程恢复与完整供应链发布仍待实施 |
 
 ## 当前限制
 
@@ -319,7 +319,7 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 - Phase 2A、Phase 2B 与 Phase 2C 的历史独立 reviewer 均已通过；本轮 iOS readiness、source install anchor 与验证闭环优化的 183 个 unittest、完整 Conformance 已通过，安装脚本独立复审结论为“阻塞问题：无”。这些证据不代表真实业务工程 Xcode build/test 已完成。
 - iOSAgentSkills 来源 commit/hash 与每个文件去向可审计，但 License/NOTICE provenance 当前仍为 `pending`；解决前不得把仓库标记为发布就绪。
 - 本地只验证了 Python 3.14.3；Python 3.11–3.14 由 CI matrix 覆盖。
-- wheel / sdist、doctor、upgrade、多平台部分卸载与跨进程恢复仍未完成；当前源码仓 install → dry-run uninstall → transactional uninstall 已在临时目标验证，尚未对真实 `~/.codex` 执行卸载。
+- 远程 bootstrap 当前只具备离线 fixture 与 development bundle 证据；默认 production manifest 仅允许 macOS/Linux/WSL2。公开 distribution host、Windows install transaction、wheel/sdist、doctor、upgrade、多平台部分卸载与跨进程恢复仍未完成。
 
 ## 设计原则
 
