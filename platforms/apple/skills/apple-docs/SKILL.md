@@ -32,6 +32,8 @@ Retrieve Apple official documentation facts for APIs, platform availability, WWD
 - Always include platform and minimum OS version when availability matters.
 - Prefer the narrowest query that answers the task.
 - If official evidence is insufficient, state the gap explicitly instead of guessing.
+- Distinguish Apple Developer Documentation from a local Xcode-exported expertise packet. The packet may guide implementation, but disputed or time-sensitive API/availability claims still require official documentation evidence.
+- Do not copy exported Apple Skill bodies into repository references. Return source identity/hash and route the ready packet to the owning implementation/build/automation Skill.
 
 ## Inputs
 
@@ -41,7 +43,8 @@ Retrieve Apple official documentation facts for APIs, platform availability, WWD
   "framework": "optional",
   "platform": "optional",
   "need_availability": true,
-  "need_wwdc": false
+  "need_wwdc": false,
+  "official_expertise": "ready packet | absent"
 }
 ```
 
@@ -83,4 +86,4 @@ Retrieve Apple official documentation facts for APIs, platform availability, WWD
 - Use `apple-debugging` for runtime investigation.
 - Use `xcode-build` for build and release setup.
 - Use this Skill as supporting evidence for other Apple-platform Skills.
-
+- Use `apple-orchestration` to inspect and route local Xcode official expertise; this Skill does not own the federation adapter.

@@ -1,6 +1,6 @@
 ---
 name: xcode-build
-description: Xcode 构建配置与交付链路 Skill。用于 Build Settings、scheme、xcconfig、构建脚本、签名、证书、Archive、Export、CI/CD、XCFramework 与构建性能策略；不要把一次性 xcodebuild 验证、Simulator/真机执行路径、测试编写、代码审查或运行时排障误判到本 Skill。
+description: Xcode 构建配置与交付链路 Skill。用于 Build Settings、scheme、xcconfig、构建脚本、签名、证书、Archive、Export、CI/CD、XCFramework、构建性能策略与显式 security-hardening 审计；可消费 ready Xcode 官方知识源 packet，但不复制其内容或照搬 Xcode MCP 工具路径；一次性验证、设备执行、测试编写、代码审查和运行时排障仍走专项 Skill。
 ---
 
 # Xcode 构建与配置
@@ -22,6 +22,7 @@ Design, modify, or review Xcode build configuration, signing, archive/export, CI
 - CI/CD 中的 `xcodebuild` 流程。
 - XCFramework 打包与分发策略。
 - 构建性能优化策略。
+- Security-oriented Build Settings、static analyzer/warning coverage、Enhanced Security 与 entitlement hardening。
 
 不负责：
 - 任务末尾一次性 `xcodebuild` 验证。
@@ -44,6 +45,7 @@ Use this Skill when the user asks about:
 - `xcodebuild archive` / `-exportArchive` 策略。
 - XCFramework 构建或分发。
 - 构建性能优化。
+- 显式安全配置审计、编译器 hardening、analyzer/warning coverage 或 entitlement hardening。
 - workspace / project / scheme 选择策略。
 
 ## When Not to Use
@@ -75,6 +77,16 @@ Do not use this Skill when:
 - Separate configuration design from verification execution.
 - Prefer explicit configuration over hidden environment assumptions.
 - Keep project changes minimal and scoped to the build issue.
+
+### Security Hardening Rules
+
+- Use `security-hardening` only for an explicit security posture request or a ready official-expertise route; do not silently enable hardening during unrelated build work.
+- Audit languages, targets, product types, inherited values, xcconfig/pbxproj ownership, entitlements and binary dependencies before proposing changes.
+- Prefer the project's existing configuration source; do not introduce a parallel xcconfig/pbxproj mechanism.
+- Present per-target diffs and obtain confirmation before changing entitlements, Enhanced Security, pointer authentication, memory tagging or settings that may break binary dependencies.
+- Apply broadly safe compiler warnings narrowly; keep false-positive-prone or default-off protections opt-in with rationale.
+- Record enabled, already-active, skipped and explicitly-disabled settings so future audits can distinguish a decision from drift.
+- Never use exported Xcode tool names directly. Translate inspection/editing to the current worktree contract and route build/test evidence to `apple-verification`.
 
 ### Signing Rules
 
@@ -137,7 +149,7 @@ When adding `.swift`, `.h`, `.m`, `.mm` files and headers are required:
 ## Core Workflow
 
 1. Identify target project entry: workspace / project / scheme / target.
-2. Identify task goal: build config, signing, archive, export, CI, XCFramework, or performance strategy.
+2. Identify task goal: build config, security hardening, signing, archive, export, CI, XCFramework, or performance strategy.
 3. Inspect only relevant files: project settings, xcconfig, scheme, plist, entitlements, Podfile, CI config, export options.
 4. Define the desired configuration state.
 5. Propose or apply minimal scoped changes.
@@ -152,7 +164,7 @@ Expected input contract:
 
 ```json
 {
-  "goal": "configure signing | archive | export | ci | build settings | xcframework",
+  "goal": "configure signing | archive | export | ci | build settings | security hardening | xcframework",
   "workspace": "App.xcworkspace",
   "project": null,
   "scheme": "App",
@@ -165,6 +177,13 @@ Expected input contract:
     "bundle_id": "optional",
     "style": "automatic | manual | unknown",
     "export_method": "app-store | ad-hoc | enterprise | development | unknown"
+  },
+  "official_expertise": {
+    "status": "ready | partial | blocked | absent",
+    "source_content_sha256": "optional",
+    "routing_sha256": "optional",
+    "selected_skill": "audit-xcode-security-settings | optional",
+    "selected_skill_sha256": "optional"
   },
   "changed_files": [],
   "constraints": []
@@ -191,6 +210,11 @@ Return compact structured output:
   "export_strategy": "...",
   "ci_changes": [],
   "changed_files": [],
+  "security_hardening": {
+    "status": "not-requested | proposed | applied | partial | skipped",
+    "target_decisions": [],
+    "official_expertise_used": []
+  },
   "validation_handoff": "none | apple-verification",
   "known_risks": [],
   "next_action": "none | review | verify | provide_signing_assets | blocked"

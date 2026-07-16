@@ -39,7 +39,7 @@ class MigrationAuditTests(unittest.TestCase):
         self.assertEqual(
             [(item["id"], len(item["files"])) for item in self.inventory["packages"]],
             [
-                ("apple", 236),
+                ("apple", 240),
                 ("codex", 9),
                 ("design", 42),
                 ("documentation", 8),
@@ -50,7 +50,7 @@ class MigrationAuditTests(unittest.TestCase):
         )
         self.assertEqual(self.audit["source"]["license"]["status"], "pending")
         apple_inventory = next(item for item in self.inventory["packages"] if item["id"] == "apple")
-        self.assertEqual(len(apple_inventory["capabilities"]), 22)
+        self.assertEqual(len(apple_inventory["capabilities"]), 29)
         self.assertEqual(
             apple_inventory["permissions"]["capability_profiles"]["implementation.apple"],
             "project-write",

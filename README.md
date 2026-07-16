@@ -42,7 +42,7 @@ Repository / Task / Target Files
 - **单一全局 AGENTS**：Core、共享 Discipline 与已选平台只贡献带 scope 的 Fragment，按依赖拓扑稳定合成一个受管 `AGENTS.md`；Fragment/Skill 冲突及未受管目标均 fail-closed。
 - **共享 Discipline**：`documentation`、`git`、`workflow`、`review`、`design` 各自拥有独立 Manifest、版本、权限与安装边界；Apple 通过 `package_requires` 获得闭包，不保留重复可安装副本。
 - **平台真值**：Apple 为 `implemented`；Android、Web、Backend、Desktop 为 `bootstrap-only`，只能输出 `bootstrap_required`，不会产生 phantom Binding 或 ready Plan。
-- **迁移审计 v2**：不可变 iOSAgentSkills 来源清单通过 relocation/transformation map 映射到当前包清单；117 项 retained、113 项 relocated、57 项 transformed、1 项 removed，并记录 31 个仓内 addition；License provenance 明确标为 pending。
+- **迁移审计 v2**：不可变 iOSAgentSkills 来源清单通过 relocation/transformation map 映射到当前包清单；117 项 retained、113 项 relocated、57 项 transformed、1 项 removed，并记录 35 个仓内 addition；License provenance 明确标为 pending。
 - **安装完整性**：Install Plan/Lock v2 冻结 package source hash、Capability Provider、flattened asset allowlist、rule trace 及完整 path/hash/canonical mode；篡改、额外文件、symlink、Binding 越界、Provider 权限扩大、兼容越界及 staged TOCTOU 均在 swap 前 fail-closed。
 - **显式 Runtime Config**：Codex profiles/shared config 已迁入 `runtime-configs/codex`；只有显式 `--runtime-config codex` 才会进入安装闭包，选择 Apple 不会隐式改写全局工具行为。
 - **结构化 Adapter**：冻结 Provider binding/hash 与每次外部调用的 `invocation_id`，校验 request/result identity、验证缺口、artifact hash 与独立 reviewer actor。
@@ -248,7 +248,7 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 - 29 个 JSON Schema
 - 11 个非法 contract golden
 - 15 个内建 Manifest + 2 个显式外部 Provider Manifest：Core、Apple、4 个 bootstrap-only 平台、5 个共享 Discipline、2 个 Design Provider bootstrap 与 1 个显式 Codex Runtime Config；外部 Provider 默认不启用
-- 288 个 iOSAgentSkills 来源受控文件：117 retained、113 relocated、57 transformed、1 removed，另有 31 additions；当前为 13 个 Apple Skills + 9 个共享 Skills，历史名称不保留兼容副本
+- 288 个 iOSAgentSkills 来源受控文件：117 retained、113 relocated、57 transformed、1 removed，另有 35 additions；当前为 13 个 Apple Skills + 9 个共享 Skills，历史名称不保留兼容副本
 - 4 个 Apple legacy/Core route comparison cases
 
 ## 架构与实施文档

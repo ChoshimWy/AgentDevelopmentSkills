@@ -1,6 +1,6 @@
 ---
 name: ios-automation
-description: iOS 设备自动化 Skill，覆盖 Simulator 与真机两种目标，用于设备发现、模拟器生命周期、Debug/Test-only Scenario 与 Fixture 注入、直接页面启动、语义 snapshot、accessibility tree、UI smoke、区域截图、UI Summary、replay 取证与常见设备诊断；不要把 Build Settings、签名、Archive/Export、普通业务实现、测试编写或一次性构建验收误判到本 Skill。
+description: iOS 设备自动化 Skill，覆盖 Simulator 与真机，用于设备发现、生命周期、Scenario/Fixture、语义 snapshot、accessibility tree、交互、UI smoke、截图、UI Summary、replay 与诊断；`interaction-evidence` 可吸收 ready Xcode 官方 device-interaction 的 session/evidence 语义，但执行仍走本仓工具和验证合同；构建配置、业务实现、测试编写和一次性验收不属于本 Skill。
 ---
 
 # iOS 设备自动化
@@ -36,6 +36,7 @@ Use this Skill when the task needs:
 - Device discovery and connected-device diagnosis。
 - Simulator status bar, clipboard, privacy permission, push notification setup。
 - Real-device install / launch / diagnose workflow。
+- Ready official-expertise packet routed `device-interaction` semantics into `interaction-evidence` mode.
 
 ## When Not to Use
 
@@ -107,6 +108,15 @@ Do not use this Skill when:
 - If the user asks for a formal HTML UI smoke report, visual evidence report, or handoff document, route the collected evidence bundle to `html-docs` for final document generation.
 - Do not paste huge logs.
 - Do not claim UI state from screenshots alone if accessibility/text state contradicts it.
+
+### Interaction Evidence Federation Rules
+
+- Consume only a ready packet entry for `device-interaction` with `tool_policy=semantic-only`.
+- Reuse its session lifecycle and evidence intent, but do not call `DeviceInteraction*`, `DeviceEventSynthesize` or Xcode MCP tools from this workflow.
+- Translate install/run/gesture/hierarchy/screenshot operations to the selected Simulator or physical-device scripts and keep identifiers type-safe.
+- Start sessions only when device evidence is explicitly required and close resource-heavy sessions promptly.
+- Store source/routing hash with the UI evidence fingerprint; any source, app, scenario, locale, appearance, Dynamic Type or destination change invalidates reuse.
+- Device interaction evidence supports behavior claims but does not replace `apple-verification` Final Evidence Gate.
 
 ### Token Budget
 
@@ -213,7 +223,12 @@ Expected input contract:
   "dynamic_type": "normal",
   "semantic_ref": "@e1",
   "replay_output": ".codex/ui-smoke-artifacts/",
-  "constraints": []
+  "constraints": [],
+  "official_expertise": {
+    "status": "ready | partial | blocked | absent",
+    "selected_skill": "device-interaction | null",
+    "selected_skill_sha256": "optional"
+  }
 }
 ```
 
@@ -245,6 +260,7 @@ Return compact structured output:
     "logs": "path-or-summary"
   },
   "first_failure": null,
+  "official_expertise_used": [],
   "next_action": "none | retry | route-xcode-build | route-apple-verification | route-apple-debugging | blocked"
 }
 ```

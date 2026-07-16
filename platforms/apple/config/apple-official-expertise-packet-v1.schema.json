@@ -1,0 +1,102 @@
+{
+  "$id": "https://agent-workflow.local/platforms/apple/apple-official-expertise-packet-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capabilities": {
+      "items": {"minLength": 1, "type": "string"},
+      "type": "array",
+      "uniqueItems": true
+    },
+    "missing_known_skills": {
+      "items": {"minLength": 1, "type": "string"},
+      "type": "array",
+      "uniqueItems": true
+    },
+    "next_action": {
+      "enum": ["route-existing-entry", "provide-xcode-identity-or-sdk", "update-routing-map", "blocked"]
+    },
+    "routing_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "schema_version": {"const": "1.0", "type": "string"},
+    "skills": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "activation": {
+            "additionalProperties": false,
+            "properties": {
+              "eligible": {"type": "boolean"},
+              "reasons": {
+                "items": {"minLength": 1, "type": "string"},
+                "type": "array",
+                "uniqueItems": true
+              }
+            },
+            "required": ["eligible", "reasons"],
+            "type": "object"
+          },
+          "capabilities": {
+            "items": {"minLength": 1, "type": "string"},
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "content_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+          "file_count": {"minimum": 1, "type": "integer"},
+          "local_routes": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "mode": {"minLength": 1, "type": "string"},
+                "skill": {"minLength": 1, "type": "string"}
+              },
+              "required": ["mode", "skill"],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "name": {"minLength": 1, "type": "string"},
+          "path": {"minLength": 1, "type": "string"},
+          "tool_policy": {"enum": ["guidance-only", "semantic-only", "translate-to-local"]}
+        },
+        "required": ["activation", "capabilities", "content_sha256", "file_count", "local_routes", "name", "path", "tool_policy"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "source": {
+      "additionalProperties": false,
+      "properties": {
+        "content_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "file_count": {"minimum": 1, "type": "integer"},
+        "kind": {"const": "local-skill-export", "type": "string"},
+        "path": {"minLength": 1, "type": "string"},
+        "redistribution": {"const": "local-export-only", "type": "string"},
+        "sdk_major": {"minimum": 1, "type": ["integer", "null"]},
+        "xcode_build": {"type": ["string", "null"]},
+        "xcode_version": {"type": ["string", "null"]},
+        "trust": {
+          "additionalProperties": false,
+          "properties": {
+            "status": {"enum": ["xcode-managed-path", "explicit-local-attestation", "unverified"]},
+            "trusted_for_activation": {"type": "boolean"}
+          },
+          "required": ["status", "trusted_for_activation"],
+          "type": "object"
+        }
+      },
+      "required": ["content_sha256", "file_count", "kind", "path", "redistribution", "sdk_major", "trust", "xcode_build", "xcode_version"],
+      "type": "object"
+    },
+    "status": {"enum": ["ready", "partial", "blocked"]},
+    "unknown_skills": {
+      "items": {"minLength": 1, "type": "string"},
+      "type": "array",
+      "uniqueItems": true
+    }
+  },
+  "required": ["capabilities", "missing_known_skills", "next_action", "routing_sha256", "schema_version", "skills", "source", "status", "unknown_skills"],
+  "title": "Apple Official Expertise Federation Packet v1",
+  "type": "object"
+}

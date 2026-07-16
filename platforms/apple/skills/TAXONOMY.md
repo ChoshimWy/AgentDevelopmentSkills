@@ -5,7 +5,7 @@
 
 ## 分类原则
 
-- `Core Implementation`：只有一个真正的 iOS 代码实施 Skill：`ios-feature-implementation`。它内部再按模式细分业务、SwiftUI、Liquid Glass、UIKit、混合 UI、高级 Swift、重构、SDK 契约 / 架构和测试代码编写。
+- `Core Implementation`：只有一个真正的 iOS 代码实施 Skill：`ios-feature-implementation`。它内部再按模式细分业务、SwiftUI/官方 guidance、Liquid Glass、UIKit、混合 UI、高级 Swift、重构、UIKit modernization、SDK 契约 / 架构、测试代码编写/现代化和 C bounds-safety。
 - `Automation / Build / Validation`：设备自动化、构建配置与统一验证技能。
 - `Diagnostics`：发现问题、分析风险、定位根因的技能。
 - `Additional Skills`：按需触发的低频技能；与 core skills 共用同一目录，只通过路由策略区分。
@@ -33,10 +33,11 @@
 - 多 Agent 编排默认遵守 `fail-fix-report`：先定位失败、修复并重跑，再汇报。
 - 如果当前任务未进入 `apple-orchestration`，或 coder / tester 只能由主 Agent 串行承担，实现型任务仍必须三步收口：`实现 skill -> 定向验证 / no_test_reason -> reviewer subAgent(code-review)`；若 reviewer subAgent 不可用，只能报告 blocked / pending review，不能降级为实现者自审。
 - Apple API / availability / WWDC 问题优先路由到 `apple-docs`；需要独立官方事实核实时使用只读 `docs_researcher`，其专属配置加载固定版本 `appleDeveloperDocs`。OpenAI/Codex 官方行为同理由 `openai-docs` / `docs_researcher` 核实。
+- Xcode 官方 Skills 使用“本机知识源联邦”而非仓内复制：显式检查已导出的 `__xcode` 目录，冻结 Xcode version/build、SDK major、routing/source/skill hash，只把 eligible capability 路由到既有 canonical Skill。第三方镜像、unknown Skill、缺少 source identity 或 SDK 不匹配均不得激活。
 
 ## 边界优先级
 
-- 实现链路：`ios-feature-implementation` 是唯一真正实施入口；先在内部选择 `business` / `swiftui` / `liquid-glass` / `uikit` / `mixed-ui` / `advanced-swift` / `refactor` / `sdk-contract` / `test-implementation`，不要把普通页面、业务、高级 Swift、SDK 架构、Liquid Glass、测试代码编写或重构实施拆到独立 Skill。
+- 实现链路：`ios-feature-implementation` 是唯一真正实施入口；先在内部选择 `business` / `swiftui` / `swiftui-guidance` / `liquid-glass` / `uikit` / `mixed-ui` / `advanced-swift` / `refactor` / `modernization` / `sdk-contract` / `test-implementation` / `test-modernization` / `c-bounds-safety`，不要把官方 guidance 或专项现代化重新拆成平级实施 Skill。
 - 验证链路：`apple-verification` 是唯一验证入口；内部使用 `route` / `affected-tests` / `quick-verify` / `execute` / `digest` / `final-gate` 模式完成证据需求生成、测试面选择、Session/缓存复用、执行、失败归因和证据裁决。
 - 构建链路：`xcode-build` 只处理 Build Settings、签名、Archive / Export、CI/CD、scheme / xcconfig / build script 设计；一次性 build/test 验证转交 `apple-verification`。
 - 诊断链路：`apple-debugging` 只处理运行时症状；`ios-performance` 只处理性能证据与基线，不接泛化 crash 或普通测试补写。

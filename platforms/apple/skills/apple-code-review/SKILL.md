@@ -29,15 +29,34 @@ Extend the shared independent review contract with Apple/Swift-specific correctn
 - 最窄定向验证足以覆盖低风险改动时，不得仅因缺少真机/模拟器就判定证据不足。
 - 高风险工程、签名、资源、设备或依赖变更才建议升级 `apple-verification`。
 - API 细节参考 `references/api-design.md`。
+- 若 diff 声称使用 Xcode 官方知识源，检查 packet 为 `ready`、selected Skill eligible、source/routing/skill hash 可追溯，并确认没有把 Apple 原文提交进仓库。
+- `swiftui-guidance` 检查 deployment target、active SDK、identity/data flow/soft deprecation；`modernization` 检查 scene/window ownership；`test-modernization` 检查语义等价与 XCUI 排除；`c-bounds-safety` 检查 ABI/count/lifetime；`security-hardening` 检查逐 target 决策与显式批准。
+- Xcode-exported tool names 不得绕过当前 worktree、`codex_verify + shared build-queue`、权限或独立 reviewer 合同。
 
 ## Inputs
 
-共享 review packet，加上 Apple SDK/Xcode/Swift 版本、目标平台及验证基线。
+共享 review packet，加上 Apple SDK/Xcode/Swift 版本、目标平台、验证基线及可选 official-expertise source packet/hash。
 
 ## Outputs
 
-只向共享 reviewer 返回 Apple-specific findings、影响范围与验证缺口；最终 `阻塞问题` 由独立 reviewer 聚合。
+只向共享 reviewer 返回 `status`、Apple-specific findings、影响范围、验证/知识源缺口与 `next_action`；最终 `阻塞问题` 由独立 reviewer 聚合。
 
 ## Exit Conditions
 
 Apple 专属影响面已检查；未伪造运行时证据；所有 finding 可追溯到 diff 或已知合同。
+
+## Escalation Rules
+
+- API/availability 事实不确定时交给 `apple-docs`。
+- 需要修改代码或 Build Settings 时退回 `ios-feature-implementation` / `xcode-build`，reviewer 不直接修复。
+- 缺少 ready expertise packet 时报告证据缺口，不从第三方镜像补齐。
+
+## Token Budget
+
+- 不粘贴完整导出 Skill、构建日志或全量工程设置。
+- 只返回与 diff 直接相关的 finding、source/hash 证据和最小验证缺口。
+
+## Relationship to Other Skills
+
+- 与共享 `code-review` 组合使用，不替代独立 reviewer。
+- 官方知识源由 `apple-orchestration` 检查并路由；实现、配置、自动化和验证分别由既有 canonical Skill 承担。

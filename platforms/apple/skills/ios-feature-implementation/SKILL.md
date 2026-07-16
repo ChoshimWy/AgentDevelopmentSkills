@@ -1,6 +1,6 @@
 ---
 name: ios-feature-implementation
-description: 统一 iOS 实施 Skill。作为所有 iOS 代码实施、测试代码编写、页面落地、SDK/Framework 架构契约和结构重构的单一实现入口；根据本地项目事实自动选择 business、swiftui、uikit、mixed-ui、advanced-swift、refactor、sdk-contract、liquid-glass 或 test-implementation 模式，覆盖 service/repository/use case/view model/coordinator/router、SwiftUI/UIKit 页面与组件、XCTest/XCUITest/Mock/Stub/Spy/Fake/fixture/Page Object、iOS 26+ SwiftUI Liquid Glass、复杂 Swift 并发/Sendable/泛型/类型擦除、行为保持型重构、跨模块 Public API、SDK 模块边界、Configuration、分发与版本演进；不要再把普通 SwiftUI/UIKit/Swift 进阶/SDK 架构/Liquid Glass 或测试代码编写拆到独立实现 Skill，构建配置、运行时调试、性能取证、Apple 官方事实检索和验证执行/证据裁决仍路由到对应专项 Skill。
+description: 统一 iOS 实施 Skill。作为所有 iOS 生产/测试代码、页面、SDK/Framework、结构重构与现代化迁移的单一实现入口；根据本地事实选择 business、swiftui、swiftui-guidance、liquid-glass、uikit、mixed-ui、advanced-swift、refactor、modernization、sdk-contract、test-implementation、test-modernization 或 c-bounds-safety，必要时消费经过 provenance/hash/SDK 门禁的 Xcode 官方知识源 packet；构建配置、运行时调试、性能取证、Apple 官方事实检索和验证执行仍路由到专项 Skill。
 ---
 
 # iOS Feature 实施统一入口
@@ -17,13 +17,17 @@ Implement iOS / Apple-platform production and test code through one implementati
 | --- | --- | --- |
 | `business` | service / repository / use case / domain model / view model / coordinator / router / DI / async 业务流程 | 行为、契约、依赖、错误语义 |
 | `swiftui` | SwiftUI 页面结构、`NavigationStack`、sheet、状态归属、组件、列表、表单、动画、预览、SwiftUI 视图重构 | view structure、state ownership、navigation |
+| `swiftui-guidance` | 消费已校验 Xcode 官方 SwiftUI guidance，处理结构、data flow、environment、modifier、identity、soft deprecation 与 SDK 27 条件化迁移 | source identity、API/availability、adopted guidance |
 | `liquid-glass` | iOS 26+ SwiftUI `glassEffect`、`GlassEffectContainer`、玻璃按钮样式、形态过渡、兼容回退 | API 选型、视觉层级、fallback |
 | `uikit` | `UIViewController`、`UIView`、Auto Layout、Swift + SnapKit、Objective-C + Masonry、table / collection、cell 复用、事件绑定 | UI 结构、布局、生命周期 / 内存 |
 | `mixed-ui` | SwiftUI + UIKit 桥接、hosting/controller 包装、跨技术栈导航接线 | 桥接边界、ownership、生命周期 |
 | `advanced-swift` | actor、`Sendable`、取消传播、重入、PAT、复杂泛型、类型擦除、跨平台可用性、public/open API | API 边界、并发不变量、可用性 |
 | `refactor` | 长方法、重复逻辑、深层嵌套、回调地狱、God Object、行为保持型整理 | refactoring pattern、行为保持证据 |
+| `modernization` | UIKit multi-window/resizable UI、scene lifecycle、shared-state API、orientation/safe-area 迁移 | migrated APIs、context ownership、remaining blockers |
 | `sdk-contract` | SDK / Framework public API、模块边界、入口类、Configuration、依赖方向、可测试性、SPM/XCFramework 分发、版本演进 | public surface、module boundaries、distribution、versioning |
 | `test-implementation` | 单元测试、UI 测试、Mock / Stub / Spy / Fake、fixture、Page Object、async 测试、为测试补最小 seam / DI | deterministic tests、test doubles、fixtures、testability seam |
+| `test-modernization` | 现有 XCTest/Swift Testing 结构升级与渐进迁移；不用于新写功能测试或 XCUI 迁移 | migration scope、mixed-suite strategy、unsupported cases |
+| `c-bounds-safety` | Apple Clang C bounds-safety adoption、pointer annotation、渐进迁移与 ABI 边界 | adoption mode、annotation invariants、unsafe boundary |
 
 不负责：构建设置/签名/Archive/CI、运行时 crash/leak/hang 定位、性能 profiling / benchmark、验证执行/证据裁决、Apple 官方事实检索、纯视觉方向探索。这些仍交给 `xcode-build`、`apple-debugging`、`ios-performance`、验证链路 Skill、`apple-docs`、`ui-ux-design-system` 等专项 Skill。
 
@@ -40,6 +44,7 @@ Use this Skill when the user asks to implement, modify, wire, design, or refacto
 - Behavior-preserving code refactoring where touched code belongs to an iOS / Apple project.
 - Public/open API, cross-module reusable implementation, SDK / Framework module boundaries, entry types, configuration, distribution strategy, or versioning strategy.
 - XCTest / XCUITest code authoring, Mock / Stub / Spy / Fake / fixture / Page Object design, deterministic async tests, or minimal production seams needed for testability.
+- Existing XCTest to Swift Testing modernization, UIKit resizable/multi-window modernization, or C bounds-safety adoption routed from a ready official-expertise packet.
 
 ## When Not to Use
 
@@ -62,6 +67,7 @@ Do not use this Skill as the main route when:
 3. Do not ask the user to choose UIKit vs SwiftUI when the repository already makes it clear.
 4. Do not switch to removed standalone implementation Skills; this Skill owns all implementation modes, including SDK architecture, Liquid Glass, and test code implementation.
 5. If the task was routed from `apple-orchestration`, preserve its task type, checkpoint, validation baseline, and reviewer handoff requirements.
+6. Treat `official_expertise` as optional guidance evidence, not a second implementation owner. Consume only `status=ready` skills whose `activation.eligible=true`; record source/routing hash and reject unknown or ineligible routes.
 
 ### Shared Implementation Rules
 
@@ -95,6 +101,13 @@ Do not use this Skill as the main route when:
 - Keep list identity stable and async state transitions explicit: loading, success, empty, error.
 - Use `liquid-glass` mode, not generic `swiftui`, when the main problem is iOS 26+ glass API choice, fallback, or review.
 - Read `references/swiftui/components-index.md` first when selecting detailed SwiftUI guidance.
+
+#### `swiftui-guidance`
+
+- Start from `swiftui` rules, then apply only the matching exported Skill path in the ready packet.
+- Keep deployment target and active SDK distinct. SDK 27 guidance must not leak into SDK 26 or lower builds merely because Xcode 27 is installed.
+- Record which official Skill/hash affected the change; do not paste or vendor its body into the repository.
+- When exported guidance conflicts with a locked repository rule, preserve the locked rule and report the conflict. When an API/availability fact remains unclear, route to `apple-docs`.
 
 #### `liquid-glass`
 
@@ -145,6 +158,14 @@ Do not use this Skill as the main route when:
 - If behavior changes become necessary, report them as `contract_changes` and update the selected mode.
 - Read `references/refactoring.md` when the task is primarily structural cleanup.
 
+#### `modernization`
+
+- Limit the scan to targeted UIKit shared-state, lifecycle, orientation, screen and safe-area patterns; do not perform a broad style rewrite.
+- Prefer context nearest the consumer: scene/window/view/trait information over process-wide singleton state.
+- Migrate application lifecycle to scene lifecycle only with an explicit ownership and state-restoration plan.
+- Replace every in-scope occurrence when a safe local replacement is known; otherwise report a precise blocker/TODO instead of silently skipping the file.
+- Keep Objective-C and Swift behavior equivalent, including notification, delegate and lifecycle timing.
+
 #### `sdk-contract`
 
 - Expose the minimum necessary public API and keep implementation details internal.
@@ -173,6 +194,22 @@ Do not use this Skill as the main route when:
 - Keep fixtures small, explicit, and close to the test that owns them unless reuse is already established.
 - If no useful test can be written without invasive seams, do not force a poor test; return `no_test_reason` and `suggested_validation`.
 - Actual targeted XCTest execution, build/test failure digest, and final evidence sufficiency belong to the validation route after test code is written.
+
+#### `test-modernization`
+
+- Use only when modernizing an existing test suite. New coverage for changed production behavior remains `test-implementation`.
+- Prefer incremental file/suite migration and allow temporary mixed `XCTest` + `Testing` imports when required by the project baseline.
+- Preserve Foundation imports, async failure semantics, setup/teardown ownership, serial execution requirements, attachments and skip behavior.
+- Do not migrate XCUI APIs to Swift Testing; keep UI automation in XCTest/XCUITest.
+- Keep behavior assertions equivalent before adopting newer parameterization or trait features.
+
+#### `c-bounds-safety`
+
+- Confirm the active compiler/SDK supports the requested bounds-safety mode before changing source.
+- Choose full adoption, header-only or boundary-focused adoption explicitly; do not annotate pointers mechanically without understanding count/size/lifetime invariants.
+- Preserve public ABI and nullability; isolate truly unsafe boundaries and document why they cannot yet be made safe.
+- Build Setting design belongs to `xcode-build`; deterministic bounds traps and runtime root cause belong to `apple-debugging`.
+- Require focused compile/test evidence for touched C/Objective-C call boundaries before expanding adoption.
 
 ### Private Dependency Rules
 
@@ -229,7 +266,7 @@ Expected input contract:
 ```json
 {
   "goal": "Implement, modify, wire, design, or refactor iOS code",
-  "implementation_mode": "auto | business | swiftui | liquid-glass | uikit | mixed-ui | advanced-swift | refactor | sdk-contract | test-implementation",
+  "implementation_mode": "auto | business | swiftui | swiftui-guidance | liquid-glass | uikit | mixed-ui | advanced-swift | refactor | modernization | sdk-contract | test-implementation | test-modernization | c-bounds-safety",
   "target_files": [],
   "production_files": [],
   "test_files": [],
@@ -242,7 +279,14 @@ Expected input contract:
     "dependencies": []
   },
   "minimum_platforms": {},
-  "preferred_validation": "auto"
+  "preferred_validation": "auto",
+  "official_expertise": {
+    "status": "ready | partial | blocked | absent",
+    "source_content_sha256": "optional",
+    "routing_sha256": "optional",
+    "selected_skill": "optional",
+    "selected_skill_sha256": "optional"
+  }
 }
 ```
 
@@ -253,7 +297,7 @@ Return compact structured output:
 ```json
 {
   "status": "completed | partial | blocked",
-  "implementation_mode": "business | swiftui | liquid-glass | uikit | mixed-ui | advanced-swift | refactor | sdk-contract | test-implementation",
+  "implementation_mode": "business | swiftui | swiftui-guidance | liquid-glass | uikit | mixed-ui | advanced-swift | refactor | modernization | sdk-contract | test-implementation | test-modernization | c-bounds-safety",
   "secondary_modes": [],
   "changed_files": [],
   "file_header_check": "not-applicable | passed | blocked",
@@ -277,6 +321,7 @@ Return compact structured output:
   "versioning_plan": [],
   "recommended_api_usage": [],
   "fallback_strategy": [],
+  "official_expertise_used": [],
   "review_findings": [],
   "known_risks": [],
   "test_impact": "...",
@@ -294,7 +339,8 @@ Field rules:
 - `summary`: behavior and implementation outcome, not raw diff.
 - `contract_changes`: public API, model, error, persistence, navigation, dependency, side-effect, or availability contract changes.
 - `test_impact` or `no_test_reason` must be present.
-- `test_changes` may be empty outside `test-implementation`; fill it when adding or modifying tests.
+- `test_changes` may be empty outside `test-implementation` and `test-modernization`; fill it whenever tests are added or modified.
+- `official_expertise_used` contains only source/skill/routing hashes and adopted rule identifiers; never embed exported Skill bodies.
 - Mode-specific arrays may be empty when not applicable; do not invent noise.
 - `known_risks` should include real residual risk only; use `[]` when none.
 

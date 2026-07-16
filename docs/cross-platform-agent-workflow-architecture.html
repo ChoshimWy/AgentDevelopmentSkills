@@ -218,6 +218,7 @@
         <h2>2. 背景与问题</h2>
         <p>现有 Apple 工作流包含统一主入口、任务分型、CP0–CP3、Fail-Fix-Report、最窄验证、结构化证据、独立 reviewer、quick-verify、wrapper/queue 分层和 Apple 私有依赖边界。验证不再依赖已打开的 Xcode 窗口或 Xcode MCP；当前 wrapper 已统一项目发现、构建、测试、exact-request 去重/成功缓存与证据归一化入口。Verification Session、三层 fingerprint、same-or-stronger 跨请求复用、优先级与自动 .xctestrun 复用仍是独立 scaffold/后续 daemon 集成合同。</p>
         <p>其中一部分是跨平台通用合同，另一部分高度依赖 Xcode、Swift、CocoaPods、真机/模拟器与 Apple 工具链。P2C 已把 workflow、review、documentation、git 与 Canonical UI IR 基础抽为独立 Discipline，把 Apple binding 留在平台包，并将全局 Codex 配置拆为显式 Runtime Config；单仓不等于规则平铺到同一入口。</p>
+        <div class="callout info"><strong>Apple 官方知识源联邦接入</strong><code>platforms/apple/scripts/apple_official_expertise.py</code> 只检查 Xcode 默认受管目录或用户显式核实的非默认本机导出，并输出 source trust、Xcode/SDK 身份、文件 hash、已审查路由与 eligibility 等 metadata；任意本地或第三方目录默认保持 <code>unverified</code>。它不联网、不执行导出脚本、不复制 Skill 正文，也不新增第二套实现入口。已知能力通过稳定 Capability ID 增强 <code>ios-feature-implementation</code>、<code>xcode-build</code>、<code>ios-automation</code>、<code>apple-debugging</code> 与 <code>apple-code-review</code>；unverified/unknown Skill、版本缺失、SDK 不满足或冻结 hash 漂移均 fail-closed。</div>
       </section>
 
       <section class="card half">
@@ -987,6 +988,7 @@ agent-skills uninstall --platform desktop --dry-run</code></pre>
           <li>源码仓选择安装入口为根目录 <code>install.sh</code>；TTY 默认从所有平台 Manifest 生成复选菜单，Apple/iOS 同时满足 Manifest <code>implemented</code> 与 source-installer activation/smoke handler readiness，因而默认显示为 <code>[x]</code>；Android、Web、Backend、Desktop 以 <code>[ ]</code> 和 <code>bootstrap-only</code> 状态展示但暂不可选；使用 <code>↑</code> / <code>↓</code> 移动光标、<code>Space</code> 选择或取消、<code>Enter</code> 确认，确认后清除整个平台菜单；非交互模式使用可重复的 <code>--platform</code> 或 <code>--platform all</code>，<code>--json</code> 必须显式选择平台。当前可安装闭包仍为 Apple + Codex Runtime Config，并支持 <code>--dry-run</code> / <code>--target-root</code>；默认人类可读结果直接从所选平台的预览/完成状态开始，不重复显示产品标题与分隔线，并保留变更/验证摘要，目标目录、规划平台、Runtime Config、安装包、Skill 数量及旧软链迁移状态等完整元信息由显式 <code>--json</code> 以 canonical JSON 输出；不联网也不默认执行 pip。dry-run 与真实安装共用 managed-root preflight；除普通文件形式的 macOS Finder 元数据 <code>.DS_Store</code> 外，冲突时不得覆盖用户本地自定义 Skill。</li>
           <li>按当前迁移合同，<code>install.sh</code> 只直接移除可精确识别的旧 iOSAgentSkills <code>AGENTS.md</code> / <code>skills</code> 软链，不生成旧配置持久备份；未知路径 fail-closed，并保留 Codex 管理的 <code>skills/.system</code>。</li>
           <li>官方平台包来源固定为发布物内 <code>platforms/&lt;id&gt;/</code>；环境变量或用户 registry 只用于显式授权的本地扩展包。</li>
+          <li>本机 Xcode 官方 Skill 导出属于运行时知识源，不属于发布物或 package source：Lock/报告只记录 Xcode build、SDK major、导出内容 hash、routing hash 与所采用的规则标识，禁止把导出正文、引用或工具脚本再分发进本仓。</li>
           <li><code>--platform</code> 支持单个平台、通过重复参数选择多个平台，以及 <code>all</code>；只有 <code>implemented</code> 平台可安装，<code>bootstrap-only</code> 平台返回明确阻塞；未选择的平台不得产生 Skill、binding 或权限副作用。</li>
           <li><code>--runtime-config</code> 必须显式选择；平台依赖闭包不得隐式激活 profiles、全局配置或插件开关。</li>
           <li>未安装包可被检测到，但工作流计划必须标记 <code>missing_capabilities</code>。</li>
@@ -1066,7 +1068,7 @@ design-source read/write boundary test</code></pre>
             <tr><td>Phase 3</td><td><span class="check">√</span> Product Design / Figma 显式 Provider、Design Source Gateway、Canonical IR / Registry / Packet 与 Apple Packet v2 已实现；Conformance 与独立 reviewer 均通过</td><td>credential-free source fixture 到 Apple Agent Packet 可追溯；live Connector 保持显式授权</td></tr>
             <tr><td>Phase 4</td><td><span class="todo">□</span> QA Core 与 Desktop 最小包</td><td>PRD、Bug、Release 三类 QA 流程闭环</td></tr>
             <tr><td>Phase 5</td><td><span class="todo">□</span> 暂缓 Android、Web、Backend 与更多平台/UI Binding；当前平台包均为 <code>bootstrap-only</code></td><td>先以获准真实 Xcode 工程完成 Apple host readiness，再启动其他平台 Provider；新增 Provider 仍不得修改 Core 主合同</td></tr>
-            <tr><td>Phase 6</td><td><span class="todo">□</span> 在 P2C Lock v2 / source hash / asset allowlist / rule trace 基础上完成 doctor、升级卸载、打包与发布治理</td><td>单一发布物可选择平台且可移植、可复现、可回滚、冲突安全</td></tr>
+            <tr><td>Phase 6</td><td><span class="todo">□</span> 在 P2C Lock v2 / source hash / asset allowlist / rule trace 基础上完成 doctor、升级卸载、打包与发布治理；Apple 本机官方知识源已具备 metadata-only 联邦合同，仍待 Xcode 27 host export smoke</td><td>单一发布物可选择平台且可移植、可复现、可回滚、冲突安全；本地知识源不进入再分发产物</td></tr>
           </tbody>
         </table>
         <div class="callout info"><strong>推荐扩展顺序</strong>Apple installed-contract smoke → 获准真实 Xcode host smoke → Android → Web TypeScript → Backend Node/Java/Go → Desktop → Unity → Flutter / React Native。Apple host readiness 未通过前，其他平台保持 <code>bootstrap-only</code>。</div>
@@ -1087,6 +1089,7 @@ design-source read/write boundary test</code></pre>
             <tr><td>Design Source 被误改</td><td>设计真源和协作状态损坏</td><td>默认只读、显式写授权、document/page/node scope 与版本 hash</td></tr>
             <tr><td>截图直接转代码</td><td>状态、布局意图和组件复用丢失</td><td>Design Evidence → Canonical IR → Platform Binding 门禁</td></tr>
             <tr><td>插件供应链或权限扩大</td><td>项目、凭据或设备风险</td><td>来源/hash 锁定、permission profile、检测只读、fail-closed</td></tr>
+            <tr><td>Xcode 官方 Skill 版本或授权边界漂移</td><td>错误路由、过期建议或未经许可的内容再分发</td><td>仅接受本机 Xcode 导出、Xcode/SDK/hash gate、unknown fail-closed、packet 禁止正文、host smoke 后再宣称 ready</td></tr>
             <tr><td>路由不可复现</td><td>同一任务得到不同计划</td><td>Lockfile、Decision Trace、DAG fingerprint 与 golden tests</td></tr>
             <tr><td>中断后重复副作用</td><td>重复发布、写回设计或迁移数据</td><td>幂等声明、attempt identity、Run Ledger、resume 前置校验</td></tr>
             <tr><td>并发写入冲突</td><td>工作树、Git index、设备或设计文档损坏</td><td>Resource Scheduler、写集锁、取消清理和冻结 reviewer snapshot</td></tr>

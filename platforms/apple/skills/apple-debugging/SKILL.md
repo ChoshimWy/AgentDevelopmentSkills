@@ -75,6 +75,8 @@ Do not use this Skill when:
 - For memory leaks, inspect closure captures, delegates, timers, NotificationCenter, KVO, Combine/Rx subscriptions, CADisplayLink, retain cycles, and view-controller lifecycle.
 - For Objective-C interop issues, inspect selector names, optional protocol methods, dynamic dispatch, KVC/KVO, nullability, and bridging.
 - For UI lifecycle issues, inspect view loading, containment, presentation/dismissal, reuse, and thread confinement.
+- For bounds-safety traps, separate compiler-inserted bounds violation from unrelated memory corruption; inspect the annotated pointer kind, count/size expression, nullability, lifetime, unsafe forge/conversion boundary and first app-owned frame.
+- A ready `c-bounds-safety` expertise entry may guide diagnosis, but must not replace the actual compiler/SDK identity or runtime evidence.
 
 ### Validation Rules
 

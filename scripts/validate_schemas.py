@@ -30,6 +30,7 @@ def main() -> int:
             for collection in ("disciplines", "platforms", "stacks")
             for path in (ROOT / collection).glob("*/contracts/*.schema.json")
         ]
+        + list((ROOT / "platforms").glob("*/config/*.schema.json"))
     )
     for path in files:
         try:

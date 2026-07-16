@@ -1,6 +1,6 @@
 interface:
   display_name: "Apple 代码审查扩展"
-  short_description: "补充 Swift/Xcode/Apple API、并发、文件头与本地 Pod 审查"
-  default_prompt: "在共享 $code-review 独立审查合同下使用 $apple-code-review 补充 Apple/Swift 专属检查；本扩展不直接修复，也不替代 reviewer 独立性。"
+  short_description: "补充 Swift/Xcode/API、官方知识源、并发与本地 Pod 审查"
+  default_prompt: "在共享 $code-review 独立审查合同下使用 $apple-code-review 补充 Apple/Swift 专属检查；若 diff 使用 Xcode 官方知识源，核对 ready/eligible、source/routing/skill hash、SDK 条件与未提交 Apple 原文。本扩展不直接修复，也不替代 reviewer 独立性。"
 policy:
   allow_implicit_invocation: false
