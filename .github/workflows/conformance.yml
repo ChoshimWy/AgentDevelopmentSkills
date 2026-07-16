@@ -1,4 +1,4 @@
-name: Phase 1 Conformance
+name: Cross-platform Conformance
 
 on:
   pull_request:

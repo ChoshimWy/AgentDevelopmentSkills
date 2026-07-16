@@ -89,7 +89,7 @@ class PlanCompilerTests(unittest.TestCase):
             "doc": "分析文档",
             "qa": "执行回归测试",
         }
-        for platform in ("android", "backend", "desktop", "web"):
+        for platform in ("android", "backend", "web"):
             for task_kind, task in tasks.items():
                 with self.subTest(platform=platform, task=task_kind):
                     policy = PolicyResolver().resolve(profile, task, explicit_platforms=[platform])
@@ -107,6 +107,40 @@ class PlanCompilerTests(unittest.TestCase):
                     self.assertTrue(platform_nodes)
                     self.assertTrue(all(node["provider"] is None for node in platform_nodes))
                     self.assertTrue(all(node["binding"] is None for node in platform_nodes))
+
+    def test_desktop_qa_plan_composes_platform_execution_and_quality_dag(self) -> None:
+        profile = self.discovery.discover(FIXTURES / "desktop-tauri")
+        policy = PolicyResolver().resolve(profile, "执行 Desktop 回归测试", explicit_platforms=["desktop"])
+        plan = self.compiler.compile(profile, policy)
+        self.assertEqual(plan["status"], "ready")
+        capabilities = [node["capability"] for node in plan["nodes"]]
+        self.assertIn("verification.desktop.affected-tests", capabilities)
+        self.assertEqual(
+            [node["id"] for node in plan["nodes"] if node["id"].startswith("qa-")],
+            ["qa-plan", "qa-coverage", "qa-design", "qa-triage", "qa-regression", "qa-report"],
+        )
+        edges = {(edge["from"], edge["to"]) for edge in plan["edges"]}
+        self.assertIn(("qa-design", "desktop-1"), edges)
+        self.assertIn(("desktop-1", "qa-triage"), edges)
+        self.assertIn(("qa-regression", "qa-report"), edges)
+        self.assertIn("regression-owner", plan["workflow"]["roles"])
+
+    def test_apple_and_desktop_qa_share_the_frozen_pre_branch_and_join_post_qa(self) -> None:
+        profile = self.discovery.discover(FIXTURES / "unknown")
+        policy = PolicyResolver().resolve(
+            profile,
+            "执行 Apple 与 Desktop 回归测试",
+            explicit_platforms=["apple", "desktop"],
+        )
+        plan = self.compiler.compile(profile, policy)
+        self.assertEqual(plan["status"], "ready")
+        edges = {(edge["from"], edge["to"]) for edge in plan["edges"]}
+        self.assertIn(("qa-design", "apple-1"), edges)
+        self.assertIn(("qa-design", "desktop-1"), edges)
+        self.assertIn(("apple-2", "qa-triage"), edges)
+        self.assertIn(("desktop-1", "qa-triage"), edges)
+        self.assertNotIn(("intent", "desktop-1"), edges)
+        self.assertNotIn(("qa-design", "qa-triage"), edges)
 
     def test_review_only_plan_keeps_review_mandatory(self) -> None:
         profile = self.discovery.discover(FIXTURES / "apple-app")

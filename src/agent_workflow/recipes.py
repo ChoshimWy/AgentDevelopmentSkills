@@ -67,7 +67,10 @@ def automatic_recipe_capabilities(targets: list[str] | tuple[str, ...]) -> froze
 
     result = {
         "core.intent-lock",
-        "qa.targeted",
+        "qa.contract.validate",
+        "qa.coverage.compile",
+        "qa.plan.compile",
+        "qa.report.aggregate",
         "report.apple.delivery",
         "reporting.delivery",
         "review.independent",

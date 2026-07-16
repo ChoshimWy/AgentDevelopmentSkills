@@ -1,0 +1,107 @@
+{
+  "$id": "https://agent-workflow.local/disciplines/qa/contracts/qa-report-request-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "defect_reports": {
+      "items": {
+        "$ref": "defect-report-v1.schema.json"
+      },
+      "type": "array"
+    },
+    "delivery_context": {
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "workflow_plan_fingerprint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "workflow_plan_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflow_plan_id",
+        "workflow_plan_fingerprint",
+        "run_id"
+      ],
+      "type": "object"
+    },
+    "evaluated_on": {
+      "format": "date",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    },
+    "evidence_refs": {
+      "items": {
+        "$ref": "qa-report-v1.schema.json#/$defs/evidenceRef"
+      },
+      "type": "array"
+    },
+    "qa_plan": {
+      "$ref": "qa-plan-v1.schema.json"
+    },
+    "regression_set": {
+      "$ref": "regression-set-v1.schema.json"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "test_results": {
+      "items": {
+        "$ref": "test-result-v1.schema.json"
+      },
+      "type": "array"
+    },
+    "waivers": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_on": {
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "type": "string"
+          },
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "owner": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "owner",
+          "expires_on",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "qa_plan",
+    "test_results",
+    "defect_reports",
+    "regression_set",
+    "waivers",
+    "evidence_refs",
+    "delivery_context",
+    "evaluated_on"
+  ],
+  "title": "QA Report Request v1",
+  "type": "object"
+}

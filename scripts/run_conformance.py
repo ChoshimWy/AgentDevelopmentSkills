@@ -16,18 +16,23 @@ def main() -> int:
         [sys.executable, "scripts/validate_schemas.py"],
         [sys.executable, "scripts/validate_manifests.py"],
         [sys.executable, "scripts/build_design_phase3_fixtures.py", "--check"],
+        [sys.executable, "scripts/build_phase4_qa_goldens.py", "--check"],
+        [sys.executable, "scripts/build_phase4_desktop_goldens.py", "--check"],
         [sys.executable, "scripts/validate_skill_naming.py"],
         [sys.executable, "scripts/build_migration_audit.py", "--check"],
         [sys.executable, "scripts/validate_apple_package.py"],
         [sys.executable, "scripts/compare_apple_routes.py"],
         [sys.executable, "scripts/run_apple_dual_route_smoke.py"],
         [sys.executable, "scripts/run_ios_installed_workflow_smoke.py"],
+        [sys.executable, "scripts/run_desktop_installed_workflow_smoke.py"],
         [sys.executable, "platforms/apple/scripts/lint_skill_schema.py", "--skills-dir", "platforms/apple/skills"],
         [sys.executable, "platforms/apple/scripts/lint_skill_schema.py", "--skills-dir", "disciplines/documentation/skills"],
         [sys.executable, "platforms/apple/scripts/lint_skill_schema.py", "--skills-dir", "disciplines/design/skills"],
         [sys.executable, "platforms/apple/scripts/lint_skill_schema.py", "--skills-dir", "disciplines/git/skills"],
         [sys.executable, "platforms/apple/scripts/lint_skill_schema.py", "--skills-dir", "disciplines/review/skills"],
         [sys.executable, "platforms/apple/scripts/lint_skill_schema.py", "--skills-dir", "disciplines/workflow/skills"],
+        [sys.executable, "platforms/apple/scripts/lint_skill_schema.py", "--skills-dir", "disciplines/qa/skills", "--strict"],
+        [sys.executable, "platforms/apple/scripts/lint_skill_schema.py", "--skills-dir", "platforms/desktop/skills", "--strict"],
         [sys.executable, "platforms/apple/scripts/lint_harness_workflow_policy.py"],
         [sys.executable, "platforms/apple/scripts/lint_subagent_orchestration_policy.py"],
         [sys.executable, "platforms/apple/scripts/lint_verify_ios_build_policy.py"],
@@ -48,7 +53,7 @@ def main() -> int:
         result = subprocess.run(command, cwd=ROOT, check=False)
         if result.returncode:
             return result.returncode
-    print("PASS Phase 3 Core/Provider/Design conformance")
+    print("PASS Phase 4 Core/Provider/Design/QA/Desktop conformance")
     return 0
 
 

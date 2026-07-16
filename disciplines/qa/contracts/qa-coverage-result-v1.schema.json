@@ -1,0 +1,23 @@
+{
+  "$id": "https://agent-workflow.local/disciplines/qa/contracts/qa-coverage-result-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "coverage": {
+      "additionalProperties": false,
+      "properties": {
+        "compiled_level": {"enum": ["smoke", "targeted", "regression", "compatibility", "end-to-end", "release-candidate"]},
+        "dimensions": {"items": {"minLength": 1, "type": "string"}, "minItems": 1, "type": "array", "uniqueItems": true},
+        "rationales": {"items": {"minLength": 1, "type": "string"}, "minItems": 1, "type": "array", "uniqueItems": true},
+        "requested_level": {"enum": ["smoke", "targeted", "regression", "compatibility", "end-to-end", "release-candidate"]},
+        "risk_refs": {"items": {"minLength": 1, "type": "string"}, "type": "array", "uniqueItems": true}
+      },
+      "required": ["requested_level", "compiled_level", "dimensions", "risk_refs", "rationales"],
+      "type": "object"
+    },
+    "schema_version": {"const": "1.0"}
+  },
+  "required": ["schema_version", "coverage"],
+  "title": "QA Coverage Result v1",
+  "type": "object"
+}

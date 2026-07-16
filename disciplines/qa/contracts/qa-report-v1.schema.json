@@ -1,0 +1,295 @@
+{
+  "$defs": {
+    "coverageLevel": {
+      "enum": [
+        "smoke",
+        "targeted",
+        "regression",
+        "compatibility",
+        "end-to-end",
+        "release-candidate"
+      ]
+    },
+    "evidenceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "log",
+            "screenshot",
+            "test-report",
+            "trace",
+            "structured-report",
+            "video"
+          ]
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "uri": {
+          "pattern": "^artifact://(?!.*\\.\\.)(?!.*\\s).+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "sha256",
+        "uri"
+      ],
+      "type": "object"
+    },
+    "fingerprint": {
+      "pattern": "^qa-v1:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://agent-workflow.local/disciplines/qa/contracts/qa-report-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "blockers": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "delivery_context": {
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "workflow_plan_fingerprint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "workflow_plan_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflow_plan_id",
+        "workflow_plan_fingerprint",
+        "run_id"
+      ],
+      "type": "object"
+    },
+    "evaluated_on": {
+      "format": "date",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "type": "string"
+    },
+    "evidence_refs": {
+      "items": {
+        "$ref": "#/$defs/evidenceRef"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "plan_fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "quality": {
+      "additionalProperties": false,
+      "properties": {
+        "blocked": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cancelled": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "coverage_level": {
+          "$ref": "#/$defs/coverageLevel"
+        },
+        "defect_refs": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "executed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gaps": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "passed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "coverage_level",
+        "total",
+        "executed",
+        "passed",
+        "failed",
+        "blocked",
+        "skipped",
+        "cancelled",
+        "gaps",
+        "defect_refs"
+      ],
+      "type": "object"
+    },
+    "release_recommendation": {
+      "enum": [
+        "go",
+        "conditional-go",
+        "no-go",
+        "not-applicable"
+      ]
+    },
+    "report_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "residual_risks": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "status": {
+      "enum": [
+        "passed",
+        "partial",
+        "blocked",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "verification": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/evidenceRef"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "level": {
+          "enum": [
+            "none",
+            "static",
+            "lint",
+            "affected-tests",
+            "module-build",
+            "integration",
+            "ui-smoke",
+            "full"
+          ]
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "partial",
+            "blocked",
+            "failed",
+            "cancelled"
+          ]
+        }
+      },
+      "required": [
+        "level",
+        "status",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "waivers": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_on": {
+            "format": "date",
+            "type": "string"
+          },
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "owner": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "owner",
+          "expires_on",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "workflow_kind": {
+      "enum": [
+        "prd",
+        "bug",
+        "release"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "report_id",
+    "plan_fingerprint",
+    "workflow_kind",
+    "delivery_context",
+    "evaluated_on",
+    "status",
+    "verification",
+    "quality",
+    "waivers",
+    "release_recommendation",
+    "residual_risks",
+    "evidence_refs",
+    "blockers",
+    "fingerprint"
+  ],
+  "title": "QA Report v1",
+  "type": "object"
+}

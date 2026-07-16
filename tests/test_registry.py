@@ -170,7 +170,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_unimplemented_platforms_only_advertise_bootstrap_contracts(self) -> None:
         registry = ManifestRegistry.from_directory(MANIFESTS)
-        for platform in ("android", "backend", "desktop", "web"):
+        for platform in ("android", "backend", "web"):
             with self.subTest(platform=platform):
                 manifest_value = registry.by_id(platform).value
                 self.assertEqual(manifest_value["implementation_status"], "bootstrap-only")
@@ -179,6 +179,17 @@ class RegistryTests(unittest.TestCase):
                 requirement = registry.bootstrap_requirement(platform)
                 self.assertEqual(requirement["platform"], platform)
                 self.assertEqual(requirement["provider"], f"{platform}-agent-skills")
+
+    def test_desktop_platform_has_an_in_tree_provider(self) -> None:
+        registry = ManifestRegistry.from_directory(MANIFESTS)
+        desktop = registry.by_id("desktop").value
+        self.assertEqual(desktop["implementation_status"], "implemented")
+        self.assertIsNone(registry.bootstrap_requirement("desktop"))
+        self.assertEqual(registry.resolve_binding("analysis.desktop", platform="desktop").provider_id, "desktop-agent-skills")
+        self.assertEqual(
+            registry.resolve_binding("verification.desktop.affected-tests", platform="desktop").binding,
+            {"kind": "script", "mode": "affected-tests", "name": "scripts/desktop_adapter.py"},
+        )
 
     def test_provider_capability_without_binding_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

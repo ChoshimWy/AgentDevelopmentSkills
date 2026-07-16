@@ -1,0 +1,121 @@
+{
+  "$defs": {
+    "evidenceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "log",
+            "screenshot",
+            "test-report",
+            "trace",
+            "structured-report",
+            "video"
+          ]
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "uri": {
+          "pattern": "^artifact://(?!.*\\.\\.)(?!.*\\s).+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "sha256",
+        "uri"
+      ],
+      "type": "object"
+    },
+    "fingerprint": {
+      "pattern": "^qa-v1:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "environmentFingerprint": {
+      "pattern": "^(qa|desktop)-v1:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://agent-workflow.local/disciplines/qa/contracts/test-result-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attempt_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "blockers": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "case_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "defect_refs": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "environment_fingerprint": {
+      "$ref": "#/$defs/environmentFingerprint"
+    },
+    "evidence_refs": {
+      "items": {
+        "$ref": "#/$defs/evidenceRef"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "plan_fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "result_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "status": {
+      "enum": [
+        "passed",
+        "failed",
+        "blocked",
+        "skipped",
+        "cancelled"
+      ]
+    },
+    "test_data_fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    }
+  },
+  "required": [
+    "schema_version",
+    "result_id",
+    "attempt_id",
+    "case_id",
+    "plan_fingerprint",
+    "environment_fingerprint",
+    "test_data_fingerprint",
+    "status",
+    "evidence_refs",
+    "defect_refs",
+    "blockers",
+    "fingerprint"
+  ],
+  "title": "Test Result v1",
+  "type": "object"
+}

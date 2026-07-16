@@ -55,6 +55,34 @@ class PlanCompiler:
                     edges.append({"from": source, "to": "workflow-orchestration"})
                 previous_ids = ["workflow-orchestration"]
 
+        qa_requested = "qa" in policy["task"].get("disciplines", [])
+        qa_provider_available = all(
+            self.registry.resolve_binding(capability) is not None
+            for capability in ("qa.plan.compile", "qa.coverage.compile", "qa.contract.validate", "qa.report.aggregate")
+        )
+        has_platform_automatic_verification = any(
+            self.registry.resolve_binding(f"verification.{platform}.auto", platform=platform) is not None
+            for platform in policy["selected_platforms"]
+        )
+        # A rich platform verification route may preserve its installed legacy path when
+        # the optional QA discipline is absent. Platforms without that route fail closed.
+        qa_needed = qa_requested and (qa_provider_available or not has_platform_automatic_verification)
+        if qa_needed:
+            for node_id, capability in (
+                ("qa-plan", "qa.plan.compile"),
+                ("qa-coverage", "qa.coverage.compile"),
+                ("qa-design", "qa.contract.validate"),
+            ):
+                resolution = self.registry.resolve_binding(capability)
+                if resolution is None:
+                    missing.append(capability)
+                nodes.append(_node(node_id, capability, mandatory=True, resolution=resolution))
+                for source in sorted(set(previous_ids)):
+                    edges.append({"from": source, "to": node_id})
+                previous_ids = [node_id]
+
+        platform_branch_roots = sorted(set(previous_ids))
+        platform_tails: list[str] = []
         for platform in policy["selected_platforms"]:
             capabilities = required_platform_capabilities(
                 platform, task_type, policy["task"].get("disciplines", [])
@@ -62,16 +90,18 @@ class PlanCompiler:
             bootstrap = self.registry.bootstrap_requirement(platform)
             if capabilities and bootstrap is not None:
                 bootstrap_required.append(bootstrap)
-            platform_previous = previous_ids[0] if len(previous_ids) == 1 else "intent"
+            platform_previous = list(platform_branch_roots)
             for index, capability in enumerate(capabilities):
                 node_id = f"{platform}-{index + 1}"
                 resolution = self.registry.resolve_binding(capability, platform=platform)
                 if resolution is None:
                     missing.append(capability)
                 nodes.append(_node(node_id, capability, mandatory=True, resolution=resolution))
-                edges.append({"from": platform_previous, "to": node_id})
-                platform_previous = node_id
-            previous_ids.append(platform_previous)
+                for source in platform_previous:
+                    edges.append({"from": source, "to": node_id})
+                platform_previous = [node_id]
+            platform_tails.extend(platform_previous)
+        previous_ids = sorted(set(platform_tails or platform_branch_roots))
 
         if task_type.startswith("code") or task_type == "review-only":
             extension_ids: list[str] = []
@@ -88,24 +118,22 @@ class PlanCompiler:
             if extension_ids:
                 previous_ids = extension_ids
 
-        # 平台已有非测试选择型验证节点时，不再叠加尚未安装的通用 QA Provider。
-        # 这样平台实现任务不会因未来的共享 QA 扩展缺席而被错误降级。
-        has_platform_verification = any(
-            node["capability"].startswith("verification.")
-            and not node["capability"].endswith(".affected-tests")
-            and node["binding"] is not None
-            for node in nodes
-        )
-        qa_needed = "qa" in policy["task"].get("disciplines", []) and not has_platform_verification
         if qa_needed:
-            capability = "qa.targeted"
-            resolution = self.registry.resolve_binding(capability)
-            if resolution is None:
-                missing.append(capability)
-            nodes.append(_node("qa", capability, mandatory=False, resolution=resolution))
-            for source in sorted(set(previous_ids)):
-                edges.append({"from": source, "to": "qa"})
-            previous_ids = ["qa"]
+            post_qa_nodes = []
+            if task_type == "qa-only":
+                post_qa_nodes.extend((
+                    ("qa-triage", "qa.contract.validate"),
+                    ("qa-regression", "qa.contract.validate"),
+                ))
+            post_qa_nodes.append(("qa-report", "qa.report.aggregate"))
+            for node_id, capability in post_qa_nodes:
+                resolution = self.registry.resolve_binding(capability)
+                if resolution is None:
+                    missing.append(capability)
+                nodes.append(_node(node_id, capability, mandatory=True, resolution=resolution))
+                for source in sorted(set(previous_ids)):
+                    edges.append({"from": source, "to": node_id})
+                previous_ids = [node_id]
 
         review_capability = "review.independent"
         review_platform = policy["selected_platforms"][0] if len(policy["selected_platforms"]) == 1 else "*"
@@ -143,7 +171,7 @@ class PlanCompiler:
             "registry_fingerprint": self.registry.digest(),
             "schema_version": "1.0",
             "status": status,
-            "workflow": _workflow_contract(task_type),
+            "workflow": _workflow_contract(task_type, policy["task"].get("disciplines", [])),
         }
         if bootstrap_required:
             content["bootstrap_required"] = sorted(bootstrap_required, key=lambda item: item["platform"])
@@ -183,7 +211,7 @@ def _requires_platform(task_type: str) -> bool:
     return task_type.startswith("code") or task_type in {"qa-only", "investigation"}
 
 
-def _workflow_contract(task_type: str) -> dict[str, Any]:
+def _workflow_contract(task_type: str, disciplines: list[str]) -> dict[str, Any]:
     if task_type.startswith("code"):
         roles = ["explorer", "builder", "reporter", "reviewer"]
         independent_review = True
@@ -196,6 +224,10 @@ def _workflow_contract(task_type: str) -> dict[str, Any]:
     else:
         roles = ["explorer", "builder", "reporter"]
         independent_review = False
+    if "qa" in disciplines:
+        roles = list(dict.fromkeys([
+            *roles[:-1], "case-designer", "test-executor", "triage", "regression-owner", *roles[-1:],
+        ]))
     return {
         "checkpoints": ["CP0", "CP1", "CP2", "CP3"],
         "independent_review": independent_review,

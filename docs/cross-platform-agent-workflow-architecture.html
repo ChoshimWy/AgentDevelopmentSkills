@@ -137,13 +137,13 @@
       <p class="lead">基于现有 iOSAgentSkills 与 Product Design 能力，在单一仓库内统一维护可移植 Core、独立平台包、技术栈包与 Design / QA discipline；安装时按需选择 Apple、Android、Web、Backend、Desktop 等平台，同时保持平台规则与 Core 的严格边界。</p>
       <div class="meta">
         <strong>创建日期</strong><span>2026-07-14</span>
-        <strong>更新日期</strong><span>2026-07-15</span>
-        <strong>文档状态</strong><span class="status">Architecture Baseline v1.2 / Phase 1、Phase 2A–2C 已形成实现基线</span>
+        <strong>更新日期</strong><span>2026-07-16</span>
+        <strong>文档状态</strong><span class="status">Architecture Baseline v1.2 / Phase 1–4 已完成</span>
         <strong>来源</strong><span>“Codex 工作流自动判断”讨论 + 当前 iOSAgentSkills 仓库事实</span>
         <strong>目标仓库</strong><span>AgentDevelopmentSkills</span>
         <strong>迁移来源</strong><span>iOSAgentSkills（288 个来源项已通过 Migration Audit v2 唯一映射到 Apple、共享 Discipline 与 Runtime Config）</span>
-        <strong>当前实施清单</strong><span><a href="implementation/phase-2-ios-agent-skills-integration.html">Phase 2 iOSAgentSkills Compatibility &amp; Monorepo Integration</a></span>
-        <strong>当前范围</strong><span>Phase 1、Phase 2A–2C 与 Phase 3 已完成；P3 全量 Conformance 与独立最终审查通过；真实本机迁移、live Connector/设备采集与发布生命周期需显式执行或归 Phase 6</span>
+        <strong>当前实施清单</strong><span><a href="implementation/phase-4-qa-core-and-desktop-minimum.html">Phase 4 QA Core &amp; Desktop Minimum Package</a></span>
+        <strong>当前范围</strong><span>Phase 1、Phase 2A–2C、Phase 3 与 Phase 4 已完成；QA 三流程、真实 Plan/RunLedger 结果聚合与 Desktop 最小 Provider/Adapter 已通过 CP0–CP3、完整 Conformance 和独立复审；真实本机迁移、live Connector/设备采集与发布生命周期需显式执行或归 Phase 6</span>
       </div>
       <div class="chips">
         <span class="chip">Core + Plugin Packages</span>
@@ -210,7 +210,7 @@
           <li>工作流以稳定 Capability ID 和 DAG 表达，具体 Skill 名称通过插件 Binding 晚绑定。</li>
           <li>开发验证与正式 QA 使用两套等级，避免“build 通过”等同于“质量覆盖完成”。</li>
           <li>iOSAgentSkills 已先以兼容桥冻结行为，再通过 Migration Audit v2 拆分到 <code>platforms/apple/</code>、五个共享 Discipline 与显式 Codex Runtime Config；源码态与隔离安装态不再依赖 sibling 仓。</li>
-          <li>Apple 为 <code>implemented</code>；Android、Web、Backend、Desktop 为 <code>bootstrap-only</code>，发现结果只能受控阻塞，不能生成 phantom Binding 或 ready Plan。</li>
+          <li>Apple 与 Desktop 为 <code>implemented</code>；Android、Web、Backend 为 <code>bootstrap-only</code>，发现结果只能受控阻塞，不能生成 phantom Binding 或 ready Plan。</li>
         </ul>
       </section>
 
@@ -296,7 +296,7 @@
 │   ├── android/                 # bootstrap-only
 │   ├── web/                     # bootstrap-only
 │   ├── backend/                 # bootstrap-only
-│   └── desktop/                 # bootstrap-only
+│   └── desktop/                 # implemented minimum Provider / Adapter
 ├── disciplines/
 │   ├── documentation/           # html-docs
 │   ├── git/                     # git workflow / GitHub PR
@@ -985,7 +985,7 @@ agent-skills doctor
 agent-skills uninstall --platform desktop --dry-run</code></pre>
         <ul>
           <li>Manifest 声明 <code>schema_version</code>、包版本和 Core compatibility range。</li>
-          <li>源码仓选择安装入口为根目录 <code>install.sh</code>；TTY 默认从所有平台 Manifest 生成复选菜单，Apple/iOS 同时满足 Manifest <code>implemented</code> 与 source-installer activation/smoke handler readiness，因而默认显示为 <code>[x]</code>；Android、Web、Backend、Desktop 以 <code>[ ]</code> 和 <code>bootstrap-only</code> 状态展示但暂不可选；使用 <code>↑</code> / <code>↓</code> 移动光标、<code>Space</code> 选择或取消、<code>Enter</code> 确认，确认后清除整个平台菜单；非交互模式使用可重复的 <code>--platform</code> 或 <code>--platform all</code>，<code>--json</code> 必须显式选择平台。当前可安装闭包仍为 Apple + Codex Runtime Config，并支持 <code>--dry-run</code> / <code>--target-root</code>；默认人类可读结果直接从所选平台的预览/完成状态开始，不重复显示产品标题与分隔线，并保留变更/验证摘要，目标目录、规划平台、Runtime Config、安装包、Skill 数量及旧软链迁移状态等完整元信息由显式 <code>--json</code> 以 canonical JSON 输出；不联网也不默认执行 pip。dry-run 与真实安装共用 managed-root preflight；除普通文件形式的 macOS Finder 元数据 <code>.DS_Store</code> 外，冲突时不得覆盖用户本地自定义 Skill。</li>
+          <li>源码仓选择安装入口为根目录 <code>install.sh</code>；TTY 默认从所有平台 Manifest 生成复选菜单，Apple/iOS 与 Desktop 均满足 Manifest <code>implemented</code> 和 source smoke handler readiness；Apple 默认显示为 <code>[x]</code>，Desktop 可显式选择且不激活 Apple/Codex 专属文件；Android、Web、Backend 以 <code>[ ]</code> 和 <code>bootstrap-only</code> 状态展示但暂不可选；使用 <code>↑</code> / <code>↓</code> 移动光标、<code>Space</code> 选择或取消、<code>Enter</code> 确认，确认后清除整个平台菜单；非交互模式使用可重复的 <code>--platform</code> 或 <code>--platform all</code>，<code>--json</code> 必须显式选择平台。当前可安装闭包为 Apple + Codex Runtime Config，或无 Apple 激活副作用的 Desktop + QA/Review/Workflow，并支持 <code>--dry-run</code> / <code>--target-root</code>；默认人类可读结果直接从所选平台的预览/完成状态开始，不重复显示产品标题与分隔线，并保留变更/验证摘要，目标目录、规划平台、Runtime Config、安装包、Skill 数量及旧软链迁移状态等完整元信息由显式 <code>--json</code> 以 canonical JSON 输出；不联网也不默认执行 pip。dry-run 与真实安装共用 managed-root preflight；除普通文件形式的 macOS Finder 元数据 <code>.DS_Store</code> 外，冲突时不得覆盖用户本地自定义 Skill。</li>
           <li>远程发布入口采用两个薄 bootstrap：POSIX <code>install.sh</code> 与 Windows <code>install.ps1</code> 先下载 canonical release manifest，从其版本固定的 <code>asset_base_url</code> 获取共享 <code>bootstrap_install.py</code>，并在执行前校验 bootstrap size/SHA-256；共享 Core 再验证 host artifact size/SHA-256 与 ZIP 规范化、安全解压边界，调用发布物中的同一 <code>scripts/install_local.py</code>。构建真源 <code>scripts/build_release_bundle.py</code> 生成确定性 universal source bundle、bootstrap asset hashes 与 source identity。默认 production manifest 只声明 macOS/Linux（WSL2 视为 Linux）；PowerShell 入口存在不等于 Windows host-ready，未通过 Windows 路径、权限、事务和 installed smoke 前必须因缺少 <code>windows</code> artifact fail-closed。</li>
           <li>按当前迁移合同，<code>install.sh</code> 只直接移除可精确识别的旧 iOSAgentSkills <code>AGENTS.md</code> / <code>skills</code> 软链，不生成旧配置持久备份；未知路径 fail-closed，并保留 Codex 管理的 <code>skills/.system</code>。</li>
           <li>官方平台包来源固定为发布物内 <code>platforms/&lt;id&gt;/</code>；环境变量或用户 registry 只用于显式授权的本地扩展包。</li>
@@ -1067,12 +1067,12 @@ design-source read/write boundary test</code></pre>
             <tr><td>Phase 2B</td><td><span class="check">√</span> Apple AgentSkills 单仓迁移、选择安装、单一 AGENTS 与 CP0–CP3 已完成</td><td>源码/隔离安装以 <code>platforms/apple/</code> 为真源；本机旧安装迁移不静默执行并归 Phase 6</td></tr>
             <tr><td>Phase 2C</td><td><span class="check">√</span> Shared Discipline Extraction &amp; Contract Repair A–G 实现与 Conformance 已完成</td><td>共享 ownership、Migration Audit v2、Apple Normalize、bootstrap-only、Lock v2 与 Runtime Config 已落地；独立最终审查阻塞问题：无</td></tr>
             <tr><td>Phase 3</td><td><span class="check">√</span> Product Design / Figma 显式 Provider、Design Source Gateway、Canonical IR / Registry / Packet 与 Apple Packet v2 已实现；Conformance 与独立 reviewer 均通过</td><td>credential-free source fixture 到 Apple Agent Packet 可追溯；live Connector 保持显式授权</td></tr>
-            <tr><td>Phase 4</td><td><span class="todo">□</span> QA Core 与 Desktop 最小包</td><td>PRD、Bug、Release 三类 QA 流程闭环</td></tr>
-            <tr><td>Phase 5</td><td><span class="todo">□</span> 暂缓 Android、Web、Backend 与更多平台/UI Binding；当前平台包均为 <code>bootstrap-only</code></td><td>先以获准真实 Xcode 工程完成 Apple host readiness，再启动其他平台 Provider；新增 Provider 仍不得修改 Core 主合同</td></tr>
+            <tr><td>Phase 4</td><td><span class="check">√</span> QA Core、PRD/Bug/Release、Desktop 最小 Provider/Adapter、真实 Plan/RunLedger 聚合与 goldens 已落地</td><td>CP0–CP3；当前工作区 43 Schema、19 Manifest、325 个 unittest、完整 Conformance 与独立 reviewer 均通过</td></tr>
+            <tr><td>Phase 5</td><td><span class="todo">□</span> 暂缓 Android、Web、Backend 与更多平台/UI Binding；Desktop 最小包已由 Phase 4 提供</td><td>先以获准真实 Xcode 工程完成 Apple host readiness，再启动其余平台 Provider；Desktop 后续只扩展 framework Adapter/UI Binding</td></tr>
             <tr><td>Phase 6</td><td><span class="todo">□</span> 在 P2C Lock v2 / source hash / asset allowlist / rule trace 基础上完成 doctor、升级卸载、打包与发布治理；Apple 本机官方知识源已具备 metadata-only 联邦合同，仍待 Xcode 27 host export smoke</td><td>单一发布物可选择平台且可移植、可复现、可回滚、冲突安全；本地知识源不进入再分发产物</td></tr>
           </tbody>
         </table>
-        <div class="callout info"><strong>推荐扩展顺序</strong>Apple installed-contract smoke → 获准真实 Xcode host smoke → Android → Web TypeScript → Backend Node/Java/Go → Desktop → Unity → Flutter / React Native。Apple host readiness 未通过前，其他平台保持 <code>bootstrap-only</code>。</div>
+        <div class="callout info"><strong>推荐扩展顺序</strong>Apple installed-contract smoke → 获准真实 Xcode host smoke → Android → Web TypeScript → Backend Node/Java/Go → Desktop framework expansion → Unity → Flutter / React Native。Apple host readiness 未通过前，Android、Web、Backend 保持 <code>bootstrap-only</code>；Desktop 仅维持 Phase 4 最小闭包。</div>
       </section>
 
       <section id="risk" class="card">
@@ -1125,7 +1125,7 @@ design-source read/write boundary test</code></pre>
         </ul>
         <div class="callout warn">
           <strong>当前完成度声明</strong>
-          本文已更新为 Architecture Baseline v1.2。Phase 1、Phase 2A–2C 与 Phase 3 已完成；Phase 3 全量 Conformance 与独立最终审查均已收口，阻塞问题：无。共享 workflow/review/documentation/git/design 已从 Apple 去重，其他平台被真值化为 bootstrap-only，Codex Runtime Config 只允许显式选择。真实本机旧安装迁移、License/NOTICE 发布决策和发布级生命周期仍未完成并归 Phase 6。
+          本文已更新为 Architecture Baseline v1.2。Phase 1、Phase 2A–2C、Phase 3 与 Phase 4 已完成；当前工作区以 43 个 Schema、19 个 Manifest、325 个 unittest、全量 Conformance 与 Phase 4 独立最终审查收口，Phase 4 阻塞问题：无。共享 workflow/review/documentation/git/design/qa 已从平台去重，Desktop 最小 Provider 已实现，Android/Web/Backend 保持 bootstrap-only，Codex Runtime Config 只允许显式选择。真实本机旧安装迁移、License/NOTICE 发布决策和发布级生命周期仍未完成并归 Phase 6。
         </div>
       </section>
     </div>

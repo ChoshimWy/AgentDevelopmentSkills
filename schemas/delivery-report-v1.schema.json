@@ -2,15 +2,149 @@
   "$id": "https://agent-workflow.local/schemas/delivery-report-v1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "blocked_items": {"items": {"type": "string"}, "type": "array"},
-    "known_risks": {"items": {"type": "string"}, "type": "array"},
-    "routing": {"type": "object"},
-    "run_id": {"type": "string"},
-    "schema_version": {"const": "1.0"},
-    "status": {"enum": ["completed", "partial", "blocked", "cancelled"]},
-    "validation": {"type": "object"}
+    "blocked_items": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "known_risks": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "quality": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage_level": {
+          "enum": [
+            "smoke",
+            "targeted",
+            "regression",
+            "compatibility",
+            "end-to-end",
+            "release-candidate"
+          ]
+        },
+        "evidence_refs": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": [
+                  "log",
+                  "screenshot",
+                  "test-report",
+                  "trace",
+                  "structured-report",
+                  "video"
+                ]
+              },
+              "sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "uri": {
+                "pattern": "^artifact://(?!.*\\.\\.)(?!.*\\s).+$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "sha256",
+              "uri"
+            ],
+            "type": "object"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "qa_plan_fingerprint": {
+          "pattern": "^qa-v1:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "release_recommendation": {
+          "enum": [
+            "go",
+            "conditional-go",
+            "no-go",
+            "not-applicable"
+          ]
+        },
+        "report_fingerprint": {
+          "pattern": "^qa-v1:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "run_id": {"minLength": 1, "type": "string"},
+        "status": {
+          "enum": [
+            "passed",
+            "partial",
+            "blocked",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "verification_status": {
+          "enum": [
+            "passed",
+            "partial",
+            "blocked",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "workflow_plan_fingerprint": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "workflow_plan_id": {"minLength": 1, "type": "string"}
+      },
+      "required": [
+        "status",
+        "verification_status",
+        "coverage_level",
+        "release_recommendation",
+        "qa_plan_fingerprint",
+        "workflow_plan_id",
+        "workflow_plan_fingerprint",
+        "run_id",
+        "report_fingerprint",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "routing": {
+      "type": "object"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "partial",
+        "blocked",
+        "cancelled"
+      ]
+    },
+    "validation": {
+      "type": "object"
+    }
   },
-  "required": ["schema_version", "run_id", "status", "routing", "validation", "known_risks", "blocked_items"],
+  "required": [
+    "schema_version",
+    "run_id",
+    "status",
+    "routing",
+    "validation",
+    "known_risks",
+    "blocked_items"
+  ],
   "title": "Delivery Report v1",
   "type": "object"
 }

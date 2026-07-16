@@ -1,0 +1,4 @@
+interface:
+  display_name: "QA Workflow"
+  short_description: "Compile risk-based QA plans and quality reports"
+  default_prompt: "Use $qa-workflow to plan or report a platform-neutral QA workflow with explicit evidence and residual risk."

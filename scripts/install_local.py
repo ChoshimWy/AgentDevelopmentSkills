@@ -67,6 +67,10 @@ SOURCE_INSTALL_HANDLERS = {
         "activation": "apple-codex-v1",
         "smoke": "ios-installed-workflow-v1",
     },
+    "desktop": {
+        "activation": "none",
+        "smoke": "desktop-installed-workflow-v1",
+    },
 }
 
 ACTIVATED_FILES: tuple[tuple[str, str, int], ...] = (
@@ -509,7 +513,7 @@ def _human_report(report: dict[str, Any], *, color: bool) -> str:
 
 
 def _human_error(error: Exception, *, dry_run: bool, color: bool) -> str:
-    title = "安装预检查未通过" if dry_run else "Apple 工作流安装未完成"
+    title = "安装预检查未通过" if dry_run else "平台工作流安装未完成"
     marker = _styled("✗", ANSI_RED, ANSI_BOLD, enabled=color)
     return "\n".join(
         [
@@ -764,14 +768,41 @@ def _copy_legacy_system_skills(target: Path, legacy_links: dict[str, str]) -> bo
     return True
 
 
-def _run_target_smoke(target: Path) -> dict[str, Any]:
-    completed = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/run_ios_installed_workflow_smoke.py"), "--target-root", str(target)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return json.loads(completed.stdout)
+def _run_target_smoke(target: Path, selected_platforms: tuple[str, ...]) -> dict[str, Any]:
+    scripts = {
+        "apple": "run_ios_installed_workflow_smoke.py",
+        "desktop": "run_desktop_installed_workflow_smoke.py",
+    }
+    reports: list[dict[str, Any]] = []
+    for platform_id in selected_platforms:
+        script = scripts.get(platform_id)
+        if script is None:
+            raise ContractError(f"source installer smoke handler is missing: {platform_id}")
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / script), "--target-root", str(target)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        reports.append(json.loads(completed.stdout))
+    return {
+        "status": "passed" if reports and all(item["status"] == "passed" for item in reports) else "failed",
+        "workflow": {
+            "final_status": "completed" if all(item["workflow"]["final_status"] == "completed" for item in reports) else "blocked",
+            "plan_status": "ready" if all(item["workflow"]["plan_status"] == "ready" for item in reports) else "blocked",
+            "review_status": "passed" if all(item["workflow"]["review_status"] == "passed" for item in reports) else "blocked",
+        },
+    }
+
+
+def _empty_activation_plan() -> dict[str, Any]:
+    return {
+        "config_changed": False,
+        "managed_file_updates": [],
+        "managed_files_unchanged": [],
+        "profile_creates": [],
+        "profile_preserves": [],
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -798,11 +829,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace | None = None) -> dict[str, Any]:
-    if sys.version_info < (3, 11):
-        raise ContractError("install.sh requires Python 3.11+")
     if args is None:
         args = parse_args()
     selected_platforms, platform_options = _select_platforms(args)
+    apple_selected = "apple" in selected_platforms
     raw_target = Path(args.target_root).expanduser()
     if raw_target.is_symlink():
         raise ContractError(f"install target must not be a symlink: {raw_target}")
@@ -812,14 +842,18 @@ def run(args: argparse.Namespace | None = None) -> dict[str, Any]:
     if not args.dry_run:
         target.mkdir(parents=True, exist_ok=True)
 
-    legacy_links = _classify_legacy(target)
-    _preflight_activation(target, adopting_legacy=bool(legacy_links))
-    config_candidate = _config_candidate(target)
-    activation = _activation_plan(target, config_candidate)
+    legacy_links = _classify_legacy(target) if apple_selected else {}
+    if apple_selected:
+        _preflight_activation(target, adopting_legacy=bool(legacy_links))
+        config_candidate = _config_candidate(target)
+        activation = _activation_plan(target, config_candidate)
+    else:
+        config_candidate = b""
+        activation = _empty_activation_plan()
     bundle = build_install_bundle(
         ROOT / "platforms",
         platforms=selected_platforms,
-        runtime_configs=["codex"],
+        runtime_configs=["codex"] if apple_selected else [],
     )
 
     if args.dry_run:
@@ -843,9 +877,9 @@ def run(args: argparse.Namespace | None = None) -> dict[str, Any]:
     post_install: dict[str, Any] = {}
 
     def complete_install(installed_target: Path, _: dict[str, Any]) -> None:
-        post_install["preserved_system_skills"] = _copy_legacy_system_skills(installed_target, legacy_links)
-        post_install["smoke"] = _run_target_smoke(installed_target)
-        post_install["activation"] = _activate(installed_target, config_candidate)
+        post_install["preserved_system_skills"] = _copy_legacy_system_skills(installed_target, legacy_links) if apple_selected else False
+        post_install["smoke"] = _run_target_smoke(installed_target, selected_platforms)
+        post_install["activation"] = _activate(installed_target, config_candidate) if apple_selected else _empty_activation_plan()
 
     try:
         for name in legacy_links:

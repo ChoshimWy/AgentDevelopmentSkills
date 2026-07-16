@@ -422,7 +422,7 @@ class InstallationTests(unittest.TestCase):
                     build_install_bundle(root, platforms=["apple"])
 
     def test_selection_requires_explicit_installable_platform(self) -> None:
-        self.assertEqual(resolve_platform_selection(MANIFESTS, platforms=["all"]), ("apple",))
+        self.assertEqual(resolve_platform_selection(MANIFESTS, platforms=["all"]), ("apple", "desktop"))
         with self.assertRaisesRegex(ContractError, "select --core-only"):
             resolve_platform_selection(MANIFESTS)
         with self.assertRaisesRegex(ContractError, "not installable"):

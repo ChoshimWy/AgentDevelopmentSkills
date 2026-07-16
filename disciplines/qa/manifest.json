@@ -1,0 +1,30 @@
+{
+  "bindings": {
+    "qa.contract.validate": {"kind": "skill", "mode": "validate", "name": "qa-workflow"},
+    "qa.coverage.compile": {"kind": "skill", "mode": "coverage", "name": "qa-workflow"},
+    "qa.plan.compile": {"kind": "skill", "mode": "plan", "name": "qa-workflow"},
+    "qa.report.aggregate": {"kind": "skill", "mode": "report", "name": "qa-workflow"}
+  },
+  "capabilities": [
+    {"concurrency_keys": [], "id": "qa.contract.validate", "idempotent": true, "input_schema": "generic-request-v1", "output_schema": "generic-result-v1", "permission_profile": "repository-read-only", "side_effects": [], "version": "1.0"},
+    {"concurrency_keys": [], "id": "qa.coverage.compile", "idempotent": true, "input_schema": "qa-coverage-request-v1", "output_schema": "qa-coverage-result-v1", "permission_profile": "repository-read-only", "side_effects": [], "version": "1.0"},
+    {"concurrency_keys": [], "id": "qa.plan.compile", "idempotent": true, "input_schema": "qa-plan-request-v1", "output_schema": "qa-plan-v1", "permission_profile": "repository-read-only", "side_effects": [], "version": "1.0"},
+    {"concurrency_keys": [], "id":"qa.report.aggregate", "idempotent": true, "input_schema": "qa-report-request-v1", "output_schema": "qa-report-v1", "permission_profile": "repository-read-only", "side_effects": [], "version": "1.0"}
+  ],
+  "conflicts": [],
+  "detection": {"medium": [], "strong": [], "weak": []},
+  "id": "qa",
+  "installation": {
+    "asset_roots": ["contracts"],
+    "instruction_fragments": [],
+    "skill_roots": ["skills"]
+  },
+  "kind": "discipline",
+  "optional_requires": ["design.packet.slice"],
+  "package_requires": [],
+  "permissions": {"detection": "repository-read-only"},
+  "requires": [],
+  "schema_version": "1.0",
+  "targets": [],
+  "version": "0.1.0"
+}

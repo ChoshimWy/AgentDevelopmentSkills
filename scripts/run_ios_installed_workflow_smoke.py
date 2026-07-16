@@ -26,7 +26,7 @@ from agent_workflow.reporting import delivery_report  # noqa: E402
 from agent_workflow.runtime import RecordedAdapterExecutor  # noqa: E402
 
 
-DEFERRED_PLATFORMS = ("android", "backend", "desktop", "web")
+DEFERRED_PLATFORMS = ("android", "backend", "web")
 
 
 def _result_for_node(

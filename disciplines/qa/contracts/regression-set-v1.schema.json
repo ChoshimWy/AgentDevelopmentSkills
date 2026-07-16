@@ -1,0 +1,23 @@
+{
+  "$id": "https://agent-workflow.local/disciplines/qa/contracts/regression-set-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "case_refs": {"items": {"minLength": 1, "type": "string"}, "minItems": 1, "type": "array", "uniqueItems": true},
+    "defect_refs": {"items": {"minLength": 1, "type": "string"}, "type": "array", "uniqueItems": true},
+    "environment_fingerprints": {"items": {"$ref": "#/$defs/environmentFingerprint"}, "minItems": 1, "type": "array", "uniqueItems": true},
+    "fingerprint": {"$ref": "#/$defs/fingerprint"},
+    "schema_version": {"const": "1.0"},
+    "set_id": {"minLength": 1, "type": "string"},
+    "source_fingerprints": {"items": {"$ref": "#/$defs/fingerprint"}, "minItems": 1, "type": "array", "uniqueItems": true},
+    "stale_reasons": {"items": {"minLength": 1, "type": "string"}, "type": "array", "uniqueItems": true},
+    "status": {"enum": ["current", "stale", "blocked"]}
+  },
+  "required": ["schema_version", "set_id", "case_refs", "defect_refs", "source_fingerprints", "environment_fingerprints", "status", "stale_reasons", "fingerprint"],
+  "title": "Regression Set v1",
+  "type": "object",
+  "$defs": {
+    "environmentFingerprint": {"pattern": "^(qa|desktop)-v1:[0-9a-f]{64}$", "type": "string"},
+    "fingerprint": {"pattern": "^qa-v1:[0-9a-f]{64}$", "type": "string"}
+  }
+}

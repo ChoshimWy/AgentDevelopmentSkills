@@ -1,0 +1,61 @@
+{
+  "$id": "https://agent-workflow.local/platforms/desktop/config/desktop-project-profile-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "ambiguities": {"items": {"minLength": 1, "type": "string"}, "type": "array", "uniqueItems": true},
+    "fingerprint": {"pattern": "^desktop-v1:[0-9a-f]{64}$", "type": "string"},
+    "framework_hints_version": {"const": "1.0"},
+    "frameworks": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "adapter": {"minLength": 1, "type": "string"},
+          "confidence": {"maximum": 1, "minimum": 0, "type": "number"},
+          "evidence": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "level": {"enum": ["strong", "medium", "weak"]},
+                "marker": {"minLength": 1, "type": "string"},
+                "path": {"minLength": 1, "type": "string"},
+                "root": {"minLength": 1, "type": "string"}
+              },
+              "required": ["level", "marker", "path", "root"],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "id": {"minLength": 1, "type": "string"},
+          "module_roots": {"items": {"minLength": 1, "type": "string"}, "minItems": 1, "type": "array", "uniqueItems": true},
+          "support": {
+            "additionalProperties": false,
+            "properties": {
+              "install-update": {"enum": ["supported", "manual", "unsupported"]},
+              "keyboard": {"enum": ["supported", "manual", "unsupported"]},
+              "mouse": {"enum": ["supported", "manual", "unsupported"]},
+              "sleep-wake": {"enum": ["supported", "manual", "unsupported"]},
+              "tray": {"enum": ["supported", "manual", "unsupported"]},
+              "window": {"enum": ["supported", "manual", "unsupported"]}
+            },
+            "required": ["window", "keyboard", "mouse", "tray", "sleep-wake", "install-update"],
+            "type": "object"
+          },
+          "targets": {"items": {"enum": ["macos", "windows", "linux", "cross-platform"]}, "minItems": 1, "type": "array", "uniqueItems": true}
+        },
+        "required": ["id", "adapter", "confidence", "evidence", "module_roots", "targets", "support"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "module_root": {"type": ["string", "null"]},
+    "repository_root": {"minLength": 1, "type": "string"},
+    "schema_version": {"const": "1.0"},
+    "selected_framework": {"type": ["string", "null"]},
+    "status": {"enum": ["supported", "ambiguous", "unsupported"]}
+  },
+  "required": ["schema_version", "repository_root", "framework_hints_version", "status", "selected_framework", "module_root", "frameworks", "ambiguities", "fingerprint"],
+  "title": "Desktop Project Profile v1",
+  "type": "object"
+}

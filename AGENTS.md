@@ -6,11 +6,11 @@
 - 跨平台通用 workflow、review、documentation、git 与 design 基础能力放在 `disciplines/`，平台包只保留平台 Binding/扩展；运行时全局配置放在 `runtime-configs/`，必须显式选择，不得随平台隐式激活。
 - 安装时按用户选择的平台集合部署，不默认安装全部平台包；Core 不吸收 Xcode、Gradle、浏览器或后端工具链细节。
 - 本机全局指令只允许一个受管入口；平台包不得各自覆盖 `~/.codex/AGENTS.md`。平台细节优先放在 Skill/Manifest，必须常驻的规则以显式 scope 分片合成，冲突 fail-closed。
-- Android、Web、Backend、Desktop 当前是 `bootstrap-only`：允许发现但不得产生 phantom Binding 或 ready Plan；只有安装真实 Provider 后才可解锁。
+- Android、Web、Backend 当前是 `bootstrap-only`：允许发现但不得产生 phantom Binding 或 ready Plan；Desktop 已提供 Phase 4 最小 Provider，未声明的 framework/能力仍必须 fail-closed。
 - 架构真源：`docs/cross-platform-agent-workflow-architecture.html`。
-- 当前实施进度真源：`docs/implementation/phase-3-design-provider-and-canonical-ir.html`。
+- 当前实施进度真源：`docs/implementation/phase-4-qa-core-and-desktop-minimum.html`。
 
-## Phase 1–3 Rules
+## Phase 1–4 Rules
 
 - Python 3.11+，标准库优先；Manifest 使用 JSON，不引入 YAML 解析依赖。
 - Discovery 只读，不执行目标仓库脚本、不联网、不读取凭据。

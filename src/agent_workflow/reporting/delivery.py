@@ -4,8 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..models import ContractError
+from ..qa.contracts import validate_qa_report
+from ..ledger_status import current_validation_status
 
-def delivery_report(plan: dict[str, Any], ledger: dict[str, Any]) -> dict[str, Any]:
+
+def delivery_report(
+    plan: dict[str, Any],
+    ledger: dict[str, Any],
+    *,
+    qa_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     latest_attempts: dict[str, dict[str, Any]] = {}
     for attempt in ledger["node_attempts"]:
         latest_attempts[attempt["node_id"]] = attempt
@@ -40,9 +49,37 @@ def delivery_report(plan: dict[str, Any], ledger: dict[str, Any]) -> dict[str, A
         "validation": {
             "evidence": validation,
             "mode": "structured-provider" if structured or structured_history else "phase-1-fake-adapters",
-            "status": validation[-1]["status"] if validation else ledger["final_status"],
+            "status": current_validation_status(ledger),
         },
     }
     if reviews:
         report["review"] = {"evidence": reviews, "status": reviews[-1]["status"]}
+    if qa_report is not None:
+        validate_qa_report(qa_report)
+        context = qa_report["delivery_context"]
+        expected = {
+            "run_id": ledger["run_id"],
+            "workflow_plan_fingerprint": plan["fingerprint"],
+            "workflow_plan_id": plan["plan_id"],
+        }
+        if context != expected:
+            raise ContractError("qa-report delivery_context does not match current workflow run")
+        if qa_report["verification"]["status"] != report["validation"]["status"]:
+            raise ContractError("qa-report verification status conflicts with current ledger validation")
+        if qa_report["release_recommendation"] == "go" and report["status"] != "completed":
+            raise ContractError("qa-report go conflicts with non-completed delivery status")
+        if qa_report["release_recommendation"] == "conditional-go" and report["status"] not in {"completed", "partial"}:
+            raise ContractError("qa-report conditional-go conflicts with blocked or cancelled delivery status")
+        report["quality"] = {
+            "coverage_level": qa_report["quality"]["coverage_level"],
+            "evidence_refs": qa_report["evidence_refs"],
+            "qa_plan_fingerprint": qa_report["plan_fingerprint"],
+            "release_recommendation": qa_report["release_recommendation"],
+            "report_fingerprint": qa_report["fingerprint"],
+            "run_id": context["run_id"],
+            "status": qa_report["status"],
+            "verification_status": qa_report["verification"]["status"],
+            "workflow_plan_fingerprint": context["workflow_plan_fingerprint"],
+            "workflow_plan_id": context["workflow_plan_id"],
+        }
     return report

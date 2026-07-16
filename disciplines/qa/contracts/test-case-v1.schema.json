@@ -1,0 +1,23 @@
+{
+  "$id": "https://agent-workflow.local/disciplines/qa/contracts/test-case-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "automation_suitability": {"enum": ["high", "medium", "low", "none"]},
+    "case_id": {"minLength": 1, "type": "string"},
+    "coverage_tags": {"items": {"minLength": 1, "type": "string"}, "minItems": 1, "type": "array", "uniqueItems": true},
+    "expected_results": {"items": {"minLength": 1, "type": "string"}, "minItems": 1, "type": "array", "uniqueItems": true},
+    "fingerprint": {"pattern": "^qa-v1:[0-9a-f]{64}$", "type": "string"},
+    "preconditions": {"items": {"minLength": 1, "type": "string"}, "minItems": 1, "type": "array", "uniqueItems": true},
+    "requirement_refs": {"items": {"minLength": 1, "type": "string"}, "type": "array", "uniqueItems": true},
+    "risk_refs": {"items": {"minLength": 1, "type": "string"}, "type": "array", "uniqueItems": true},
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["active", "deprecated"]},
+    "steps": {"items": {"additionalProperties": false, "properties": {"action": {"minLength": 1, "type": "string"}, "expected": {"minLength": 1, "type": "string"}, "number": {"minimum": 1, "type": "integer"}}, "required": ["number", "action", "expected"], "type": "object"}, "minItems": 1, "type": "array"},
+    "test_data": {"type": "object"},
+    "title": {"minLength": 1, "type": "string"}
+  },
+  "required": ["schema_version", "case_id", "title", "requirement_refs", "risk_refs", "preconditions", "test_data", "steps", "expected_results", "coverage_tags", "automation_suitability", "status", "fingerprint"],
+  "title": "Test Case v1",
+  "type": "object"
+}

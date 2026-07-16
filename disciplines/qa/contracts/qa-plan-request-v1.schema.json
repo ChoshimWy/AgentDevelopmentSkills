@@ -1,0 +1,167 @@
+{
+  "$id": "https://agent-workflow.local/disciplines/qa/contracts/qa-plan-request-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "entry_criteria": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "environments": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "attributes": {
+            "minProperties": 1,
+            "type": "object"
+          },
+          "fingerprint": {
+            "pattern": "^(qa|desktop)-v1:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "platform",
+          "attributes",
+          "fingerprint"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "exit_criteria": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "objective": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "requested_level": {
+      "enum": [
+        "smoke",
+        "targeted",
+        "regression",
+        "compatibility",
+        "end-to-end",
+        "release-candidate"
+      ]
+    },
+    "risks": {
+      "items": {
+        "$ref": "qa-coverage-request-v1.schema.json#/properties/risks/items"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "scope": {
+      "additionalProperties": false,
+      "properties": {
+        "excluded": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "included": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "included",
+        "excluded"
+      ],
+      "type": "object"
+    },
+    "verification": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_refs": {
+          "items": {
+            "$ref": "qa-plan-v1.schema.json#/$defs/evidenceRef"
+          },
+          "type": "array"
+        },
+        "level": {
+          "enum": [
+            "none",
+            "static",
+            "lint",
+            "affected-tests",
+            "module-build",
+            "integration",
+            "ui-smoke",
+            "full"
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "passed",
+            "partial",
+            "blocked",
+            "failed",
+            "cancelled"
+          ]
+        }
+      },
+      "required": [
+        "level",
+        "status",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "workflow_kind": {
+      "enum": [
+        "prd",
+        "bug",
+        "release"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "workflow_kind",
+    "objective",
+    "scope",
+    "risks",
+    "environments",
+    "entry_criteria",
+    "exit_criteria",
+    "requested_level",
+    "verification"
+  ],
+  "title": "QA Plan Request v1",
+  "type": "object"
+}

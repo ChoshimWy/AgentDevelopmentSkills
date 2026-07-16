@@ -1,0 +1,4 @@
+interface:
+  display_name: "Desktop Workflow"
+  short_description: "Inspect and route cross-platform desktop workflows"
+  default_prompt: "Use $desktop-orchestration to inspect Desktop evidence, select a supported framework route, and execute only the requested scoped workflow."

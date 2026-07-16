@@ -21,6 +21,14 @@ from .design.contracts import (
     validate_design_system_registry,
     validate_ui_validation_report,
 )
+from .qa.contracts import (
+    validate_defect_report,
+    validate_qa_plan,
+    validate_qa_report,
+    validate_regression_set,
+    validate_test_case,
+    validate_test_result,
+)
 
 
 LEGAL_NODE_TRANSITIONS = {
@@ -820,6 +828,72 @@ def validate_delivery_report(value: dict[str, Any]) -> None:
     _base(value, {"run_id", "status", "routing", "validation", "known_risks", "blocked_items"}, "delivery-report")
     if value["status"] not in {"completed", "partial", "blocked", "cancelled"}:
         raise ContractError("delivery-report status is invalid")
+    quality = value.get("quality")
+    if quality is not None:
+        _exact_object(
+            quality,
+            {
+                "status", "verification_status", "coverage_level", "release_recommendation",
+                "qa_plan_fingerprint", "workflow_plan_id", "workflow_plan_fingerprint", "run_id",
+                "report_fingerprint", "evidence_refs",
+            },
+            "delivery-report.quality",
+        )
+        if quality["status"] not in {"passed", "partial", "blocked", "failed", "cancelled"}:
+            raise ContractError("delivery-report quality status is invalid")
+        if quality["verification_status"] not in {"passed", "partial", "blocked", "failed", "cancelled"}:
+            raise ContractError("delivery-report quality verification_status is invalid")
+        if quality["coverage_level"] not in {
+            "smoke", "targeted", "regression", "compatibility", "end-to-end", "release-candidate",
+        }:
+            raise ContractError("delivery-report quality coverage_level is invalid")
+        if quality["release_recommendation"] not in {"go", "conditional-go", "no-go", "not-applicable"}:
+            raise ContractError("delivery-report quality release_recommendation is invalid")
+        for field in ("qa_plan_fingerprint", "report_fingerprint"):
+            if not isinstance(quality[field], str) or not re.fullmatch(r"qa-v1:[0-9a-f]{64}", quality[field]):
+                raise ContractError(f"delivery-report quality {field} is invalid")
+        if not isinstance(quality["workflow_plan_fingerprint"], str) or not quality["workflow_plan_fingerprint"]:
+            raise ContractError("delivery-report quality workflow_plan_fingerprint is invalid")
+        if (
+            not isinstance(value["routing"], dict)
+            or quality["workflow_plan_id"] != value["routing"].get("plan_id")
+            or quality["run_id"] != value["run_id"]
+        ):
+            raise ContractError("delivery-report quality workflow/run identity is inconsistent")
+        if not isinstance(quality["evidence_refs"], list):
+            raise ContractError("delivery-report quality evidence_refs must be an array")
+        evidence_identities: list[tuple[str, str]] = []
+        for evidence in quality["evidence_refs"]:
+            _exact_object(evidence, {"kind", "sha256", "uri"}, "delivery-report.quality.evidence-ref")
+            if evidence["kind"] not in {"log", "screenshot", "test-report", "trace", "structured-report", "video"}:
+                raise ContractError("delivery-report quality evidence kind is invalid")
+            if not isinstance(evidence["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"]):
+                raise ContractError("delivery-report quality evidence sha256 is invalid")
+            if (
+                not isinstance(evidence["uri"], str)
+                or not evidence["uri"].startswith("artifact://")
+                or len(evidence["uri"]) == len("artifact://")
+                or ".." in evidence["uri"]
+                or any(character.isspace() for character in evidence["uri"])
+            ):
+                raise ContractError("delivery-report quality evidence uri is uncontrolled")
+            evidence_identities.append((evidence["kind"], evidence["uri"]))
+        if evidence_identities != sorted(set(evidence_identities)):
+            raise ContractError("delivery-report quality evidence_refs must be sorted and unique")
+        if quality["status"] == "passed" and not quality["evidence_refs"]:
+            raise ContractError("passed delivery-report quality requires evidence")
+        if quality["release_recommendation"] == "go" and (
+            quality["status"] != "passed"
+            or quality["verification_status"] != "passed"
+            or value["status"] != "completed"
+            or not isinstance(value["validation"], dict)
+            or value["validation"].get("status") != "passed"
+        ):
+            raise ContractError("delivery-report go requires completed delivery with passed QA and verification")
+        if quality["release_recommendation"] == "conditional-go" and value["status"] not in {"completed", "partial"}:
+            raise ContractError("delivery-report conditional-go conflicts with blocked or cancelled delivery")
+        if not isinstance(value["validation"], dict) or quality["verification_status"] != value["validation"].get("status"):
+            raise ContractError("delivery-report quality verification conflicts with validation")
 
 
 def _install_version_satisfies(version: str, expression: str) -> bool:
@@ -1193,16 +1267,22 @@ VALIDATORS: dict[str, Callable[[dict[str, Any]], None]] = {
     "design-evidence": validate_design_evidence,
     "design-source-request": validate_design_source_request,
     "design-system-registry": validate_design_system_registry,
+    "defect-report": validate_defect_report,
     "install-plan": validate_install_plan,
     "node-attempt": validate_node_attempt,
     "plugin-manifest": validate_manifest,
     "project-profile": validate_project_profile,
+    "qa-plan": validate_qa_plan,
+    "qa-report": validate_qa_report,
+    "regression-set": validate_regression_set,
     "resolved-policy": validate_resolved_policy,
     "resource-event": validate_resource_event,
     "run-ledger": validate_run_ledger,
     "workflow-plan": validate_workflow_plan,
     "canonical-ui-ir": validate_canonical_ui_ir,
     "ui-validation-report": validate_ui_validation_report,
+    "test-case": validate_test_case,
+    "test-result": validate_test_result,
     "worktree-session-context": validate_worktree_session_context,
     "worktree-session-gate": validate_worktree_session_gate,
     "worktree-session-list": validate_worktree_session_list,

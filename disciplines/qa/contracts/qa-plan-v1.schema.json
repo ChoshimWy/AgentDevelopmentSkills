@@ -1,0 +1,327 @@
+{
+  "$defs": {
+    "coverageLevel": {
+      "enum": [
+        "smoke",
+        "targeted",
+        "regression",
+        "compatibility",
+        "end-to-end",
+        "release-candidate"
+      ]
+    },
+    "evidenceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "log",
+            "screenshot",
+            "test-report",
+            "trace",
+            "structured-report",
+            "video"
+          ]
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "uri": {
+          "pattern": "^artifact://(?!.*\\.\\.)(?!.*\\s).+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "sha256",
+        "uri"
+      ],
+      "type": "object"
+    },
+    "fingerprint": {
+      "pattern": "^qa-v1:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "environmentFingerprint": {
+      "pattern": "^(qa|desktop)-v1:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "verificationLevel": {
+      "enum": [
+        "none",
+        "static",
+        "lint",
+        "affected-tests",
+        "module-build",
+        "integration",
+        "ui-smoke",
+        "full"
+      ]
+    }
+  },
+  "$id": "https://agent-workflow.local/disciplines/qa/contracts/qa-plan-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "blockers": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "coverage": {
+      "additionalProperties": false,
+      "properties": {
+        "compiled_level": {
+          "$ref": "#/$defs/coverageLevel"
+        },
+        "dimensions": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "rationales": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "requested_level": {
+          "$ref": "#/$defs/coverageLevel"
+        },
+        "risk_refs": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "requested_level",
+        "compiled_level",
+        "dimensions",
+        "risk_refs",
+        "rationales"
+      ],
+      "type": "object"
+    },
+    "entry_criteria": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "environments": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "attributes": {
+            "minProperties": 1,
+            "type": "object"
+          },
+          "fingerprint": {
+            "$ref": "#/$defs/environmentFingerprint"
+          },
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "platform",
+          "attributes",
+          "fingerprint"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "exit_criteria": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "objective": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "plan_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "risks": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "categories": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "impact": {
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "likelihood": {
+            "maximum": 5,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "requirement_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "title": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "likelihood",
+          "impact",
+          "categories",
+          "requirement_refs"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "scope": {
+      "additionalProperties": false,
+      "properties": {
+        "excluded": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "included": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "included",
+        "excluded"
+      ],
+      "type": "object"
+    },
+    "status": {
+      "enum": [
+        "planned",
+        "partial",
+        "blocked",
+        "cancelled"
+      ]
+    },
+    "verification": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/evidenceRef"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "level": {
+          "$ref": "#/$defs/verificationLevel"
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "passed",
+            "partial",
+            "blocked",
+            "failed",
+            "cancelled"
+          ]
+        }
+      },
+      "required": [
+        "level",
+        "status",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "workflow_kind": {
+      "enum": [
+        "prd",
+        "bug",
+        "release"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "plan_id",
+    "workflow_kind",
+    "objective",
+    "scope",
+    "risks",
+    "environments",
+    "entry_criteria",
+    "exit_criteria",
+    "coverage",
+    "verification",
+    "status",
+    "blockers",
+    "fingerprint"
+  ],
+  "title": "QA Plan v1",
+  "type": "object"
+}

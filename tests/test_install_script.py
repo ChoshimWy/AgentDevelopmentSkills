@@ -140,7 +140,7 @@ class InstallScriptTests(unittest.TestCase):
             all_report = json.loads(
                 self.run_install(target, "--platform", "all", "--dry-run").stdout
             )
-            self.assertEqual(all_report["selected_platforms"], ["apple"])
+            self.assertEqual(all_report["selected_platforms"], ["apple", "desktop"])
 
             missing_selection = subprocess.run(
                 [str(INSTALL), "--target-root", str(target), "--dry-run", "--json"],
@@ -152,6 +152,19 @@ class InstallScriptTests(unittest.TestCase):
             self.assertEqual(missing_selection.returncode, 2)
             self.assertIn("--json requires an explicit --platform", missing_selection.stderr)
             self.assertFalse(target.exists())
+
+            desktop_report = json.loads(
+                self.run_install(target, "--platform", "desktop", "--dry-run").stdout
+            )
+            self.assertEqual(desktop_report["selected_platforms"], ["desktop"])
+            self.assertEqual(desktop_report["selected_runtime_configs"], [])
+            self.assertEqual(
+                desktop_report["selected_packages"],
+                ["core", "git", "qa", "review", "workflow", "desktop"],
+            )
+            self.assertEqual(desktop_report["activation"]["managed_file_updates"], [])
+            desktop_option = next(item for item in desktop_report["platform_options"] if item["id"] == "desktop")
+            self.assertEqual(desktop_option["availability"], "ready")
 
             module = load_installer_module()
             multi_platform_report = {**report, "selected_platforms": ["apple", "web"]}
@@ -445,6 +458,25 @@ class InstallScriptTests(unittest.TestCase):
             self.assertEqual(metadata_reinstall["status"], "installed")
             self.assertFalse((target / "skills" / ".DS_Store").exists())
 
+    def test_desktop_install_has_no_apple_activation_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".codex"
+            report = json.loads(self.run_install(target, "--platform", "desktop").stdout)
+            self.assertEqual(report["status"], "installed")
+            self.assertEqual(report["selected_platforms"], ["desktop"])
+            self.assertEqual(report["selected_runtime_configs"], [])
+            self.assertEqual(report["post_install_smoke"], {
+                "final_status": "completed",
+                "plan_status": "ready",
+                "review_status": "passed",
+                "status": "passed",
+            })
+            self.assertTrue((target / "skills" / "desktop-orchestration" / "SKILL.md").is_file())
+            self.assertTrue((target / "skills" / "qa-workflow" / "SKILL.md").is_file())
+            self.assertFalse((target / "bin" / "codex_verify").exists())
+            self.assertFalse((target / "agents" / "builder.toml").exists())
+            self.assertFalse((target / "config.toml").exists())
+
     def test_recognized_legacy_links_are_replaced_without_backup_and_system_skills_are_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -491,7 +523,7 @@ class InstallScriptTests(unittest.TestCase):
 
             human = self.run_install(target, check=False, json_output=False)
             result = self.run_install(target, check=False)
-            self.assertIn("Apple 工作流安装未完成", human.stderr)
+            self.assertIn("平台工作流安装未完成", human.stderr)
             self.assertIn("unknown unmanaged", human.stderr)
             self.assertIn("添加 --json", human.stderr)
             self.assertEqual(result.returncode, 2)

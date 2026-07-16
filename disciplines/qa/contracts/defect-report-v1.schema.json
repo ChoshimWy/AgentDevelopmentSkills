@@ -1,0 +1,240 @@
+{
+  "$defs": {
+    "evidenceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "log",
+            "screenshot",
+            "test-report",
+            "trace",
+            "structured-report",
+            "video"
+          ]
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "uri": {
+          "pattern": "^artifact://(?!.*\\.\\.)(?!.*\\s).+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "sha256",
+        "uri"
+      ],
+      "type": "object"
+    },
+    "fingerprint": {
+      "pattern": "^qa-v1:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "environmentFingerprint": {
+      "pattern": "^(qa|desktop)-v1:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "$id": "https://agent-workflow.local/disciplines/qa/contracts/defect-report-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attribution": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "enum": [
+            "code",
+            "environment",
+            "test-data",
+            "requirement",
+            "unknown"
+          ]
+        },
+        "component": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "category",
+        "confidence",
+        "component"
+      ],
+      "type": "object"
+    },
+    "blockers": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "defect_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "environment_fingerprint": {
+      "$ref": "#/$defs/environmentFingerprint"
+    },
+    "evidence_refs": {
+      "items": {
+        "$ref": "#/$defs/evidenceRef"
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "fingerprint": {
+      "$ref": "#/$defs/fingerprint"
+    },
+    "fix_verification_result_refs": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "impact": {
+      "additionalProperties": false,
+      "properties": {
+        "regression_risk": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "scope": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "scope",
+        "regression_risk"
+      ],
+      "type": "object"
+    },
+    "owner": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "priority": {
+      "enum": [
+        "p0",
+        "p1",
+        "p2",
+        "p3",
+        "p4"
+      ]
+    },
+    "regression_case_refs": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "reproduction": {
+      "additionalProperties": false,
+      "properties": {
+        "actual": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "expected": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "rate": {
+          "enum": [
+            "always",
+            "intermittent",
+            "once",
+            "not-reproduced"
+          ]
+        },
+        "steps": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "rate",
+        "steps",
+        "expected",
+        "actual"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "severity": {
+      "enum": [
+        "blocker",
+        "critical",
+        "major",
+        "minor",
+        "trivial"
+      ]
+    },
+    "status": {
+      "enum": [
+        "open",
+        "fixed",
+        "verified",
+        "closed",
+        "blocked",
+        "reopened"
+      ]
+    },
+    "title": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "defect_id",
+    "title",
+    "reproduction",
+    "severity",
+    "priority",
+    "environment_fingerprint",
+    "evidence_refs",
+    "attribution",
+    "impact",
+    "owner",
+    "status",
+    "fix_verification_result_refs",
+    "regression_case_refs",
+    "blockers",
+    "fingerprint"
+  ],
+  "title": "Defect Report v1",
+  "type": "object"
+}

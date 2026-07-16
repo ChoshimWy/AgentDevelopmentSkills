@@ -1,0 +1,70 @@
+{
+  "$id": "https://agent-workflow.local/platforms/desktop/config/desktop-environment-profile-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "arch": {"minLength": 1, "type": "string"},
+    "displays": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "hdr": {"enum": ["supported", "unsupported", "unknown"]},
+          "id": {"minLength": 1, "type": "string"},
+          "resolution": {"type": ["string", "null"]},
+          "scale_factor": {"exclusiveMinimum": 0, "type": ["number", "null"]}
+        },
+        "required": ["id", "resolution", "scale_factor", "hdr"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "dpi": {
+      "additionalProperties": false,
+      "properties": {"scale_factor": {"exclusiveMinimum": 0, "type": ["number", "null"]}, "source": {"enum": ["observed", "fixture", "unknown"]}},
+      "required": ["scale_factor", "source"],
+      "type": "object"
+    },
+    "environment_id": {"minLength": 1, "type": "string"},
+    "fingerprint": {"pattern": "^desktop-v1:[0-9a-f]{64}$", "type": "string"},
+    "inputs": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {"kind": {"enum": ["keyboard", "mouse", "touch", "pen", "gamepad", "unknown"]}, "status": {"enum": ["available", "unavailable", "unknown"]}},
+        "required": ["kind", "status"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "matrix_dimensions": {
+      "additionalProperties": false,
+      "properties": {
+        "display_scales": {"items": {"exclusiveMinimum": 0, "type": "number"}, "type": "array", "uniqueItems": true},
+        "input_kinds": {"items": {"minLength": 1, "type": "string"}, "type": "array", "uniqueItems": true},
+        "permission_names": {"items": {"minLength": 1, "type": "string"}, "type": "array", "uniqueItems": true}
+      },
+      "required": ["display_scales", "input_kinds", "permission_names"],
+      "type": "object"
+    },
+    "os": {
+      "additionalProperties": false,
+      "properties": {"family": {"enum": ["macos", "windows", "linux", "unknown"]}, "version": {"type": ["string", "null"]}},
+      "required": ["family", "version"],
+      "type": "object"
+    },
+    "permissions": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {"name": {"enum": ["filesystem", "network", "notification", "automation", "installer-elevation"]}, "status": {"enum": ["granted", "denied", "not-required", "unknown"]}},
+        "required": ["name", "status"],
+        "type": "object"
+      },
+      "minItems": 5,
+      "type": "array"
+    },
+    "schema_version": {"const": "1.0"},
+    "source": {"enum": ["host", "fixture"]}
+  },
+  "required": ["schema_version", "environment_id", "source", "os", "arch", "dpi", "displays", "inputs", "permissions", "matrix_dimensions", "fingerprint"],
+  "title": "Desktop Environment Profile v1",
+  "type": "object"
+}

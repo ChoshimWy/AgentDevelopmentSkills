@@ -1,0 +1,29 @@
+{
+  "$id": "https://agent-workflow.local/disciplines/qa/contracts/qa-coverage-request-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "requested_level": {"enum": ["smoke", "targeted", "regression", "compatibility", "end-to-end", "release-candidate"]},
+    "risks": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "categories": {"items": {"minLength": 1, "type": "string"}, "minItems": 1, "type": "array", "uniqueItems": true},
+          "id": {"minLength": 1, "type": "string"},
+          "impact": {"maximum": 5, "minimum": 1, "type": "integer"},
+          "likelihood": {"maximum": 5, "minimum": 1, "type": "integer"},
+          "requirement_refs": {"items": {"minLength": 1, "type": "string"}, "type": "array", "uniqueItems": true},
+          "title": {"minLength": 1, "type": "string"}
+        },
+        "required": ["id", "title", "likelihood", "impact", "categories", "requirement_refs"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema_version": {"const": "1.0"},
+    "workflow_kind": {"enum": ["prd", "bug", "release"]}
+  },
+  "required": ["schema_version", "workflow_kind", "requested_level", "risks"],
+  "title": "QA Coverage Request v1",
+  "type": "object"
+}
