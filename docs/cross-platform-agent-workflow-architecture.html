@@ -143,7 +143,7 @@
         <strong>目标仓库</strong><span>AgentDevelopmentSkills</span>
         <strong>迁移来源</strong><span>iOSAgentSkills（288 个来源项已通过 Migration Audit v2 唯一映射到 Apple、共享 Discipline 与 Runtime Config）</span>
         <strong>当前实施清单</strong><span><a href="implementation/phase-2-ios-agent-skills-integration.html">Phase 2 iOSAgentSkills Compatibility &amp; Monorepo Integration</a></span>
-        <strong>当前范围</strong><span>Phase 1、Phase 2A–2C 已完成；P2C 全量 Conformance 与独立最终审查通过；真实本机迁移与发布生命周期归 Phase 6</span>
+        <strong>当前范围</strong><span>Phase 1、Phase 2A–2C 与 Phase 3 已完成；P3 全量 Conformance 与独立最终审查通过；真实本机迁移、live Connector/设备采集与发布生命周期需显式执行或归 Phase 6</span>
       </div>
       <div class="chips">
         <span class="chip">Core + Plugin Packages</span>
@@ -1063,7 +1063,7 @@ design-source read/write boundary test</code></pre>
             <tr><td>Phase 2A</td><td><span class="check">√</span> iOSAgentSkills 外部 Manifest 与兼容桥</td><td>原入口和 Core 路由均可运行且行为无回归</td></tr>
             <tr><td>Phase 2B</td><td><span class="check">√</span> Apple AgentSkills 单仓迁移、选择安装、单一 AGENTS 与 CP0–CP3 已完成</td><td>源码/隔离安装以 <code>platforms/apple/</code> 为真源；本机旧安装迁移不静默执行并归 Phase 6</td></tr>
             <tr><td>Phase 2C</td><td><span class="check">√</span> Shared Discipline Extraction &amp; Contract Repair A–G 实现与 Conformance 已完成</td><td>共享 ownership、Migration Audit v2、Apple Normalize、bootstrap-only、Lock v2 与 Runtime Config 已落地；独立最终审查阻塞问题：无</td></tr>
-            <tr><td>Phase 3</td><td><span class="todo">□</span> Product Design Provider、Design Source Gateway、完整 Canonical Design IR 链路；P2C 已预抽取 base/Apple extension ownership</td><td>Figma / Sketch / Product Design 到 Apple Agent Packet 可追溯</td></tr>
+            <tr><td>Phase 3</td><td><span class="check">√</span> Product Design / Figma 显式 Provider、Design Source Gateway、Canonical IR / Registry / Packet 与 Apple Packet v2 已实现；Conformance 与独立 reviewer 均通过</td><td>credential-free source fixture 到 Apple Agent Packet 可追溯；live Connector 保持显式授权</td></tr>
             <tr><td>Phase 4</td><td><span class="todo">□</span> QA Core 与 Desktop 最小包</td><td>PRD、Bug、Release 三类 QA 流程闭环</td></tr>
             <tr><td>Phase 5</td><td><span class="todo">□</span> 暂缓 Android、Web、Backend 与更多平台/UI Binding；当前平台包均为 <code>bootstrap-only</code></td><td>先以获准真实 Xcode 工程完成 Apple host readiness，再启动其他平台 Provider；新增 Provider 仍不得修改 Core 主合同</td></tr>
             <tr><td>Phase 6</td><td><span class="todo">□</span> 在 P2C Lock v2 / source hash / asset allowlist / rule trace 基础上完成 doctor、升级卸载、打包与发布治理</td><td>单一发布物可选择平台且可移植、可复现、可回滚、冲突安全</td></tr>
@@ -1121,7 +1121,7 @@ design-source read/write boundary test</code></pre>
         </ul>
         <div class="callout warn">
           <strong>当前完成度声明</strong>
-          本文已更新为 Architecture Baseline v1.2。Phase 1、Phase 2A–2C 已完成；Phase 2C A–G、全量 Conformance 与独立最终审查均已收口，阻塞问题：无。共享 workflow/review/documentation/git/design 已从 Apple 去重，其他平台被真值化为 bootstrap-only，Codex Runtime Config 只允许显式选择。真实本机旧安装迁移、License/NOTICE 发布决策和发布级生命周期仍未完成并归 Phase 6。
+          本文已更新为 Architecture Baseline v1.2。Phase 1、Phase 2A–2C 与 Phase 3 已完成；Phase 3 全量 Conformance 与独立最终审查均已收口，阻塞问题：无。共享 workflow/review/documentation/git/design 已从 Apple 去重，其他平台被真值化为 bootstrap-only，Codex Runtime Config 只允许显式选择。真实本机旧安装迁移、License/NOTICE 发布决策和发布级生命周期仍未完成并归 Phase 6。
         </div>
       </section>
     </div>

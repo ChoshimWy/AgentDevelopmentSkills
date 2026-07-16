@@ -8,9 +8,9 @@
 - 本机全局指令只允许一个受管入口；平台包不得各自覆盖 `~/.codex/AGENTS.md`。平台细节优先放在 Skill/Manifest，必须常驻的规则以显式 scope 分片合成，冲突 fail-closed。
 - Android、Web、Backend、Desktop 当前是 `bootstrap-only`：允许发现但不得产生 phantom Binding 或 ready Plan；只有安装真实 Provider 后才可解锁。
 - 架构真源：`docs/cross-platform-agent-workflow-architecture.html`。
-- 当前实施进度真源：`docs/implementation/phase-2-ios-agent-skills-integration.html`。
+- 当前实施进度真源：`docs/implementation/phase-3-design-provider-and-canonical-ir.html`。
 
-## Phase 1–2 Rules
+## Phase 1–3 Rules
 
 - Python 3.11+，标准库优先；Manifest 使用 JSON，不引入 YAML 解析依赖。
 - Discovery 只读，不执行目标仓库脚本、不联网、不读取凭据。

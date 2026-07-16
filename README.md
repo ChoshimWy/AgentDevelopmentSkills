@@ -2,7 +2,7 @@
 
 面向 Codex 与其他开发 Agent 的跨平台工作流 Core。项目通过只读仓库发现、策略解析、Capability 合同和确定性 DAG，自动判断目标模块所需的研发流程，并以可解释、可恢复、fail-closed 的 Runtime 执行计划。
 
-> 当前版本：`0.2.0`。Phase 1、Phase 2A 与 Phase 2B 的源码态/隔离安装基线已完成且不回滚。Phase 2C 的 A–G 实现与 CP3 已完成：通用 workflow/review/documentation/git/design 基础能力已唯一迁入共享 Discipline，Apple 只保留平台扩展；全量 Conformance 与独立最终审查均已通过。真实本机旧安装切换与发布级生命周期仍归 Phase 6。
+> 当前版本：`0.2.0`。Phase 1、Phase 2A–2C 与 Phase 3 已完成且不回滚：共享 Discipline、Product Design/Figma 显式 Provider、Design Source Gateway、Canonical UI IR/Registry/Packet 与 Apple Packet v2 已落地；全量 Conformance 与独立最终审查均已通过。真实本机旧安装切换、live Connector/设备采集与发布级生命周期仍需显式执行或归 Phase 6。
 
 ## 为什么需要它
 
@@ -42,7 +42,7 @@ Repository / Task / Target Files
 - **单一全局 AGENTS**：Core、共享 Discipline 与已选平台只贡献带 scope 的 Fragment，按依赖拓扑稳定合成一个受管 `AGENTS.md`；Fragment/Skill 冲突及未受管目标均 fail-closed。
 - **共享 Discipline**：`documentation`、`git`、`workflow`、`review`、`design` 各自拥有独立 Manifest、版本、权限与安装边界；Apple 通过 `package_requires` 获得闭包，不保留重复可安装副本。
 - **平台真值**：Apple 为 `implemented`；Android、Web、Backend、Desktop 为 `bootstrap-only`，只能输出 `bootstrap_required`，不会产生 phantom Binding 或 ready Plan。
-- **迁移审计 v2**：不可变 iOSAgentSkills 来源清单通过 relocation/transformation map 映射到当前包清单；117 项 retained、113 项 relocated、57 项 transformed、1 项 removed，并记录 20 个仓内 addition；License provenance 明确标为 pending。
+- **迁移审计 v2**：不可变 iOSAgentSkills 来源清单通过 relocation/transformation map 映射到当前包清单；117 项 retained、113 项 relocated、57 项 transformed、1 项 removed，并记录 31 个仓内 addition；License provenance 明确标为 pending。
 - **安装完整性**：Install Plan/Lock v2 冻结 package source hash、Capability Provider、flattened asset allowlist、rule trace 及完整 path/hash/canonical mode；篡改、额外文件、symlink、Binding 越界、Provider 权限扩大、兼容越界及 staged TOCTOU 均在 swap 前 fail-closed。
 - **显式 Runtime Config**：Codex profiles/shared config 已迁入 `runtime-configs/codex`；只有显式 `--runtime-config codex` 才会进入安装闭包，选择 Apple 不会隐式改写全局工具行为。
 - **结构化 Adapter**：冻结 Provider binding/hash 与每次外部调用的 `invocation_id`，校验 request/result identity、验证缺口、artifact hash 与独立 reviewer actor。
@@ -244,11 +244,11 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 
 当前基线：
 
-- 233 个 unittest
-- 23 个 JSON Schema
-- 7 个非法 contract golden
-- 13 个 package Manifest：Core、Apple、4 个 bootstrap-only 平台、5 个共享 Discipline 与 1 个显式 Codex Runtime Config；外部 Provider fixture 仅作兼容回归
-- 288 个 iOSAgentSkills 来源受控文件：117 retained、113 relocated、57 transformed、1 removed，另有 20 additions；当前为 13 个 Apple Skills + 8 个共享 Skills，历史名称不保留兼容副本
+- 254 个 unittest
+- 29 个 JSON Schema
+- 11 个非法 contract golden
+- 15 个内建 Manifest + 2 个显式外部 Provider Manifest：Core、Apple、4 个 bootstrap-only 平台、5 个共享 Discipline、2 个 Design Provider bootstrap 与 1 个显式 Codex Runtime Config；外部 Provider 默认不启用
+- 288 个 iOSAgentSkills 来源受控文件：117 retained、113 relocated、57 transformed、1 removed，另有 31 additions；当前为 13 个 Apple Skills + 9 个共享 Skills，历史名称不保留兼容副本
 - 4 个 Apple legacy/Core route comparison cases
 
 ## 架构与实施文档
@@ -272,7 +272,7 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 | Phase 2A | 已完成 | iOSAgentSkills 外部 Manifest、Provider Adapter、双路径 baseline/smoke、回退与真实仓 dry-run |
 | Phase 2B | 已完成（源码/隔离安装范围） | Apple 包已迁入，选择安装、单一 AGENTS、完整性/回滚门禁与独立复审通过；真实本机迁移归 Phase 6 |
 | Phase 2C | 已完成 | A–G 已落地：共享 Discipline、Design Split、Apple Normalize、bootstrap-only 平台、Lock v2、rule trace 与显式 Runtime Config；全量 Conformance 与独立最终审查通过 |
-| Phase 3 | 待启动（基础边界已预抽取） | P2C 已提供 design system / Canonical UI IR base 与 Apple extension 边界；Product Design Provider、来源 Gateway、完整 Schema/权限/验收仍待实施 |
+| Phase 3 | 已完成；Conformance 与独立 reviewer 均通过 | Product Design / Figma 显式 Provider、只读 Gateway、共享 Evidence/IR/Registry/Packet、Apple Packet v2 与 UI report 已贯通；live Connector 仍需显式授权 |
 | Phase 4 | 待启动 | QA Core 与 Desktop 最小包 |
 | Phase 5 | 暂缓（先完成 iOS host readiness） | Android、Web、Backend、Desktop 继续保持 bootstrap-only；Apple 安装态/自动验证合同已贯通，待获准真实 Xcode 工程完成 host smoke 后再启动其他平台 Provider |
 | Phase 6 | 进行中（源码安装/全量卸载已落地） | 根目录 `install.sh` 已贯通平台选择、资产激活与安装态 smoke；`uninstall.sh` 已提供 dry-run、完整性拒绝、事务回滚与全量卸载。doctor、upgrade、多平台部分卸载、跨进程恢复、打包与发布治理仍待实施 |
