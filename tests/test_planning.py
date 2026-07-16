@@ -120,14 +120,20 @@ class PlanCompilerTests(unittest.TestCase):
         policy = PolicyResolver().resolve(profile, "实现 iOS UI 设计并补测试")
         plan = self.compiler.compile(profile, policy)
         capabilities = [node["capability"] for node in plan["nodes"]]
+        self.assertIn("design.evidence.normalize", capabilities)
         self.assertIn("design.system", capabilities)
         self.assertIn("design.ir.compile", capabilities)
+        self.assertIn("design.registry.resolve", capabilities)
+        self.assertIn("design.packet.slice", capabilities)
         self.assertIn("design.apple.binding", capabilities)
         self.assertIn("design.apple.source", capabilities)
         self.assertIn("verification.apple.affected-tests", capabilities)
         self.assertIn("verification.apple.auto", capabilities)
         self.assertNotIn("qa.targeted", capabilities)
         self.assertIn("review.independent", capabilities)
+        self.assertLess(capabilities.index("design.apple.source"), capabilities.index("design.evidence.normalize"))
+        self.assertLess(capabilities.index("design.ir.compile"), capabilities.index("design.packet.slice"))
+        self.assertLess(capabilities.index("design.packet.slice"), capabilities.index("design.apple.binding"))
         self.assertEqual(plan["status"], "ready")
 
     def test_apple_implementation_with_tests_is_ready_without_shared_qa_provider(self) -> None:

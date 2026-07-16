@@ -1,0 +1,1 @@
+{"artifact":{"approval_id":null,"attempt_id":"attempt-1","data_policy":{"allow_credentials":false,"max_nodes":16,"retention":"task"},"document_id":"document-1","document_version":"42","operation":"write","request_id":"request-1","schema_version":"1.0","scope":{"node_ids":["settings"],"page_id":"page-settings"},"source_kind":"figma"},"kind":"design-source-request"}

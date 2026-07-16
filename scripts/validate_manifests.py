@@ -15,11 +15,19 @@ from agent_workflow.registry import ManifestRegistry  # noqa: E402
 
 def main() -> int:
     try:
-        registry = ManifestRegistry.from_directory(ROOT / "platforms")
+        provider_roots = [ROOT / "providers"] if (ROOT / "providers").is_dir() else []
+        registry = ManifestRegistry.from_directory(ROOT / "platforms", provider_roots=provider_roots)
     except ContractError as error:
         print(f"FAIL {error}")
         return 1
-    schema_names = {path.name.removesuffix(".schema.json") for path in (ROOT / "schemas").glob("*.schema.json")}
+    schema_names = {
+        path.name.removesuffix(".schema.json")
+        for path in [
+            *(ROOT / "schemas").glob("*.schema.json"),
+            *(ROOT / "disciplines").glob("*/contracts/*.schema.json"),
+            *(ROOT / "platforms").glob("*/contracts/*.schema.json"),
+        ]
+    }
     for registered in registry.manifests:
         for entry in registered.value["capabilities"]:
             contract = registry.capability_contract(entry["id"])

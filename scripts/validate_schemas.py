@@ -20,11 +20,17 @@ VALID_TYPES = {"array", "boolean", "integer", "null", "number", "object", "strin
 
 
 def main() -> int:
-    schema_root = ROOT / "schemas"
     failures: list[str] = []
     ids: dict[str, Path] = {}
     documents: dict[Path, dict[str, Any]] = {}
-    files = sorted(schema_root.glob("*.schema.json"))
+    files = sorted(
+        [*(ROOT / "schemas").glob("*.schema.json")]
+        + [
+            path
+            for collection in ("disciplines", "platforms", "stacks")
+            for path in (ROOT / collection).glob("*/contracts/*.schema.json")
+        ]
+    )
     for path in files:
         try:
             value = json.loads(path.read_text(encoding="utf-8"))

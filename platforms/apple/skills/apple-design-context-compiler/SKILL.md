@@ -13,7 +13,7 @@ Extend the shared Canonical UI IR with validated UIKit/SwiftUI bindings and a ta
 
 本 Skill 是共享设计合同到 iOS 实施之间的 Apple binding extension：
 
-- 消费 `apple-design-source` 与共享 `design-ir-compiler` 已校验的 Design Evidence / Canonical UI IR。
+- 消费共享 `design-source-gateway` / `design-ir-compiler` 已校验的 Design Evidence、Canonical UI IR、Registry 与 task-scoped Packet；不得直接消费完整 Figma / Sketch JSON。
 - 解析 iOS Component Registry / bindings。
 - 按任务裁剪 Agent Packet，并明确 context budget。
 - 用 benchmark 证明 UI IR / binding 是否真实提升首轮还原质量。
@@ -59,11 +59,11 @@ Do not use this Skill when:
 
 ### Canonical Source Rules
 
-- 通用 `ui-ir.json` 由共享 `design-ir-compiler` 拥有；本 Skill 只能追加 Apple binding/packet，不得修改通用语义。
+- 通用 Design Evidence、Canonical UI IR、Design System Registry 与 task-scoped Packet 的机器真源位于 `disciplines/design/contracts/`；本 Skill 只能追加 Apple binding/packet，不得修改通用语义。
 - Design Evidence 必须记录 source kind、document/node、版本、截图或 evidence hash、Parser version。
 - 原始设计事实、人工合同、Registry 解析和推断必须使用不同 provenance。
 - `unknown` 不得被静默替换为猜测值；阻塞级 unknown 必须阻断实施 handoff。
-- 禁止把完整 Figma / Sketch JSON 或全量 Component Registry 直接交给实现 Agent。
+- 禁止把完整 Figma / Sketch JSON、全量 Component Registry 或未校验 source slice 直接交给实现 Agent；实现入口只接收 task-scoped Packet 与 Apple binding extension。
 
 ### Context Budget Rules
 
@@ -103,6 +103,8 @@ Do not use this Skill when:
 - 源码索引只生成 <code>pending-review</code> / heuristic 候选；未经过人工设计映射确认，不得提升为 active binding。
 - Task Context Compiler 必须保留目标子树、全部祖先、递归 <code>relative_to</code> 依赖、被引用 token、节点 style/state/component 语义、环境/viewport、连通 state/interaction、responsive、accessibility、active binding 和所有 blocking unknown。
 - Agent Packet 必须记录 <code>requested_states</code>；validator 从 seeds 重算连通状态/交互闭包、目标 acceptance regions 和确定性 context token estimate，不信任 Packet 自报值。
+- Shared Packet v1 转 Apple Packet v2 前必须同时提供当前 Canonical IR 与 Registry fingerprint 列表；编译器逐项核对 `current_source_fingerprints`，旧 Packet 不得仅凭自身声明继续绑定。
+- Apple Packet v2 必须记录 Apple Registry fingerprint；component declaration hash 固定为 `sha256:<64 lowercase hex>`，格式非法即阻断。
 - <code>active</code> Registry entry 必须来自 <code>manual-contract/exact</code>；<code>source-index/heuristic</code> 只能保持 <code>pending-review</code>，compiler 不得静默选取 framework 不匹配或多候选 binding。
 - Implementation Manifest 初始化结果固定为 blocked draft；只有 PreviewScene、validation region、passed evidence 均补齐后才能标记 complete。
 - Complete Manifest 必须校验实际 UI IR、Agent Packet、validation evidence 文件及 SHA-256，并核对 screen、环境、viewport、Design Node、binding、mapping coverage 与逐 region 语义视觉证据。
@@ -194,8 +196,11 @@ Next action: ...
 
 ## Reference Resources
 
-- `references/design-evidence-v1.schema.json`: 可审计 Design Evidence Snapshot Schema。
-- `references/ui-ir-v1.1.schema.json`: Canonical UI IR v1.1 Schema。
+- `disciplines/design/contracts/design-evidence-v1.schema.json`: 共享可审计 Design Evidence Schema 真源；本地同名 reference 仅为迁移兼容扩展。
+- `disciplines/design/contracts/canonical-ui-ir-v1.schema.json`: 共享 Canonical UI IR Schema 真源；本地 `ui-ir-v1.1` 仅为 Apple 迁移兼容输入。
+- `disciplines/design/contracts/design-system-registry-v1.schema.json`: 共享平台中立 Registry Schema 真源。
+- `disciplines/design/contracts/design-agent-packet-v1.schema.json`: 共享 task-scoped Packet Schema 真源。
+- `disciplines/design/contracts/ui-validation-report-v1.schema.json`: 共享 UI 验收报告基础真源；Apple 环境与 binding 差异由本 Skill 扩展。
 - `references/agent-packet-v1.schema.json`: Task-scoped Agent Packet Schema。
 - `references/component-registry-v1.schema.json`: Design component 到 UIKit / SwiftUI symbol 的绑定合同。
 - `references/implementation-manifest-v1.schema.json`: Design Node 到代码、PreviewScene 与验证区域的完成合同。

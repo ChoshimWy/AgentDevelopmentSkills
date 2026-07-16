@@ -15,6 +15,7 @@ def main() -> int:
     commands = [
         [sys.executable, "scripts/validate_schemas.py"],
         [sys.executable, "scripts/validate_manifests.py"],
+        [sys.executable, "scripts/build_design_phase3_fixtures.py", "--check"],
         [sys.executable, "scripts/validate_skill_naming.py"],
         [sys.executable, "scripts/build_migration_audit.py", "--check"],
         [sys.executable, "scripts/validate_apple_package.py"],
@@ -47,7 +48,7 @@ def main() -> int:
         result = subprocess.run(command, cwd=ROOT, check=False)
         if result.returncode:
             return result.returncode
-    print("PASS Phase 2 Core/Provider conformance")
+    print("PASS Phase 3 Core/Provider/Design conformance")
     return 0
 
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Design Source Gateway"
+  short_description: "Normalize scoped design evidence with approval gates"
+  default_prompt: "Normalize only the explicitly scoped design source into Design Evidence v1; keep read, export, and write permissions separate."

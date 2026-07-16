@@ -44,7 +44,15 @@ def required_platform_capabilities(platform: str, task_type: str, disciplines: l
         capabilities = [f"implementation.{platform}", f"verification.{platform}.affected-tests"]
     if "design" in disciplines:
         design_capabilities = ["design.apple.source"] if platform == "apple" else []
-        design_capabilities.extend(["design.system", "design.ir.compile"])
+        design_capabilities.extend(
+            [
+                "design.evidence.normalize",
+                "design.system",
+                "design.ir.compile",
+                "design.registry.resolve",
+                "design.packet.slice",
+            ]
+        )
         if platform == "apple":
             design_capabilities.append("design.apple.binding")
         capabilities = [*design_capabilities, *capabilities]

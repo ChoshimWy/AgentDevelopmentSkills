@@ -13,6 +13,14 @@ from typing import Any
 
 from .canonical_json import sha256
 from .models import ContractError, NodeStatus, require_fields, require_version
+from .design.contracts import (
+    validate_canonical_ui_ir,
+    validate_design_agent_packet,
+    validate_design_evidence,
+    validate_design_source_request,
+    validate_design_system_registry,
+    validate_ui_validation_report,
+)
 
 
 LEGAL_NODE_TRANSITIONS = {
@@ -1181,6 +1189,10 @@ VALIDATORS: dict[str, Callable[[dict[str, Any]], None]] = {
     "approval-record": validate_approval_record,
     "capability-contract": validate_capability_contract,
     "delivery-report": validate_delivery_report,
+    "design-agent-packet": validate_design_agent_packet,
+    "design-evidence": validate_design_evidence,
+    "design-source-request": validate_design_source_request,
+    "design-system-registry": validate_design_system_registry,
     "install-plan": validate_install_plan,
     "node-attempt": validate_node_attempt,
     "plugin-manifest": validate_manifest,
@@ -1189,6 +1201,8 @@ VALIDATORS: dict[str, Callable[[dict[str, Any]], None]] = {
     "resource-event": validate_resource_event,
     "run-ledger": validate_run_ledger,
     "workflow-plan": validate_workflow_plan,
+    "canonical-ui-ir": validate_canonical_ui_ir,
+    "ui-validation-report": validate_ui_validation_report,
     "worktree-session-context": validate_worktree_session_context,
     "worktree-session-gate": validate_worktree_session_gate,
     "worktree-session-list": validate_worktree_session_list,

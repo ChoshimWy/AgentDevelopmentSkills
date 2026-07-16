@@ -1,17 +1,23 @@
 {
   "bindings": {
+    "design.evidence.normalize": {"kind": "skill", "mode": "normalize", "name": "design-source-gateway"},
     "design.ir.compile": {"kind": "skill", "mode": "normalize", "name": "design-ir-compiler"},
+    "design.packet.slice": {"kind": "skill", "mode": "packet", "name": "design-ir-compiler"},
+    "design.registry.resolve": {"kind": "skill", "mode": "registry", "name": "design-ir-compiler"},
     "design.system": {"kind": "skill", "mode": "design-system", "name": "ui-ux-design-system"}
   },
   "capabilities": [
+    {"concurrency_keys": [], "id": "design.evidence.normalize", "idempotent": true, "permission_profile": "repository-read-only", "side_effects": [], "version": "1.0"},
     {"concurrency_keys": [], "id": "design.system", "idempotent": true, "permission_profile": "repository-read-only", "side_effects": [], "version": "1.0"},
-    {"concurrency_keys": ["repository-write:{target-root}"], "id": "design.ir.compile", "idempotent": true, "permission_profile": "project-write", "side_effects": ["project-files"], "version": "1.0"}
+    {"concurrency_keys": ["repository-write:{target-root}"], "id": "design.ir.compile", "idempotent": true, "permission_profile": "project-write", "side_effects": ["project-files"], "version": "1.0"},
+    {"concurrency_keys": ["repository-write:{target-root}"], "id": "design.registry.resolve", "idempotent": true, "permission_profile": "project-write", "side_effects": ["project-files"], "version": "1.0"},
+    {"concurrency_keys": ["repository-write:{target-root}"], "id": "design.packet.slice", "idempotent": true, "permission_profile": "project-write", "side_effects": ["project-files"], "version": "1.0"}
   ],
   "conflicts": [],
   "detection": {"medium": [], "strong": [], "weak": []},
   "id": "design",
   "installation": {
-    "asset_roots": ["assets"],
+    "asset_roots": ["assets", "contracts"],
     "instruction_fragments": [],
     "skill_roots": ["skills"]
   },

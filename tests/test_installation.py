@@ -141,6 +141,7 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(skill_packages["apple-code-review"], "apple")
         self.assertEqual(skill_packages["ui-ux-design-system"], "design")
         self.assertEqual(skill_packages["design-ir-compiler"], "design")
+        self.assertEqual(skill_packages["design-source-gateway"], "design")
         self.assertEqual(skill_packages["apple-design-source"], "apple")
         self.assertEqual(skill_packages["apple-design-context-compiler"], "apple")
         self.assertEqual(len(skill_packages), len(first.plan["skills"]))
@@ -152,7 +153,15 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(first.plan["bindings"]["reporting.delivery"]["package"], "workflow")
         self.assertEqual(first.plan["bindings"]["design.system"]["package"], "design")
         self.assertEqual(first.plan["bindings"]["design.ir.compile"]["package"], "design")
+        self.assertEqual(first.plan["bindings"]["design.evidence.normalize"]["package"], "design")
+        self.assertEqual(first.plan["bindings"]["design.registry.resolve"]["package"], "design")
+        self.assertEqual(first.plan["bindings"]["design.packet.slice"]["package"], "design")
         self.assertEqual(first.plan["bindings"]["design.apple.binding"]["package"], "apple")
+        design_package = next(item for item in first.plan["packages"] if item["id"] == "design")
+        self.assertIn(
+            "contracts/product-design-bootstrap/manifest.json",
+            {item["path"] for item in design_package["files"]},
+        )
         self.assertEqual(first.plan["lock_schema_version"], "2.0")
         self.assertEqual(
             first.plan["asset_summary"]["content_sha256"], sha256(first.plan["assets"])

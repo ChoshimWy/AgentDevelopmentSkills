@@ -39,9 +39,9 @@ class MigrationAuditTests(unittest.TestCase):
         self.assertEqual(
             [(item["id"], len(item["files"])) for item in self.inventory["packages"]],
             [
-                ("apple", 234),
+                ("apple", 236),
                 ("codex", 9),
-                ("design", 33),
+                ("design", 42),
                 ("documentation", 8),
                 ("git", 9),
                 ("review", 4),
