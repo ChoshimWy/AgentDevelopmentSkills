@@ -58,6 +58,7 @@ class InstallScriptTests(unittest.TestCase):
             explicit_python = Path(directory) / "python with spaces"
             explicit_python.write_text(
                 "#!/bin/sh\n"
+                "if [ \"${1:-}\" = \"-c\" ]; then exit 0; fi\n"
                 "printf '%s\\n' \"$@\" > \"$AGENT_SKILLS_TEST_MARKER\"\n",
                 encoding="utf-8",
             )
@@ -80,6 +81,77 @@ class InstallScriptTests(unittest.TestCase):
             invoked_arguments = marker.read_text(encoding="utf-8").splitlines()
             self.assertEqual(invoked_arguments[0], str(ROOT / "scripts/install_local.py"))
             self.assertEqual(invoked_arguments[1:], ["--platform", "apple", "--dry-run"])
+
+    def test_wrapper_skips_legacy_python_and_uses_versioned_interpreter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "selected-python.txt"
+            legacy_python = root / "python3"
+            legacy_python.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = \"-c\" ]; then exit 1; fi\n"
+                "exit 91\n",
+                encoding="utf-8",
+            )
+            legacy_python.chmod(0o755)
+            compatible_python = root / "python3.15"
+            compatible_python.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = \"-c\" ]; then exit 0; fi\n"
+                "printf '%s\\n' \"$@\" > \"$AGENT_SKILLS_TEST_MARKER\"\n",
+                encoding="utf-8",
+            )
+            compatible_python.chmod(0o755)
+            environment = {
+                key: value for key, value in os.environ.items()
+                if key != "AGENT_SKILLS_PYTHON"
+            }
+            environment.update({
+                "AGENT_SKILLS_TEST_MARKER": str(marker),
+                "PATH": f"{root}:/usr/bin:/bin",
+            })
+
+            completed = subprocess.run(
+                ["/bin/bash", str(INSTALL), "--platform", "apple", "--dry-run"],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            invoked_arguments = marker.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(invoked_arguments[0], str(ROOT / "scripts/install_local.py"))
+            self.assertEqual(invoked_arguments[1:], ["--platform", "apple", "--dry-run"])
+
+    def test_wrapper_rejects_invalid_explicit_python_before_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "installer-invoked"
+            old_python = root / "python3.9"
+            old_python.write_text(
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = \"-c\" ]; then exit 1; fi\n"
+                "touch \"$AGENT_SKILLS_TEST_MARKER\"\n",
+                encoding="utf-8",
+            )
+            old_python.chmod(0o755)
+            completed = subprocess.run(
+                ["/bin/bash", str(INSTALL), "--platform", "apple", "--dry-run"],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "AGENT_SKILLS_PYTHON": str(old_python),
+                    "AGENT_SKILLS_TEST_MARKER": str(marker),
+                },
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("must point to an executable Python 3.11 or newer", completed.stderr)
+            self.assertFalse(marker.exists())
 
     def test_installer_rejects_old_python_before_importing_project_modules(self) -> None:
         source = (ROOT / "scripts/install_local.py").read_text(encoding="utf-8")

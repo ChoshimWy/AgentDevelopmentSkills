@@ -1,8 +1,69 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PYTHON_BIN="${AGENT_SKILLS_PYTHON:-python3}"
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
+
+python_is_compatible() {
+    "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
+}
+
+resolve_python() {
+    local candidate directory resolved
+    for candidate in python3; do
+        resolved="$(command -v "$candidate" 2>/dev/null || true)"
+        if [[ -n "$resolved" ]] && python_is_compatible "$resolved"; then
+            printf '%s\n' "$resolved"
+            return 0
+        fi
+    done
+
+    local path_directories=()
+    IFS=':' read -r -a path_directories <<< "${PATH:-}"
+    for directory in "${path_directories[@]}"; do
+        [[ -n "$directory" ]] || continue
+        for candidate in "$directory"/python3.*; do
+            [[ -e "$candidate" ]] || continue
+            [[ "${candidate##*/}" =~ ^python3\.[0-9]+$ ]] || continue
+            if [[ -x "$candidate" ]] && python_is_compatible "$candidate"; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
+    done
+
+    local common_candidates="${AGENT_SKILLS_COMMON_PYTHON_CANDIDATES:-/opt/homebrew/bin/python3:/usr/local/bin/python3:$HOME/.local/bin/python3:$HOME/.pyenv/shims/python3}"
+    local common_paths=()
+    IFS=':' read -r -a common_paths <<< "$common_candidates"
+    for candidate in "${common_paths[@]}"; do
+        if [[ -x "$candidate" ]] && python_is_compatible "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [[ -n "${AGENT_SKILLS_PYTHON:-}" ]]; then
+    if [[ "$AGENT_SKILLS_PYTHON" == */* ]]; then
+        PYTHON_BIN="$AGENT_SKILLS_PYTHON"
+    else
+        PYTHON_BIN="$(command -v "$AGENT_SKILLS_PYTHON" 2>/dev/null || true)"
+    fi
+    if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]] || ! python_is_compatible "$PYTHON_BIN"; then
+        printf '%s\n' \
+            "AGENT_SKILLS_PYTHON must point to an executable Python 3.11 or newer: $AGENT_SKILLS_PYTHON" \
+            >&2
+        exit 1
+    fi
+elif ! PYTHON_BIN="$(resolve_python)"; then
+    printf '%s\n' \
+        "AgentDevelopmentSkills could not find Python 3.11 or newer." \
+        "Checked python3, versioned python3.x commands on PATH, Homebrew, ~/.local/bin, and pyenv shims." \
+        "Install a compatible interpreter or set AGENT_SKILLS_PYTHON to its absolute path." \
+        "The installer will not silently modify the system Python or run an unverified runtime installer." \
+        >&2
+    exit 1
+fi
 
 # Source-checkout fast path. The hosted/piped script has no repository sibling.
 if [[ -n "$SCRIPT_SOURCE" ]]; then

@@ -92,7 +92,7 @@ AgentDevelopmentSkills/
 
 ## 环境要求
 
-- Python 3.11+
+- Python 3.11+；`install.sh` 会自动跳过系统旧版 `python3`，并探测 PATH 中任意兼容的 `python3.x`、Homebrew、`~/.local/bin` 与 pyenv；也可用 `AGENT_SKILLS_PYTHON` 显式指定并提前校验
 - Runtime 无第三方依赖
 - 构建后端：`setuptools>=68`
 

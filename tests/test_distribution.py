@@ -343,7 +343,8 @@ class DistributionTests(unittest.TestCase):
         powershell = (ROOT / "install.ps1").read_text(encoding="utf-8")
         self.assertIn("scripts/install_local.py", shell)
         self.assertIn("bootstrap_install.py", shell)
-        self.assertNotIn("python3.14", shell)
+        self.assertIn("resolve_python", shell)
+        self.assertIn("sys.version_info >= (3, 11)", shell)
         self.assertIn("bootstrap_install.py", powershell)
         self.assertIn("AGENT_SKILLS_RELEASE_MANIFEST_URL", powershell)
         self.assertIn("ResponseHeadersRead", powershell)
@@ -371,6 +372,7 @@ class DistributionTests(unittest.TestCase):
             encoding="utf-8",
         )
         fake_curl.chmod(0o755)
+        (fake_bin / "python3.15").symlink_to(sys.executable)
         target = self.root / "piped-target"
         completed = subprocess.run(
             ["/bin/bash", "-s", "--", "--target-root", str(target), "--platform", "apple", "--dry-run"],
@@ -378,7 +380,6 @@ class DistributionTests(unittest.TestCase):
             env={
                 **os.environ,
                 "AGENT_SKILLS_ALLOW_FILE_URL": "1",
-                "AGENT_SKILLS_PYTHON": sys.executable,
                 "AGENT_SKILLS_RELEASE_BASE_URL": "https://release.example.invalid",
                 "AGENT_SKILLS_RELEASE_MANIFEST_URL": (self.fixture_release / "release-manifest.json").as_uri(),
                 "AGENT_SKILLS_TEST_BOOTSTRAP": str(ROOT / "scripts/bootstrap_install.py"),
@@ -397,6 +398,35 @@ class DistributionTests(unittest.TestCase):
             report["arguments"],
             ["--target-root", str(target), "--platform", "apple", "--dry-run"],
         )
+
+    @unittest.skipIf(os.name == "nt", "POSIX pipe bootstrap is covered on macOS/Linux")
+    def test_piped_posix_bootstrap_without_compatible_python_fails_before_download(self) -> None:
+        fake_bin = self.root / "old-python-only"
+        fake_bin.mkdir(exist_ok=True)
+        old_python = fake_bin / "python3"
+        old_python.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        old_python.chmod(0o755)
+        environment = {
+            key: value for key, value in os.environ.items()
+            if key != "AGENT_SKILLS_PYTHON"
+        }
+        environment.update({
+            "AGENT_SKILLS_COMMON_PYTHON_CANDIDATES": str(self.root / "missing-python"),
+            "AGENT_SKILLS_RELEASE_MANIFEST_URL": "https://127.0.0.1:1/must-not-download",
+            "PATH": str(fake_bin),
+        })
+        completed = subprocess.run(
+            ["/bin/bash", "-s", "--", "--dry-run"],
+            cwd=self.root,
+            env=environment,
+            input=(ROOT / "install.sh").read_text(encoding="utf-8"),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("could not find Python 3.11 or newer", completed.stderr)
+        self.assertNotIn("Connection refused", completed.stderr)
 
     @unittest.skipIf(os.name == "nt", "POSIX pipe bootstrap is covered on macOS/Linux")
     def test_piped_posix_bootstrap_rejects_tampered_shared_core_before_execution(self) -> None:
