@@ -14,3 +14,4 @@ run-ledger.jsonl
 # Local/internal development documentation
 AGENTS.md
 docs/implementation/
+docs/*.html
