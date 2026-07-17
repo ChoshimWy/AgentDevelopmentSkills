@@ -21,6 +21,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPOSITORY = "https://github.com/ChoshimWy/AgentDevelopmentSkills"
 RELEASE_ROOTS = (
+    "crates",
     "disciplines",
     "migration",
     "platforms",
@@ -34,13 +35,21 @@ RELEASE_ROOTS = (
 RELEASE_FILES = (
     ".github/workflows/conformance.yml",
     ".github/workflows/publish-release.yml",
+    "Cargo.lock",
+    "Cargo.toml",
     "LICENSE",
     "NOTICE",
     "README.md",
+    "README.zh-CN.md",
     "agent_build_backend.py",
+    "docs/architecture.md",
+    "docs/multi-session-worktree.md",
+    "docs/rust-migration.md",
+    "docs/skill-naming.md",
     "install.ps1",
     "install.sh",
     "pyproject.toml",
+    "rust-toolchain.toml",
     "skill-naming-policy.json",
     "uninstall.sh",
 )

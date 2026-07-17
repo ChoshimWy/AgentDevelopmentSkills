@@ -1,0 +1,29 @@
+[workspace]
+members = [
+    "crates/agent-contracts",
+    "crates/agent-skills",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/ChoshimWy/AgentDevelopmentSkills"
+rust-version = "1.97"
+
+[workspace.dependencies]
+clap = { version = "4.5.54", features = ["derive"] }
+hex = "0.4.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.149", features = ["arbitrary_precision", "unbounded_depth"] }
+serde_stacker = "0.1.14"
+sha2 = "0.10.9"
+thiserror = "2.0.17"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "deny"

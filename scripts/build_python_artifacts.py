@@ -21,15 +21,17 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOTS = (
-    "disciplines", "migration", "platforms", "providers", "runtime-configs",
+    "crates", "disciplines", "migration", "platforms", "providers", "runtime-configs",
     "schemas", "scripts", "src", "tests",
 )
 DATA_FILES = (
     ".github/workflows/conformance.yml", ".github/workflows/publish-release.yml",
-    "LICENSE", "NOTICE",
-    "README.md", "agent_build_backend.py",
+    "Cargo.lock", "Cargo.toml", "LICENSE", "NOTICE",
+    "README.md", "README.zh-CN.md", "agent_build_backend.py",
+    "docs/architecture.md", "docs/multi-session-worktree.md",
+    "docs/rust-migration.md", "docs/skill-naming.md",
     "pyproject.toml", "skill-naming-policy.json",
-    "install.sh", "install.ps1", "uninstall.sh",
+    "install.sh", "install.ps1", "rust-toolchain.toml", "uninstall.sh",
 )
 IGNORED_NAMES = {".DS_Store", "__pycache__"}
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)

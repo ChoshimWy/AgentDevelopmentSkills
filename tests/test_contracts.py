@@ -5,7 +5,12 @@ import unittest
 
 from tests.support import ROOT  # noqa: F401
 
-from agent_workflow.canonical_json import dumps, sha256
+from agent_workflow.canonical_json import (
+    MAX_CANONICAL_INTEGER_DIGITS,
+    MAX_CANONICAL_JSON_DEPTH,
+    dumps,
+    sha256,
+)
 from agent_workflow.contracts import validate
 from agent_workflow.models import ContractError
 
@@ -18,6 +23,21 @@ class CanonicalJSONTests(unittest.TestCase):
     def test_nan_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             dumps({"value": math.nan})
+
+    def test_integer_and_nesting_limits_are_fail_closed(self) -> None:
+        self.assertTrue(
+            dumps({"value": int("9" * MAX_CANONICAL_INTEGER_DIGITS)})
+        )
+        with self.assertRaisesRegex(ValueError, "maximum"):
+            dumps({"value": 10 ** MAX_CANONICAL_INTEGER_DIGITS})
+
+        value: object = 0
+        for _ in range(MAX_CANONICAL_JSON_DEPTH):
+            value = [value]
+        self.assertTrue(dumps(value))
+        value = [value]
+        with self.assertRaisesRegex(ValueError, "nesting depth"):
+            dumps(value)
 
 
 class ContractTests(unittest.TestCase):

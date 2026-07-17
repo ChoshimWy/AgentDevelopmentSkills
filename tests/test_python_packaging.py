@@ -69,6 +69,11 @@ class PythonPackagingTests(unittest.TestCase):
             source = next(extracted.iterdir())
             self.assertTrue((source / ".github/workflows/conformance.yml").is_file())
             self.assertTrue((source / ".github/workflows/publish-release.yml").is_file())
+            self.assertTrue((source / "Cargo.lock").is_file())
+            self.assertTrue((source / "Cargo.toml").is_file())
+            self.assertTrue((source / "crates/agent-contracts/src/lib.rs").is_file())
+            self.assertTrue((source / "docs/rust-migration.md").is_file())
+            self.assertTrue((source / "rust-toolchain.toml").is_file())
             rebuilt = root / "rebuilt"
             completed = subprocess.run(
                 [sys.executable, str(source / "scripts/build_python_artifacts.py"), "--output", str(rebuilt)],

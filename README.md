@@ -9,17 +9,19 @@ AgentDevelopmentSkills is an offline-first, fail-closed workflow core for coding
 - Transactional install, upgrade, rollback, doctor, and uninstall workflows
 - Cross-platform packages for Apple and Desktop; Android, Web, and Backend remain explicit bootstrap-only targets
 - Reproducible Python wheels and sdists for Python 3.11–3.14
+- A compatibility-gated, incremental migration from Python to Rust
 - Signed release review, provenance, SBOM, and fail-closed release gates
 - GitHub Pages control plane with immutable GitHub Release assets
 - No telemetry, credential collection, or implicit remote execution
 
 ## Status
 
-The implementation and validation suite are complete. The repository now carries an MIT `LICENSE`, a `NOTICE`, and verified migration-audit hashes. Public release publication remains gated on an external release signature and GitHub environment approval. GitHub Pages has not been deployed yet.
+The current Python implementation and validation suite are complete. An incremental Rust migration is now in progress: Rust components remain parallel and non-default until their behavior is proven byte-for-byte compatible with the existing contracts. The repository carries an MIT `LICENSE`, a `NOTICE`, and verified migration-audit hashes. Public release publication remains gated on an external release signature and GitHub environment approval. GitHub Pages has not been deployed yet.
 
 ## Requirements
 
 - Python 3.11 or newer
+- Rust 1.97.1 for native migration development only
 - macOS, Linux, or WSL2 for the production bootstrap path
 - Windows bootstrap is validated in CI but is not yet a production install target
 
@@ -71,11 +73,26 @@ Run focused tests:
 PYTHONPATH=src python3 -m unittest tests.test_pages_distribution tests.test_github_publication
 ```
 
+Validate the current Rust compatibility layer:
+
+```bash
+cargo fmt --check
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+AGENT_SKILLS_RUST_COMPATIBILITY=1 \
+  PYTHONPATH=src python3 -m unittest tests.test_rust_compatibility -v
+```
+
+The migration sequence and cutover gates are documented in
+[`docs/rust-migration.md`](docs/rust-migration.md). The Python CLI remains the
+production entry point until every relevant differential test and release gate
+passes.
+
 ## Release governance
 
 The `Publish verified release` workflow only accepts a successful qualification run from the protected `main` branch at the current workflow revision. It re-runs the final gate, rejects existing tags and releases, creates tags atomically, verifies Pages and Release assets by hash, and uses pinned GitHub Actions with job-level least privilege.
 
-Before the first public release, repository administrators must configure branch protection, the `release` and `github-pages` environments, required reviewers, and the external review trust store. License/NOTICE evidence is now present and verified. See [`README.zh-CN.md`](README.zh-CN.md) for the Chinese guide and [`docs/architecture.md`](docs/architecture.md) for the public architecture overview.
+Before the first public release, repository administrators must configure branch protection, the `release` and `github-pages` environments, required reviewers, and the external review trust store. License/NOTICE evidence is now present and verified. See [`README.zh-CN.md`](README.zh-CN.md) for the Chinese guide, [`docs/architecture.md`](docs/architecture.md) for the public architecture overview, and [`docs/rust-migration.md`](docs/rust-migration.md) for the Rust migration plan.
 
 ## License
 

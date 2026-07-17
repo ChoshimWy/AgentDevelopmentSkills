@@ -257,6 +257,11 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(any(name.startswith(prefix + "disciplines/") for name in names))
         self.assertIn(prefix + ".github/workflows/conformance.yml", names)
         self.assertIn(prefix + ".github/workflows/publish-release.yml", names)
+        self.assertIn(prefix + "Cargo.lock", names)
+        self.assertIn(prefix + "Cargo.toml", names)
+        self.assertIn(prefix + "crates/agent-contracts/src/lib.rs", names)
+        self.assertIn(prefix + "docs/rust-migration.md", names)
+        self.assertIn(prefix + "rust-toolchain.toml", names)
         self.assertIn(prefix + "scripts/validate_github_publication.py", names)
         for marker in (
             b"-----BEGIN " + b"PRIVATE KEY-----",
