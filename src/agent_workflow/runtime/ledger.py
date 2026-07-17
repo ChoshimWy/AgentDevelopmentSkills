@@ -83,7 +83,11 @@ class RunLedger:
         elif event_type == "run-started":
             if value["plan_fingerprint"] != self.value["plan_fingerprint"]:
                 raise ContractError("run-started fingerprint does not match ledger")
+            if value.get("package_lock_hash", "") != self.value["package_lock_hash"]:
+                raise ContractError("run-started package lock does not match ledger")
         elif event_type == "run-resumed":
+            if value.get("package_lock_hash", "") != self.value["package_lock_hash"]:
+                raise ContractError("run-resumed package lock does not match ledger")
             self.value["final_status"] = "active"
 
     def finalize(self, status: str) -> dict[str, Any]:
@@ -99,7 +103,13 @@ class RunLedger:
         started = next((event for event in events if event["event_type"] == "run-started"), None)
         if started and started["value"]["plan_fingerprint"] != plan_fingerprint:
             raise ContractError("cannot resume ledger with a different plan fingerprint")
-        ledger = RunLedger(plan_fingerprint, path=None, run_id=run_id)
+        package_lock_hash = started["value"].get("package_lock_hash", "") if started else ""
+        ledger = RunLedger(
+            plan_fingerprint,
+            path=None,
+            package_lock_hash=package_lock_hash,
+            run_id=run_id,
+        )
         for event in events:
             if event["run_id"] != ledger.value["run_id"]:
                 raise ValueError("ledger contains multiple run ids")

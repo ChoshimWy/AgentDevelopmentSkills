@@ -1,6 +1,7 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = []
+build-backend = "agent_build_backend"
+backend-path = ["."]
 
 [project]
 name = "agent-development-skills"
@@ -13,17 +14,3 @@ dependencies = []
 agent-skills = "agent_workflow.cli:main"
 agent-session = "agent_workflow.worktree_sessions.cli:main"
 agent-workflow = "agent_workflow.cli:main"
-
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.data-files]
-"share/agent-workflow/platforms/android" = ["platforms/android/manifest.json"]
-"share/agent-workflow/platforms/apple" = ["platforms/apple/manifest.json"]
-"share/agent-workflow/platforms/backend" = ["platforms/backend/manifest.json"]
-"share/agent-workflow/platforms/core" = ["platforms/core/manifest.json"]
-"share/agent-workflow/platforms/desktop" = ["platforms/desktop/manifest.json"]
-"share/agent-workflow/platforms/web" = ["platforms/web/manifest.json"]

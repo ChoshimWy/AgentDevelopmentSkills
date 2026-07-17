@@ -32,6 +32,7 @@ from platforms.desktop.scripts.desktop_discovery import build_environment_profil
 
 
 OUTCOMES = ("passed", "failed", "blocked", "partial", "cancelled")
+FIXTURE_REPOSITORY_ROOT = "/agent-workflow-fixtures/desktop-tauri"
 
 
 def build(output_root: Path) -> dict:
@@ -263,13 +264,25 @@ def _desktop_environment_facts() -> dict:
 
 def _fixture_workflow_plan() -> dict:
     registry = ManifestRegistry.from_directory(ROOT / "platforms")
-    profile = DiscoveryEngine(registry).discover(ROOT / "tests" / "fixtures" / "desktop-tauri")
+    profile = _canonical_fixture_profile(
+        DiscoveryEngine(registry).discover(ROOT / "tests" / "fixtures" / "desktop-tauri")
+    )
     policy = PolicyResolver().resolve(
         profile,
         "执行 Desktop Bug 回归测试",
         explicit_platforms=["desktop"],
     )
     return PlanCompiler(registry).compile(profile, policy)
+
+
+def _canonical_fixture_profile(profile: dict) -> dict:
+    # Discovery intentionally records absolute paths for a real repository.  Golden
+    # fixtures, however, must remain identical after the source distribution is
+    # relocated, so replace the two location-bearing fields with a stable fixture
+    # identity before the profile is fingerprinted by PlanCompiler.
+    profile["explicit_context"]["cwd"] = FIXTURE_REPOSITORY_ROOT
+    profile["repository"]["root"] = FIXTURE_REPOSITORY_ROOT
+    return profile
 
 
 def _fixture_run_ledger(workflow_plan: dict, run_id: str, verification_status: str) -> dict:

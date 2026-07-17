@@ -45,6 +45,50 @@ _REPOSITORY_PATCH = re.compile(r"^repository-patch:[0-9a-f]{64}$")
 _SESSION_SOURCE = re.compile(r"^session-source:[0-9a-f]{64}$")
 
 
+def validate_activation_lock(value: dict[str, Any]) -> None:
+    """Validate both readable activation Lock generations.
+
+    Version 1 remains readable only so an existing installation can be
+    diagnosed, migrated, rolled back, or uninstalled. New writers emit v2.
+    """
+
+    if not isinstance(value, dict):
+        raise ContractError("activation-lock must be an object")
+    version = value.get("schema_version")
+    expected = {"schema_version", "manager", "files"}
+    if version == "2.0":
+        expected.add("handler")
+    elif version != "1.0":
+        raise ContractError(f"unsupported activation-lock schema_version: {version!r}")
+    if set(value) != expected:
+        raise ContractError("activation-lock fields differ from its versioned contract")
+    if value.get("manager") != "agent-development-skills":
+        raise ContractError("activation-lock manager is invalid")
+    if version == "2.0" and value.get("handler") != "core.source-activation.apple-codex-v1":
+        raise ContractError("activation-lock handler is invalid")
+    files = value.get("files")
+    if not isinstance(files, list):
+        raise ContractError("activation-lock files must be an array")
+    paths: list[str] = []
+    for entry in files:
+        if not isinstance(entry, dict) or set(entry) != {"mode", "path", "sha256"}:
+            raise ContractError("activation-lock file entry is invalid")
+        if (
+            not isinstance(entry["path"], str)
+            or not entry["path"]
+            or entry["path"].startswith("/")
+            or ".." in PurePosixPath(entry["path"]).parts
+        ):
+            raise ContractError("activation-lock file path is invalid")
+        if not isinstance(entry["mode"], int) or isinstance(entry["mode"], bool) or not 0 <= entry["mode"] <= 0o777:
+            raise ContractError("activation-lock file mode is invalid")
+        if not isinstance(entry["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]):
+            raise ContractError("activation-lock file hash is invalid")
+        paths.append(entry["path"])
+    if len(paths) != len(set(paths)):
+        raise ContractError("activation-lock file paths must be unique")
+
+
 def _base(value: dict[str, Any], fields: set[str], kind: str) -> None:
     if not isinstance(value, dict):
         raise ContractError(f"{kind} must be an object")
@@ -545,6 +589,19 @@ def validate_resolved_policy(value: dict[str, Any]) -> None:
 
 def validate_workflow_plan(value: dict[str, Any]) -> None:
     _base(value, {"plan_id", "fingerprint", "nodes", "edges", "status"}, "workflow-plan")
+    package_lock_hash = value.get("package_lock_hash")
+    if package_lock_hash is not None and (
+        not isinstance(package_lock_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", package_lock_hash)
+    ):
+        raise ContractError("workflow-plan package_lock_hash is invalid")
+    if package_lock_hash is not None:
+        expected_fingerprint = sha256({
+            key: item for key, item in value.items() if key not in {"fingerprint", "plan_id"}
+        })
+        if value["fingerprint"] != expected_fingerprint:
+            raise ContractError("locked workflow-plan fingerprint mismatch")
+        if value["plan_id"] != f"plan-{expected_fingerprint[:12]}":
+            raise ContractError("locked workflow-plan id mismatch")
     if "workflow" in value:
         require_fields(value["workflow"], {"roles", "checkpoints", "independent_review"}, "workflow-plan.workflow")
     bootstrap_required = value.get("bootstrap_required", [])
@@ -637,6 +694,11 @@ def validate_run_ledger(value: dict[str, Any]) -> None:
         {"run_id", "plan_fingerprint", "node_attempts", "resource_events", "approval_records", "final_status"},
         "run-ledger",
     )
+    package_lock_hash = value.get("package_lock_hash", "")
+    if not isinstance(package_lock_hash, str) or (
+        package_lock_hash and not re.fullmatch(r"[0-9a-f]{64}", package_lock_hash)
+    ):
+        raise ContractError("run-ledger package_lock_hash is invalid")
     for attempt in value["node_attempts"]:
         validate_node_attempt(attempt)
     for event in value["resource_events"]:
@@ -820,7 +882,7 @@ def validate_resource_event(value: dict[str, Any]) -> None:
 
 def validate_approval_record(value: dict[str, Any]) -> None:
     _base(value, {"attempt_id", "action", "reason", "scope", "scope_hash", "status"}, "approval-record")
-    if value["status"] not in {"pending", "granted", "denied", "expired"}:
+    if value["status"] not in {"pending", "granted", "denied", "expired", "revoked"}:
         raise ContractError("approval-record status is invalid")
 
 
@@ -935,6 +997,12 @@ def validate_install_plan(value: dict[str, Any]) -> None:
     if lock_schema_version not in {None, "2.0"}:
         raise ContractError("install-plan lock_schema_version is unsupported")
     is_lock_v2 = lock_schema_version == "2.0"
+    package_lock_hash = value.get("package_lock_hash")
+    if package_lock_hash is not None and (
+        not isinstance(package_lock_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", package_lock_hash)
+    ):
+        raise ContractError("install-plan package_lock_hash is invalid")
+    has_persistent_anchor = package_lock_hash is not None
     if is_lock_v2:
         required_v2 = {
             "asset_summary", "assets", "capability_providers", "resolved_dependencies",
@@ -996,7 +1064,10 @@ def validate_install_plan(value: dict[str, Any]) -> None:
         if selected_package_ids[0] != "core":
             raise ContractError("install-plan core package must be first")
         for item in selected_packages:
-            require_fields(item, {"id", "kind", "version", "selection_reasons"}, "install-plan.selected-package")
+            selected_fields = {"id", "kind", "version", "selection_reasons"}
+            if has_persistent_anchor:
+                selected_fields |= {"core_compatibility", "provider_compatibility", "provider_version"}
+            require_fields(item, selected_fields, "install-plan.selected-package")
             if (
                 item["kind"] not in {"core", "platform", "stack", "discipline", "adapter", "runtime-config"}
                 or not isinstance(item["version"], str)
@@ -1007,6 +1078,19 @@ def validate_install_plan(value: dict[str, Any]) -> None:
                 or len(item["selection_reasons"]) != len(set(item["selection_reasons"]))
             ):
                 raise ContractError("install-plan selected package is invalid")
+            if has_persistent_anchor and (
+                not isinstance(item["core_compatibility"], str)
+                or not _install_version_satisfies(value["core_version"], item["core_compatibility"])
+            ):
+                raise ContractError("install-plan selected package core compatibility is invalid")
+            if has_persistent_anchor and (item["provider_version"] is None) != (item["provider_compatibility"] is None):
+                raise ContractError("install-plan provider compatibility metadata is incomplete")
+            if has_persistent_anchor and item["provider_version"] is not None and (
+                not isinstance(item["provider_version"], str)
+                or not isinstance(item["provider_compatibility"], str)
+                or not _install_version_satisfies(item["provider_version"], item["provider_compatibility"])
+            ):
+                raise ContractError("install-plan provider compatibility is not satisfied")
             package_metadata[item["id"]] = item
             source_sha256 = item.get("source_sha256")
             if is_lock_v2 and source_sha256 is None:
@@ -1134,7 +1218,14 @@ def validate_install_plan(value: dict[str, Any]) -> None:
             "install-plan.instruction-fragment",
         )
         if (
-            fragment["package"] not in package_set
+            not isinstance(fragment["id"], str)
+            or not fragment["id"]
+            or fragment["package"] not in package_set
+            or not isinstance(fragment["scope"], str)
+            or not fragment["scope"]
+            or not isinstance(fragment["order"], int)
+            or isinstance(fragment["order"], bool)
+            or fragment["merge_strategy"] not in {"append", "locked"}
             or not isinstance(fragment["path"], str)
             or not fragment["path"]
             or "\\" in fragment["path"]
@@ -1143,6 +1234,11 @@ def validate_install_plan(value: dict[str, Any]) -> None:
             or not re.fullmatch(r"[0-9a-f]{64}", fragment["sha256"])
         ):
             raise ContractError("install-plan instruction fragment identity is invalid")
+    if instructions["fragments"] != sorted(
+        instructions["fragments"],
+        key=lambda item: (package_positions[item["package"]], item["order"], item["id"]),
+    ):
+        raise ContractError("install-plan instruction fragment order is not canonical")
     if is_lock_v2 and "rule_trace" not in instructions:
         raise ContractError("install-plan lock v2 instruction rule trace is required")
     rule_trace = instructions.get("rule_trace", [])
@@ -1205,11 +1301,463 @@ def validate_install_plan(value: dict[str, Any]) -> None:
                 "package_version": package_metadata[package_id]["version"],
                 "source_sha256": package_records[package_id]["files_sha256"],
             }
+            if "permission_profile" in capability_providers[capability_id]:
+                expected_providers[capability_id]["permission_profile"] = capability_providers[capability_id]["permission_profile"]
+                if not isinstance(expected_providers[capability_id]["permission_profile"], str) or not expected_providers[capability_id]["permission_profile"]:
+                    raise ContractError("install-plan capability provider permission is invalid")
+            elif has_persistent_anchor:
+                raise ContractError("install-plan capability provider permission is required")
         if capability_providers != expected_providers:
             raise ContractError("install-plan capability provider mapping is inconsistent")
     fingerprint_value = {key: item for key, item in value.items() if key not in {"fingerprint", "status"}}
     if value["fingerprint"] != sha256(fingerprint_value):
         raise ContractError("install-plan fingerprint mismatch")
+
+
+def validate_agent_skills_lock(value: dict[str, Any]) -> None:
+    # Local import avoids a module initialization cycle: package_lock reuses the
+    # already-frozen Install Plan validator as its resolver input gate.
+    from .package_lock import validate_package_lock
+
+    validate_package_lock(value)
+
+
+def validate_doctor_report(value: dict[str, Any]) -> None:
+    fields = {
+        "schema_version", "target_root", "status", "environment", "install",
+        "recovery", "checks", "summary", "fingerprint",
+    }
+    _exact_object(value, fields, "doctor-report")
+    require_version(value)
+    if not isinstance(value["target_root"], str) or not value["target_root"]:
+        raise ContractError("doctor-report target_root is invalid")
+    if not isinstance(value["status"], str) or value["status"] not in {"passed", "blocked"}:
+        raise ContractError("doctor-report status is invalid")
+
+    environment = value["environment"]
+    _exact_object(
+        environment,
+        {"python_version", "python_required", "core_version", "schema_root"},
+        "doctor-report.environment",
+    )
+    version_pattern = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
+    if (
+        environment["python_required"] != ">=3.11"
+        or any(
+            not isinstance(environment[field], str) or not version_pattern.fullmatch(environment[field])
+            for field in ("python_version", "core_version")
+        )
+        or not isinstance(environment["schema_root"], str)
+        or not environment["schema_root"]
+    ):
+        raise ContractError("doctor-report environment is invalid")
+
+    install = value["install"]
+    _exact_object(
+        install,
+        {
+            "install_plan_fingerprint", "package_lock_hash", "selected_platforms",
+            "selected_disciplines", "selected_runtime_configs",
+        },
+        "doctor-report.install",
+    )
+    for field in ("install_plan_fingerprint", "package_lock_hash"):
+        digest = install[field]
+        if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise ContractError(f"doctor-report {field} is invalid")
+    for field in ("selected_platforms", "selected_disciplines", "selected_runtime_configs"):
+        items = install[field]
+        if (
+            not isinstance(items, list)
+            or any(not isinstance(item, str) or not item for item in items)
+            or len(items) != len(set(items))
+        ):
+            raise ContractError(f"doctor-report {field} is invalid")
+
+    recovery = value["recovery"]
+    _exact_object(recovery, {"status", "candidates"}, "doctor-report.recovery")
+    if (
+        not isinstance(recovery["status"], str)
+        or recovery["status"] not in {"clean", "attention", "unknown"}
+        or not isinstance(recovery["candidates"], list)
+    ):
+        raise ContractError("doctor-report recovery is invalid")
+    recovery_paths: list[str] = []
+    for candidate in recovery["candidates"]:
+        _exact_object(candidate, {"kind", "path"}, "doctor-report.recovery.candidate")
+        if (
+            not isinstance(candidate["kind"], str)
+            or candidate["kind"] not in {
+                "install-backup", "install-stage", "lifecycle-lock", "uninstall-backup"
+            }
+            or not isinstance(candidate["path"], str)
+            or not candidate["path"]
+        ):
+            raise ContractError("doctor-report recovery candidate is invalid")
+        recovery_paths.append(candidate["path"])
+    if recovery_paths != sorted(set(recovery_paths)):
+        raise ContractError("doctor-report recovery candidates must be sorted and unique")
+    if (
+        (recovery["status"] == "clean" and recovery_paths)
+        or (recovery["status"] == "attention" and not recovery_paths)
+        or (recovery["status"] == "unknown" and recovery_paths)
+    ):
+        raise ContractError("doctor-report recovery status differs from candidates")
+
+    checks = value["checks"]
+    if not isinstance(checks, list) or not checks:
+        raise ContractError("doctor-report checks must not be empty")
+    check_ids: list[str] = []
+    statuses = {"passed": 0, "failed": 0, "skipped": 0, "warning": 0}
+    categories = {
+        "environment", "filesystem", "install", "lock", "schema", "package",
+        "skill", "instructions", "binding", "permission", "activation", "recovery",
+    }
+    for check in checks:
+        _exact_object(check, {"id", "category", "status", "summary", "details"}, "doctor-report.check")
+        if (
+            not isinstance(check["id"], str)
+            or not re.fullmatch(r"[a-z][a-z0-9.-]*", check["id"])
+            or not isinstance(check["category"], str)
+            or check["category"] not in categories
+            or not isinstance(check["status"], str)
+            or check["status"] not in statuses
+            or not isinstance(check["summary"], str)
+            or not check["summary"]
+            or not isinstance(check["details"], dict)
+        ):
+            raise ContractError("doctor-report check is invalid")
+        check_ids.append(check["id"])
+        statuses[check["status"]] += 1
+    if len(check_ids) != len(set(check_ids)):
+        raise ContractError("doctor-report check ids must be unique")
+    recovery_check = next((item for item in checks if item["id"] == "recovery.residue"), None)
+    expected_recovery_statuses = {
+        "clean": {"passed"},
+        "attention": {"failed"},
+        "unknown": {"failed", "skipped"},
+    }
+    if recovery_check is None or recovery_check["status"] not in expected_recovery_statuses[recovery["status"]]:
+        raise ContractError("doctor-report recovery state differs from its check")
+    _exact_object(value["summary"], set(statuses), "doctor-report.summary")
+    if any(
+        not isinstance(value["summary"][field], int)
+        or isinstance(value["summary"][field], bool)
+        or value["summary"][field] < 0
+        for field in statuses
+    ):
+        raise ContractError("doctor-report summary counts are invalid")
+    if value["summary"] != statuses:
+        raise ContractError("doctor-report summary differs from checks")
+    if value["status"] != ("blocked" if statuses["failed"] else "passed"):
+        raise ContractError("doctor-report status differs from checks")
+    if value["fingerprint"] != sha256({key: item for key, item in value.items() if key != "fingerprint"}):
+        raise ContractError("doctor-report fingerprint mismatch")
+
+
+def validate_upgrade_conformance_evidence(value: dict[str, Any]) -> None:
+    fields = {
+        "schema_version", "suite", "status", "candidate_package_lock_hash",
+        "schema_inventory_hash", "manifest_count", "negative_contract_count",
+        "test_count", "suite_definition_hash", "runner_sha256", "environment",
+        "command_results", "attestation_key", "fingerprint",
+    }
+    _exact_object(value, fields, "upgrade-conformance-evidence")
+    require_version(value)
+    if value["suite"] != "agent-skills-release-conformance-v1" or value["status"] != "passed":
+        raise ContractError("upgrade-conformance-evidence suite or status is invalid")
+    for field in (
+        "candidate_package_lock_hash", "schema_inventory_hash", "suite_definition_hash",
+        "runner_sha256", "fingerprint",
+        "attestation_key",
+    ):
+        if not isinstance(value[field], str) or not re.fullmatch(r"[0-9a-f]{64}", value[field]):
+            raise ContractError(f"upgrade-conformance-evidence {field} is invalid")
+    for field in ("manifest_count", "negative_contract_count", "test_count"):
+        if not isinstance(value[field], int) or isinstance(value[field], bool) or value[field] < 1:
+            raise ContractError(f"upgrade-conformance-evidence {field} is invalid")
+    environment = value["environment"]
+    _exact_object(environment, {"python", "platform"}, "upgrade-conformance-evidence.environment")
+    if (
+        not isinstance(environment["python"], str)
+        or not re.fullmatch(r"3\.(11|12|13|14)(\.[0-9]+)?", environment["python"])
+        or not isinstance(environment["platform"], str)
+        or not environment["platform"]
+    ):
+        raise ContractError("upgrade-conformance-evidence environment is invalid")
+    results = value["command_results"]
+    if not isinstance(results, list) or not results:
+        raise ContractError("upgrade-conformance-evidence command results are invalid")
+    commands: list[str] = []
+    for result in results:
+        _exact_object(
+            result,
+            {"command", "exit_code", "stdout_sha256", "stderr_sha256"},
+            "upgrade-conformance-evidence.command-result",
+        )
+        if (
+            not isinstance(result["command"], str)
+            or not result["command"]
+            or result["exit_code"] != 0
+            or any(
+                not isinstance(result[field], str) or not re.fullmatch(r"[0-9a-f]{64}", result[field])
+                for field in ("stdout_sha256", "stderr_sha256")
+            )
+        ):
+            raise ContractError("upgrade-conformance-evidence command result is invalid")
+        commands.append(result["command"])
+    if commands != sorted(set(commands)):
+        raise ContractError("upgrade-conformance-evidence command results must be sorted and unique")
+    stable_identity = {
+        key: item
+        for key, item in value.items()
+        if key not in {"attestation_key", "fingerprint"}
+    }
+    stable_identity["command_results"] = [
+        {"command": item["command"], "exit_code": item["exit_code"]}
+        for item in results
+    ]
+    if value["attestation_key"] != sha256(stable_identity):
+        raise ContractError("upgrade-conformance-evidence attestation key mismatch")
+    if value["fingerprint"] != sha256({key: item for key, item in value.items() if key != "fingerprint"}):
+        raise ContractError("upgrade-conformance-evidence fingerprint mismatch")
+
+
+def validate_upgrade_plan(value: dict[str, Any]) -> None:
+    fields = {
+        "schema_version", "action", "target_root", "status", "current", "candidate",
+        "current_selection", "selection", "removed_platforms", "removed_runtime_configs",
+        "changes", "compatibility", "migrations", "upgrade_steps", "approvals_required",
+        "conformance_attestation_key", "external", "rollback", "fingerprint",
+    }
+    _exact_object(value, fields, "upgrade-plan")
+    require_version(value)
+    if value["action"] not in {"partial-uninstall", "upgrade"}:
+        raise ContractError("upgrade-plan action is invalid")
+    if not isinstance(value["target_root"], str) or not value["target_root"]:
+        raise ContractError("upgrade-plan target_root is invalid")
+    if not isinstance(value["status"], str) or value["status"] not in {"planned", "no-change"}:
+        raise ContractError("upgrade-plan status is invalid")
+    for label in ("current", "candidate"):
+        identity = value[label]
+        _exact_object(identity, {"install_plan_fingerprint", "package_lock_hash"}, f"upgrade-plan.{label}")
+        if any(
+            not isinstance(identity[field], str) or not re.fullmatch(r"[0-9a-f]{64}", identity[field])
+            for field in identity
+        ):
+            raise ContractError(f"upgrade-plan {label} identity is invalid")
+    for selection_label in ("current_selection", "selection"):
+        selection = value[selection_label]
+        _exact_object(
+            selection,
+            {"core_only", "platforms", "disciplines", "runtime_configs"},
+            f"upgrade-plan.{selection_label}",
+        )
+        if not isinstance(selection["core_only"], bool):
+            raise ContractError(f"upgrade-plan {selection_label} core_only is invalid")
+        for field in ("platforms", "disciplines", "runtime_configs"):
+            items = selection[field]
+            if (
+                not isinstance(items, list)
+                or any(not isinstance(item, str) or not item for item in items)
+                or items != sorted(set(items))
+            ):
+                raise ContractError(f"upgrade-plan {selection_label} {field} is invalid")
+        if selection["core_only"] != (
+            not selection["platforms"] and not selection["disciplines"] and not selection["runtime_configs"]
+        ):
+            raise ContractError(f"upgrade-plan {selection_label} core_only differs from selection")
+    selection = value["selection"]
+    current_selection = value["current_selection"]
+    for field in ("removed_platforms", "removed_runtime_configs"):
+        items = value[field]
+        if (
+            not isinstance(items, list)
+            or any(not isinstance(item, str) or not item for item in items)
+            or items != sorted(set(items))
+        ):
+            raise ContractError(f"upgrade-plan {field} is invalid")
+    if value["action"] == "upgrade":
+        if value["removed_platforms"] or value["removed_runtime_configs"]:
+            raise ContractError("upgrade action must not contain a removal request")
+    else:
+        if not value["removed_platforms"]:
+            raise ContractError("partial-uninstall requires removed platforms")
+        if (
+            set(value["removed_platforms"]) - set(current_selection["platforms"])
+            or selection["platforms"] != sorted(set(current_selection["platforms"]) - set(value["removed_platforms"]))
+            or set(value["removed_runtime_configs"]) - set(current_selection["runtime_configs"])
+            or selection["runtime_configs"] != sorted(
+                set(current_selection["runtime_configs"]) - set(value["removed_runtime_configs"])
+            )
+            or selection["disciplines"] != current_selection["disciplines"]
+        ):
+            raise ContractError("partial-uninstall candidate differs from its frozen removal request")
+    external = value["external"]
+    _exact_object(
+        external,
+        {"handler", "handler_sha256", "path_count", "paths_sha256"},
+        "upgrade-plan.external",
+    )
+    if (
+        not isinstance(external["handler"], str)
+        or not re.fullmatch(r"(?:none|[A-Za-z0-9._-]+)", external["handler"])
+        or not isinstance(external["path_count"], int)
+        or isinstance(external["path_count"], bool)
+        or external["path_count"] < 0
+        or not isinstance(external["paths_sha256"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", external["paths_sha256"])
+        or not isinstance(external["handler_sha256"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", external["handler_sha256"])
+        or (external["handler"] == "none") != (external["path_count"] == 0)
+    ):
+        raise ContractError("upgrade-plan external lifecycle identity is invalid")
+    if (
+        not isinstance(value["changes"], dict)
+        or not isinstance(value["changes"].get("status"), str)
+        or value["changes"].get("status") not in {"changed", "unchanged"}
+    ):
+        raise ContractError("upgrade-plan changes are invalid")
+    if (value["status"] == "no-change") != (value["changes"]["status"] == "unchanged"):
+        raise ContractError("upgrade-plan status differs from changes")
+    compatibility = value["compatibility"]
+    _exact_object(
+        compatibility,
+        {"mode", "agent_skills_lock", "install_plan_lock"},
+        "upgrade-plan.compatibility",
+    )
+    if compatibility != {
+        "agent_skills_lock": "identity",
+        "install_plan_lock": "identity",
+        "mode": "identity-only",
+    }:
+        raise ContractError("upgrade-plan only supports identity schema compatibility")
+    migrations = value["migrations"]
+    if not isinstance(migrations, list):
+        raise ContractError("upgrade-plan migrations must be an array")
+    for report in migrations:
+        validate_migration_report(report)
+        if report["status"] != "planned":
+            raise ContractError("upgrade-plan migration reports must be planned")
+    migration_identities = [
+        (item["artifact"], item["from_version"], item["to_version"])
+        for item in migrations
+    ]
+    if migration_identities != sorted(set(migration_identities)):
+        raise ContractError("upgrade-plan migrations must be sorted and unique")
+    migration = value["upgrade_steps"]
+    if not isinstance(migration, list):
+        raise ContractError("upgrade-plan upgrade_steps must be an array")
+    migration_keys: list[tuple[str, str, str]] = []
+    for step in migration:
+        _exact_object(step, {"kind", "from", "to"}, "upgrade-plan.upgrade-step")
+        if (
+            not isinstance(step["kind"], str)
+            or step["kind"] not in {"core", "schema", "package", "lock"}
+            or any(not isinstance(step[field], str) or not step[field] for field in ("from", "to"))
+            or step["from"] == step["to"]
+        ):
+            raise ContractError("upgrade-plan upgrade step is invalid")
+        migration_keys.append((step["kind"], step["from"], step["to"]))
+    migration_rank = {"core": 0, "schema": 1, "package": 2, "lock": 3}
+    if migration_keys != sorted(
+        set(migration_keys),
+        key=lambda item: (migration_rank[item[0]], item[1], item[2]),
+    ):
+        raise ContractError("upgrade-plan upgrade steps must be sorted and unique")
+    approvals = value["approvals_required"]
+    approval_pattern = re.compile(r"permission:[A-Za-z0-9._-]+:[A-Za-z0-9._-]+->[A-Za-z0-9._-]+")
+    if (
+        not isinstance(approvals, list)
+        or any(not isinstance(item, str) or not approval_pattern.fullmatch(item) for item in approvals)
+        or approvals != sorted(set(approvals))
+    ):
+        raise ContractError("upgrade-plan approvals_required is invalid")
+    if not isinstance(value["conformance_attestation_key"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", value["conformance_attestation_key"]
+    ):
+        raise ContractError("upgrade-plan conformance attestation key is invalid")
+    rollback = value["rollback"]
+    _exact_object(
+        rollback,
+        {"point_id", "point_fingerprint", "previous_lock_hash"},
+        "upgrade-plan.rollback",
+    )
+    if (
+        not isinstance(rollback["point_id"], str)
+        or not re.fullmatch(r"rollback-[0-9a-f]{12}", rollback["point_id"])
+        or not isinstance(rollback["point_fingerprint"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", rollback["point_fingerprint"])
+        or rollback["previous_lock_hash"] != value["current"]["package_lock_hash"]
+        or rollback["point_id"] != f"rollback-{rollback['previous_lock_hash'][:12]}"
+    ):
+        raise ContractError("upgrade-plan rollback identity is invalid")
+    if value["fingerprint"] != sha256({key: item for key, item in value.items() if key != "fingerprint"}):
+        raise ContractError("upgrade-plan fingerprint mismatch")
+
+
+def validate_migration_report(value: dict[str, Any]) -> None:
+    fields = {
+        "schema_version", "artifact", "from_version", "to_version", "lossless",
+        "steps", "before_sha256", "after_sha256", "status", "fingerprint",
+    }
+    _exact_object(value, fields, "migration-report")
+    require_version(value)
+    for field in ("artifact", "from_version", "to_version"):
+        if not isinstance(value[field], str) or not value[field]:
+            raise ContractError(f"migration-report {field} is invalid")
+    if value["from_version"] == value["to_version"]:
+        if value["steps"]:
+            raise ContractError("identity migration must not contain steps")
+    if not isinstance(value["lossless"], bool) or value["status"] not in {"applied", "planned"}:
+        raise ContractError("migration-report status or lossless flag is invalid")
+    for field in ("before_sha256", "after_sha256", "fingerprint"):
+        if not isinstance(value[field], str) or not re.fullmatch(r"[0-9a-f]{64}", value[field]):
+            raise ContractError(f"migration-report {field} is invalid")
+    if not isinstance(value["steps"], list):
+        raise ContractError("migration-report steps must be an array")
+    expected_from = value["from_version"]
+    all_lossless = True
+    for step in value["steps"]:
+        _exact_object(step, {"from_version", "to_version", "lossless", "changes"}, "migration-report.step")
+        if step["from_version"] != expected_from or step["from_version"] == step["to_version"]:
+            raise ContractError("migration-report step chain is invalid")
+        if not isinstance(step["lossless"], bool):
+            raise ContractError("migration-report step lossless flag is invalid")
+        changes = step["changes"]
+        if (
+            not isinstance(changes, list)
+            or any(not isinstance(item, str) or not item for item in changes)
+            or changes != sorted(set(changes))
+        ):
+            raise ContractError("migration-report step changes are invalid")
+        expected_from = step["to_version"]
+        all_lossless = all_lossless and step["lossless"]
+    if expected_from != value["to_version"] or value["lossless"] != all_lossless:
+        raise ContractError("migration-report path summary is invalid")
+    if value["fingerprint"] != sha256({key: item for key, item in value.items() if key != "fingerprint"}):
+        raise ContractError("migration-report fingerprint mismatch")
+
+
+def validate_rollback_point(value: dict[str, Any]) -> None:
+    fields = {
+        "schema_version", "manager", "point_id", "install_plan_fingerprint",
+        "package_lock_hash", "snapshot_sha256", "external_state_sha256", "fingerprint",
+    }
+    _exact_object(value, fields, "rollback-point")
+    require_version(value)
+    if value["manager"] != "agent-development-skills":
+        raise ContractError("rollback-point manager is invalid")
+    for field in (
+        "install_plan_fingerprint", "package_lock_hash", "snapshot_sha256",
+        "external_state_sha256", "fingerprint",
+    ):
+        if not isinstance(value[field], str) or not re.fullmatch(r"[0-9a-f]{64}", value[field]):
+            raise ContractError(f"rollback-point {field} is invalid")
+    if value["point_id"] != f"rollback-{value['package_lock_hash'][:12]}":
+        raise ContractError("rollback-point id is invalid")
+    if value["fingerprint"] != sha256({key: item for key, item in value.items() if key != "fingerprint"}):
+        raise ContractError("rollback-point fingerprint mismatch")
 
 
 def _validate_install_tree_record(value: dict[str, Any], digest_field: str, label: str) -> None:
@@ -1260,15 +1808,20 @@ def _validate_install_entry(entry: dict[str, Any], label: str) -> None:
 
 
 VALIDATORS: dict[str, Callable[[dict[str, Any]], None]] = {
+    "activation-lock": validate_activation_lock,
+    "agent-skills-lock": validate_agent_skills_lock,
     "approval-record": validate_approval_record,
     "capability-contract": validate_capability_contract,
     "delivery-report": validate_delivery_report,
+    "doctor-report": validate_doctor_report,
+    "rollback-point": validate_rollback_point,
     "design-agent-packet": validate_design_agent_packet,
     "design-evidence": validate_design_evidence,
     "design-source-request": validate_design_source_request,
     "design-system-registry": validate_design_system_registry,
     "defect-report": validate_defect_report,
     "install-plan": validate_install_plan,
+    "migration-report": validate_migration_report,
     "node-attempt": validate_node_attempt,
     "plugin-manifest": validate_manifest,
     "project-profile": validate_project_profile,
@@ -1283,6 +1836,8 @@ VALIDATORS: dict[str, Callable[[dict[str, Any]], None]] = {
     "ui-validation-report": validate_ui_validation_report,
     "test-case": validate_test_case,
     "test-result": validate_test_result,
+    "upgrade-conformance-evidence": validate_upgrade_conformance_evidence,
+    "upgrade-plan": validate_upgrade_plan,
     "worktree-session-context": validate_worktree_session_context,
     "worktree-session-gate": validate_worktree_session_gate,
     "worktree-session-list": validate_worktree_session_list,

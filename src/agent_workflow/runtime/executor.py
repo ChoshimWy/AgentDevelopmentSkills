@@ -10,6 +10,7 @@ from typing import Any
 
 from ..adapters import build_adapter_request, validate_adapter_result
 from ..models import ContractError, NodeStatus
+from ..package_lock import validate_plan_package_lock
 from .approval import ApprovalGate
 from .ledger import RunLedger
 from .scheduler import ResourceScheduler
@@ -37,17 +38,36 @@ class FakeAdapterExecutor:
         plan: dict[str, Any],
         *,
         ledger_path: str | Path | None = None,
+        package_lock: dict[str, Any] | None = None,
         resume: bool = False,
     ) -> dict[str, Any]:
+        if plan.get("package_lock_hash") is not None:
+            if package_lock is None:
+                raise ContractError("locked workflow execution requires the current package Lockfile")
+            validate_plan_package_lock(plan, package_lock)
+        elif package_lock is not None:
+            raise ContractError("workflow plan is not frozen to the supplied package Lockfile")
         ledger_file = Path(ledger_path) if ledger_path else None
         if resume:
             if ledger_file is None or not ledger_file.exists():
                 raise ValueError("resume requires an existing ledger path")
             ledger = RunLedger.replay(ledger_file, plan["fingerprint"])
-            ledger.append("run-resumed", {"plan_fingerprint": plan["fingerprint"]})
+            if ledger.value["package_lock_hash"] != plan.get("package_lock_hash", ""):
+                raise ContractError("cannot resume ledger with a different package lock")
+            ledger.append("run-resumed", {
+                "package_lock_hash": plan.get("package_lock_hash", ""),
+                "plan_fingerprint": plan["fingerprint"],
+            })
         else:
-            ledger = RunLedger(plan["fingerprint"], path=ledger_file)
-            ledger.append("run-started", {"plan_fingerprint": plan["fingerprint"]})
+            ledger = RunLedger(
+                plan["fingerprint"],
+                path=ledger_file,
+                package_lock_hash=plan.get("package_lock_hash", ""),
+            )
+            ledger.append("run-started", {
+                "package_lock_hash": plan.get("package_lock_hash", ""),
+                "plan_fingerprint": plan["fingerprint"],
+            })
         if plan.get("status") == "blocked":
             ledger.append("run-blocked", {"missing_capabilities": plan.get("missing_capabilities", [])})
             return ledger.finalize("blocked")

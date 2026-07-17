@@ -1,0 +1,299 @@
+{
+  "$id": "https://agent-workflow.local/schemas/upgrade-plan-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "enum": [
+        "partial-uninstall",
+        "upgrade"
+      ]
+    },
+    "approvals_required": {
+      "items": {
+        "pattern": "^permission:[A-Za-z0-9._-]+:[A-Za-z0-9._-]+->[A-Za-z0-9._-]+$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "candidate": {
+      "additionalProperties": false,
+      "properties": {
+        "install_plan_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "package_lock_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "install_plan_fingerprint",
+        "package_lock_hash"
+      ],
+      "type": "object"
+    },
+    "changes": {
+      "type": "object"
+    },
+    "compatibility": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_skills_lock": {
+          "const": "identity"
+        },
+        "install_plan_lock": {
+          "const": "identity"
+        },
+        "mode": {
+          "const": "identity-only"
+        }
+      },
+      "required": [
+        "mode",
+        "agent_skills_lock",
+        "install_plan_lock"
+      ],
+      "type": "object"
+    },
+    "conformance_attestation_key": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "current": {
+      "additionalProperties": false,
+      "properties": {
+        "install_plan_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "package_lock_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "install_plan_fingerprint",
+        "package_lock_hash"
+      ],
+      "type": "object"
+    },
+    "current_selection": {
+      "additionalProperties": false,
+      "properties": {
+        "core_only": {
+          "type": "boolean"
+        },
+        "disciplines": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "runtime_configs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "core_only",
+        "platforms",
+        "disciplines",
+        "runtime_configs"
+      ],
+      "type": "object"
+    },
+    "external": {
+      "additionalProperties": false,
+      "properties": {
+        "handler": {
+          "pattern": "^(none|[A-Za-z0-9._-]+)$",
+          "type": "string"
+        },
+        "handler_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "path_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "paths_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "handler",
+        "handler_sha256",
+        "path_count",
+        "paths_sha256"
+      ],
+      "type": "object"
+    },
+    "fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "removed_platforms": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "removed_runtime_configs": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "rollback": {
+      "additionalProperties": false,
+      "properties": {
+        "point_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "point_id": {
+          "pattern": "^rollback-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "previous_lock_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "point_id",
+        "point_fingerprint",
+        "previous_lock_hash"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "selection": {
+      "additionalProperties": false,
+      "properties": {
+        "core_only": {
+          "type": "boolean"
+        },
+        "disciplines": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "runtime_configs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "core_only",
+        "platforms",
+        "disciplines",
+        "runtime_configs"
+      ],
+      "type": "object"
+    },
+    "status": {
+      "enum": [
+        "no-change",
+        "planned"
+      ]
+    },
+    "target_root": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "upgrade_steps": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "core",
+              "schema",
+              "package",
+              "lock"
+            ]
+          },
+          "to": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "migrations": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "action",
+    "target_root",
+    "status",
+    "external",
+    "current",
+    "candidate",
+    "current_selection",
+    "removed_platforms",
+    "removed_runtime_configs",
+    "selection",
+    "changes",
+    "compatibility",
+    "migrations",
+    "upgrade_steps",
+    "approvals_required",
+    "conformance_attestation_key",
+    "rollback",
+    "fingerprint"
+  ],
+  "title": "Upgrade Plan v1",
+  "type": "object"
+}

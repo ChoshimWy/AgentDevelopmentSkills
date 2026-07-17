@@ -1,0 +1,28 @@
+{
+  "$id": "https://agent-workflow.local/schemas/python-artifacts-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {"items": {"$ref": "#/$defs/artifact"}, "minItems": 2, "type": "array"},
+    "fingerprint": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "product": {"const": "agent-development-skills"},
+    "schema_version": {"const": "1.0"},
+    "version": {"pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$", "type": "string"}
+  },
+  "required": ["schema_version", "product", "version", "artifacts", "fingerprint"],
+  "$defs": {
+    "artifact": {
+      "additionalProperties": false,
+      "properties": {
+        "filename": {"minLength": 1, "type": "string"},
+        "kind": {"enum": ["sdist", "wheel"]},
+        "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "size": {"minimum": 1, "type": "integer"}
+      },
+      "required": ["filename", "kind", "sha256", "size"],
+      "type": "object"
+    }
+  },
+  "title": "Python Artifacts v1",
+  "type": "object"
+}

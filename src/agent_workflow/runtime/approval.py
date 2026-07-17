@@ -36,6 +36,16 @@ class ApprovalGate:
         record["status"] = status
         return record
 
+    def revoke(self, record: dict[str, Any], scope: dict[str, Any]) -> dict[str, Any]:
+        """Revoke one exact granted attempt/scope without affecting any other approval."""
+
+        if record.get("status") != "granted":
+            raise ContractError("only a granted approval can be revoked")
+        if sha256(scope) != record.get("scope_hash"):
+            raise ContractError("approval revocation scope differs from the grant")
+        record["status"] = "revoked"
+        return record
+
     @staticmethod
     def is_granted(record: dict[str, Any], attempt_id: str, scope: dict[str, Any]) -> bool:
         return (

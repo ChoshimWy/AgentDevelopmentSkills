@@ -190,6 +190,10 @@
     "selectedPackage": {
       "additionalProperties": false,
       "properties": {
+        "core_compatibility": {
+          "minLength": 1,
+          "type": "string"
+        },
         "id": {
           "minLength": 1,
           "type": "string"
@@ -202,6 +206,15 @@
             "discipline",
             "adapter",
             "runtime-config"
+          ]
+        },
+        "provider_compatibility": {
+          "oneOf": [{"minLength": 1, "type": "string"}, {"type": "null"}]
+        },
+        "provider_version": {
+          "oneOf": [
+            {"pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$", "type": "string"},
+            {"type": "null"}
           ]
         },
         "selection_reasons": {
@@ -328,6 +341,44 @@
           "asset_summary"
         ]
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "package_lock_hash": {}
+        },
+        "required": [
+          "package_lock_hash"
+        ]
+      },
+      "then": {
+        "properties": {
+          "capability_providers": {
+            "additionalProperties": {
+              "properties": {
+                "permission_profile": {}
+              },
+              "required": [
+                "permission_profile"
+              ]
+            }
+          },
+          "selected_packages": {
+            "items": {
+              "properties": {
+                "core_compatibility": {},
+                "provider_compatibility": {},
+                "provider_version": {}
+              },
+              "required": [
+                "core_compatibility",
+                "provider_compatibility",
+                "provider_version"
+              ]
+            }
+          }
+        }
+      }
     }
   ],
   "properties": {
@@ -407,6 +458,10 @@
           },
           "package_version": {
             "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "permission_profile": {
+            "minLength": 1,
             "type": "string"
           },
           "source_sha256": {
@@ -512,6 +567,10 @@
         "type": "string"
       },
       "type": "array"
+    },
+    "package_lock_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
     },
     "manager": {
       "type": "string"

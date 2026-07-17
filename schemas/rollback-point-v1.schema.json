@@ -1,0 +1,49 @@
+{
+  "$id": "https://agent-workflow.local/schemas/rollback-point-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "external_state_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "install_plan_fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "manager": {
+      "const": "agent-development-skills"
+    },
+    "package_lock_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "point_id": {
+      "pattern": "^rollback-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "snapshot_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "manager",
+    "point_id",
+    "install_plan_fingerprint",
+    "package_lock_hash",
+    "snapshot_sha256",
+    "external_state_sha256",
+    "fingerprint"
+  ],
+  "title": "Rollback Point v1",
+  "type": "object"
+}

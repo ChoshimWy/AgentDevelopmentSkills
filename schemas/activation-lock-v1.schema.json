@@ -1,0 +1,25 @@
+{
+  "$id": "https://agent-workflow.local/schemas/activation-lock-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "files": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {"maximum": 511, "minimum": 0, "type": "integer"},
+          "path": {"minLength": 1, "type": "string"},
+          "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"}
+        },
+        "required": ["mode", "path", "sha256"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "manager": {"const": "agent-development-skills"},
+    "schema_version": {"const": "1.0"}
+  },
+  "required": ["schema_version", "manager", "files"],
+  "title": "Activation Lock v1 (deprecated read-only)",
+  "type": "object"
+}

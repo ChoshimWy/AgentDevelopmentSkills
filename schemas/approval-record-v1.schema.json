@@ -8,7 +8,7 @@
     "schema_version": {"const": "1.0"},
     "scope": {"type": "object"},
     "scope_hash": {"type": "string"},
-    "status": {"enum": ["pending", "granted", "denied", "expired"]}
+    "status": {"enum": ["pending", "granted", "denied", "expired", "revoked"]}
   },
   "required": ["schema_version", "attempt_id", "action", "reason", "scope", "scope_hash", "status"],
   "title": "Approval Record v1",

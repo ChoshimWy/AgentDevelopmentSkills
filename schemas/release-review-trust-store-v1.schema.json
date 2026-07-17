@@ -1,0 +1,31 @@
+{
+  "$id": "https://agent-workflow.local/schemas/release-review-trust-store-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "fingerprint": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "keys": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "algorithm": {"const": "rsa-pkcs1v15-sha256"},
+          "exponent": {"const": 65537},
+          "key_id": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+          "modulus_hex": {"maxLength": 2048, "minLength": 512, "pattern": "^[0-9a-f]+$", "type": "string"},
+          "owner": {"minLength": 1, "type": "string"},
+          "scopes": {"contains": {"const": "phase-6-release"}, "items": {"type": "string"}, "type": "array", "uniqueItems": true},
+          "status": {"enum": ["trusted", "revoked"]}
+        },
+        "required": ["algorithm", "key_id", "modulus_hex", "exponent", "owner", "scopes", "status"],
+        "type": "object"
+      },
+      "maxItems": 128,
+      "minItems": 1,
+      "type": "array"
+    },
+    "schema_version": {"const": "1.0"}
+  },
+  "required": ["schema_version", "keys", "fingerprint"],
+  "title": "Release Review Trust Store v1",
+  "type": "object"
+}

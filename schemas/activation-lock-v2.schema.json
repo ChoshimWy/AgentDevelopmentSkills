@@ -1,0 +1,26 @@
+{
+  "$id": "https://agent-workflow.local/schemas/activation-lock-v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "files": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {"maximum": 511, "minimum": 0, "type": "integer"},
+          "path": {"minLength": 1, "type": "string"},
+          "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"}
+        },
+        "required": ["mode", "path", "sha256"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "handler": {"const": "core.source-activation.apple-codex-v1"},
+    "manager": {"const": "agent-development-skills"},
+    "schema_version": {"const": "2.0"}
+  },
+  "required": ["schema_version", "manager", "handler", "files"],
+  "title": "Activation Lock v2",
+  "type": "object"
+}

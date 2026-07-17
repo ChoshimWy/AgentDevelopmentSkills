@@ -8,6 +8,7 @@ from typing import Any
 from ..canonical_json import sha256
 from ..contracts import validate_workflow_plan
 from ..models import ContractError
+from ..package_lock import validate_package_lock, validate_plan_package_lock
 from ..recipes import required_platform_capabilities
 from ..registry import ManifestRegistry
 
@@ -16,7 +17,13 @@ class PlanCompiler:
     def __init__(self, registry: ManifestRegistry) -> None:
         self.registry = registry
 
-    def compile(self, profile: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    def compile(
+        self,
+        profile: dict[str, Any],
+        policy: dict[str, Any],
+        *,
+        package_lock: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         nodes: list[dict[str, Any]] = []
         edges: list[dict[str, str]] = []
         missing: list[str] = []
@@ -173,11 +180,16 @@ class PlanCompiler:
             "status": status,
             "workflow": _workflow_contract(task_type, policy["task"].get("disciplines", [])),
         }
+        if package_lock is not None:
+            validate_package_lock(package_lock)
+            content["package_lock_hash"] = package_lock["fingerprint"]
         if bootstrap_required:
             content["bootstrap_required"] = sorted(bootstrap_required, key=lambda item: item["platform"])
         fingerprint = sha256(content)
         plan = {"fingerprint": fingerprint, "plan_id": f"plan-{fingerprint[:12]}", **content}
         validate_workflow_plan(plan)
+        if package_lock is not None:
+            validate_plan_package_lock(plan, package_lock)
         return plan
 
 

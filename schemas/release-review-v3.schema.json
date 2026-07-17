@@ -1,0 +1,29 @@
+{
+  "$id": "https://agent-workflow.local/schemas/release-review-v3.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "blockers": {"items": {"type": "string"}, "maxItems": 0, "type": "array"},
+    "fingerprint": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "python_compatibility_evidence_fingerprint": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "reviewed_release_identity_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "reviewer": {"const": "independent"},
+    "schema_version": {"const": "3.0"},
+    "scope": {"const": "phase-6-release"},
+    "signature": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {"const": "rsa-pkcs1v15-sha256"},
+        "key_id": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "value_hex": {"maxLength": 2048, "minLength": 512, "pattern": "^[0-9a-f]+$", "type": "string"}
+      },
+      "required": ["algorithm", "key_id", "value_hex"],
+      "type": "object"
+    },
+    "source_revision": {"minLength": 1, "type": "string"},
+    "status": {"const": "approved"}
+  },
+  "required": ["schema_version", "scope", "reviewer", "status", "blockers", "reviewed_release_identity_sha256", "source_revision", "python_compatibility_evidence_fingerprint", "signature", "fingerprint"],
+  "title": "Matrix-bound Signed Release Review Evidence v3",
+  "type": "object"
+}

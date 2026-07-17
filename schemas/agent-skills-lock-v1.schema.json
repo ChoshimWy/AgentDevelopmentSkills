@@ -1,0 +1,450 @@
+{
+  "$defs": {
+    "capabilityProvider": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "type": "object"
+        },
+        "package": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "package_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "permission_profile": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "binding",
+        "package",
+        "package_version",
+        "permission_profile",
+        "source_sha256"
+      ],
+      "type": "object"
+    },
+    "dependency": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "required_capabilities": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "requirement": {
+          "enum": [
+            "required",
+            "optional"
+          ]
+        },
+        "to": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^(>=|<=|>|<|==)(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)( (>=|<=|>|<|==)(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*))*$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "requirement",
+        "version",
+        "required_capabilities"
+      ],
+      "type": "object"
+    },
+    "package": {
+      "additionalProperties": false,
+      "properties": {
+        "core_compatibility": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "core",
+            "platform",
+            "stack",
+            "discipline",
+            "adapter",
+            "runtime-config"
+          ]
+        },
+        "manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "provider_compatibility": {
+          "oneOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_manifest_sha256": {
+          "oneOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_version": {
+          "oneOf": [
+            {
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "artifact_sha256": {
+                  "type": "null"
+                },
+                "kind": {
+                  "const": "local-registry"
+                },
+                "sha256": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "uri": {
+                  "pattern": "^registry://[A-Za-z0-9][A-Za-z0-9._-]*$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_sha256",
+                "kind",
+                "sha256",
+                "uri"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "artifact_sha256": {
+                  "type": "null"
+                },
+                "kind": {
+                  "const": "relative-path"
+                },
+                "sha256": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "uri": {
+                  "pattern": "^\\./.+$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_sha256",
+                "kind",
+                "sha256",
+                "uri"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "artifact_sha256": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "https"
+                },
+                "sha256": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "uri": {
+                  "pattern": "^https://.+$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_sha256",
+                "kind",
+                "sha256",
+                "uri"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "core_compatibility",
+        "id",
+        "kind",
+        "manifest_sha256",
+        "provider_compatibility",
+        "provider_manifest_sha256",
+        "provider_version",
+        "source",
+        "version"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://agent-workflow.local/schemas/agent-skills-lock-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "assets_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "bindings_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "capability_providers": {
+      "additionalProperties": {
+        "$ref": "#/$defs/capabilityProvider"
+      },
+      "type": "object"
+    },
+    "core": {
+      "additionalProperties": false,
+      "properties": {
+        "package_version": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "runtime_version": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "package_version",
+        "runtime_version",
+        "source_sha256"
+      ],
+      "type": "object"
+    },
+    "dependencies": {
+      "items": {
+        "$ref": "#/$defs/dependency"
+      },
+      "type": "array"
+    },
+    "fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "install_plan_identity_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "instructions": {
+      "additionalProperties": false,
+      "properties": {
+        "rule_trace_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_trace_sha256",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "lineage": {
+      "additionalProperties": false,
+      "properties": {
+        "previous_lock_hash": {
+          "oneOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "previous_lock_hash"
+      ],
+      "type": "object"
+    },
+    "manager": {
+      "const": "agent-development-skills"
+    },
+    "packages": {
+      "items": {
+        "$ref": "#/$defs/package"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "permission_profiles": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "schema_inventory": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "content_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "files": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "algorithm",
+        "content_sha256",
+        "files"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "selection": {
+      "additionalProperties": false,
+      "properties": {
+        "disciplines": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "runtime_configs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "disciplines",
+        "platforms",
+        "runtime_configs"
+      ],
+      "type": "object"
+    },
+    "side_effects": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "manager",
+    "core",
+    "schema_inventory",
+    "selection",
+    "packages",
+    "dependencies",
+    "capability_providers",
+    "bindings_sha256",
+    "permission_profiles",
+    "side_effects",
+    "instructions",
+    "assets_sha256",
+    "install_plan_identity_hash",
+    "lineage",
+    "fingerprint"
+  ],
+  "title": "Agent Skills Lock v1",
+  "type": "object"
+}

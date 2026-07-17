@@ -17,6 +17,8 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from agent_workflow.installation import target_lifecycle_lock
+
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL = ROOT / "install.sh"
@@ -32,6 +34,16 @@ def load_installer_module():
 
 
 class InstallScriptTests(unittest.TestCase):
+    def test_trusted_upgrade_agent_session_matches_source_installer_builder(self) -> None:
+        from agent_workflow.activation import _generated_agent_session
+
+        installer = load_installer_module()
+        self.assertEqual(
+            _generated_agent_session(),
+            installer._activation_bytes("@generated/agent-session.pyz"),
+        )
+        self.assertTrue(_generated_agent_session().startswith(b"#!/usr/bin/env python3\n"))
+
     def run_install(
         self,
         target: Path,
@@ -51,6 +63,15 @@ class InstallScriptTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+    def test_source_install_holds_one_cross_process_lifecycle_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "codex"
+            target.mkdir()
+            with target_lifecycle_lock(target):
+                completed = self.run_install(target, check=False)
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("already active", completed.stderr)
 
     def test_wrapper_honors_explicit_python_override(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -446,6 +467,11 @@ class InstallScriptTests(unittest.TestCase):
             )
             self.assertEqual(second["activation"]["managed_file_updates"], [])
             self.assertEqual(len(second["activation"]["managed_files_unchanged"]), 13)
+            activation_lock = json.loads(
+                (target / ".agent-skills" / "activation-lock.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(activation_lock["schema_version"], "2.0")
+            self.assertEqual(activation_lock["handler"], "core.source-activation.apple-codex-v1")
             self.assertTrue((target / "skills" / "apple-verification" / "SKILL.md").is_file())
             self.assertTrue((target / "agents" / "reviewer.toml").is_file())
             self.assertTrue((target / "bin" / "codex_verify").is_file())

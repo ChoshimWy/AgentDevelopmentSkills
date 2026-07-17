@@ -1,0 +1,94 @@
+{
+  "$id": "https://agent-workflow.local/schemas/upgrade-conformance-evidence-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attestation_key": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "candidate_package_lock_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "manifest_count": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "negative_contract_count": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "command_results": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {"minLength": 1, "type": "string"},
+          "exit_code": {"const": 0},
+          "stderr_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+          "stdout_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"}
+        },
+        "required": ["command", "exit_code", "stdout_sha256", "stderr_sha256"],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "environment": {
+      "additionalProperties": false,
+      "properties": {
+        "platform": {"minLength": 1, "type": "string"},
+        "python": {"pattern": "^3\\.(11|12|13|14)(\\.[0-9]+)?$", "type": "string"}
+      },
+      "required": ["python", "platform"],
+      "type": "object"
+    },
+    "runner_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "schema_inventory_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "status": {
+      "const": "passed"
+    },
+    "suite": {
+      "const": "agent-skills-release-conformance-v1"
+    },
+    "suite_definition_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "test_count": {
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "attestation_key",
+    "suite",
+    "status",
+    "candidate_package_lock_hash",
+    "schema_inventory_hash",
+    "suite_definition_hash",
+    "runner_sha256",
+    "environment",
+    "command_results",
+    "manifest_count",
+    "negative_contract_count",
+    "test_count",
+    "fingerprint"
+  ],
+  "title": "Upgrade Conformance Evidence v1",
+  "type": "object"
+}

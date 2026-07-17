@@ -4,16 +4,23 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
+import stat
 import sys
 import tempfile
 import tomllib
-from types import ModuleType
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # Windows remains fail-closed for production uninstall.
+    fcntl = None  # type: ignore[assignment]
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +31,8 @@ if str(SRC) not in sys.path:
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from agent_workflow.canonical_json import dumps, load  # noqa: E402
+from agent_workflow.canonical_json import dumps, load, sha256  # noqa: E402
+from agent_workflow.contracts import validate_activation_lock  # noqa: E402
 from agent_workflow.installation import (  # noqa: E402
     EXTERNAL_ACTIVATION_LOCK,
     MANAGED_DIRECTORY_MODE,
@@ -32,6 +40,7 @@ from agent_workflow.installation import (  # noqa: E402
     _is_managed_install,
     _path_exists,
     _resolve_child,
+    target_lifecycle_lock,
 )
 from agent_workflow.models import ContractError  # noqa: E402
 from install_local import ACTIVATED_FILES  # noqa: E402
@@ -74,39 +83,188 @@ MANAGED_INSTRUCTIONS_ASSIGNMENT = re.compile(
     r'''^[ \t]*(?:model_instructions_file|"model_instructions_file"|'model_instructions_file')[ \t]*='''
 )
 TABLE_HEADER = re.compile(r"^[ \t]*\[")
+_DIRECTORY_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+_FILE_FLAGS = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+_FD_RELATIVE_SUPPORTED = (
+    bool(getattr(os, "O_DIRECTORY", 0))
+    and bool(getattr(os, "O_NOFOLLOW", 0))
+    and os.open in os.supports_dir_fd
+    and os.rename in os.supports_dir_fd
+)
 
 
-def _load_config_tools() -> ModuleType:
-    path = ROOT / "runtime-configs/codex/assets/scripts/sync_codex_shared_config.py"
-    spec = importlib.util.spec_from_file_location("agent_skills_config_tools", path)
-    if spec is None or spec.loader is None:
-        raise ContractError("unable to load Codex config tools")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def _directory_identity(descriptor: int) -> tuple[int, int]:
+    metadata = os.fstat(descriptor)
+    return metadata.st_dev, metadata.st_ino
 
 
-def _managed_state(raw_target: str | Path) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
+def _open_relative_directory(
+    root: Path,
+    parts: tuple[str, ...],
+    *,
+    expected_root_identity: tuple[int, int] | None = None,
+) -> int:
+    if not _FD_RELATIVE_SUPPORTED:
+        raise ContractError("secure fd-relative uninstall is unsupported on this host")
+    descriptor = os.open(root, _DIRECTORY_FLAGS)
+    try:
+        if expected_root_identity is not None and _directory_identity(descriptor) != expected_root_identity:
+            raise ContractError("uninstall target directory identity changed")
+        for part in parts:
+            next_descriptor = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _open_descendant_directory(root_descriptor: int, parts: tuple[str, ...]) -> int:
+    if not _FD_RELATIVE_SUPPORTED:
+        raise ContractError("secure fd-relative uninstall is unsupported on this host")
+    descriptor = os.dup(root_descriptor)
+    try:
+        for part in parts:
+            next_descriptor = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _open_or_create_descendant_directory(
+    root_descriptor: int,
+    parts: tuple[str, ...],
+) -> int:
+    descriptor = os.dup(root_descriptor)
+    try:
+        for part in parts:
+            try:
+                os.mkdir(part, MANAGED_DIRECTORY_MODE, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            next_descriptor = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _fd_exists(parent_descriptor: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _fd_file_snapshot(parent_descriptor: int, name: str) -> tuple[bytes, int]:
+    descriptor = os.open(name, _FILE_FLAGS, dir_fd=parent_descriptor)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ContractError(f"expected a regular file: {name}")
+        chunks = []
+        while block := os.read(descriptor, 1024 * 1024):
+            chunks.append(block)
+        return b"".join(chunks), metadata.st_mode & 0o777
+    finally:
+        os.close(descriptor)
+
+
+def _create_private_directory(parent_descriptor: int, prefix: str) -> str:
+    for _ in range(32):
+        name = prefix + secrets.token_hex(8)
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_descriptor)
+            return name
+        except FileExistsError:
+            continue
+    raise ContractError("unable to allocate a private uninstall backup directory")
+
+
+def _stable_fd_path(descriptor: int) -> Path:
+    proc_entry = Path("/proc/self/fd") / str(descriptor)
+    if proc_entry.is_symlink():
+        candidate = Path(os.readlink(proc_entry))
+    elif sys.platform == "darwin" and fcntl is not None:
+        raw = fcntl.fcntl(descriptor, 50, b"\0" * 1024)
+        candidate = Path(raw.split(b"\0", 1)[0].decode("utf-8"))
+    else:
+        raise ContractError("stable file-descriptor path is unavailable on this host")
+    probe = _open_relative_directory(
+        candidate,
+        (),
+        expected_root_identity=_directory_identity(descriptor),
+    )
+    os.close(probe)
+    return candidate
+
+
+def _fd_file_matches(parent_descriptor: int, name: str, record: dict[str, Any]) -> bool:
+    descriptor = os.open(name, _FILE_FLAGS, dir_fd=parent_descriptor)
+    try:
+        metadata = os.fstat(descriptor)
+        digest = hashlib.sha256()
+        while block := os.read(descriptor, 1024 * 1024):
+            digest.update(block)
+        return (
+            stat.S_ISREG(metadata.st_mode)
+            and metadata.st_mode & 0o777 == record["mode"]
+            and digest.hexdigest() == record["sha256"]
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _managed_state(
+    raw_target: str | Path,
+) -> tuple[Path, dict[str, Any], list[dict[str, Any]], tuple[int, int], str | None]:
     requested = Path(raw_target).expanduser()
     if requested.is_symlink():
         raise ContractError(f"uninstall target must not be a symlink: {requested}")
     target = requested.resolve()
     if not target.is_dir():
         raise ContractError(f"managed install target does not exist: {target}")
+    target_identity = (target.stat().st_dev, target.stat().st_ino)
     if not _is_managed_install(target):
         raise ContractError(f"refusing to uninstall unmanaged or modified install: {target}")
 
     lock = load(target / INSTALL_LOCK)
+    selected_package_ids = {
+        item.get("id") for item in lock.get("selected_packages", [])
+        if isinstance(item, dict)
+    }
+    activation_owned = (
+        "codex" in lock.get("selected_runtime_configs", [])
+        or "codex" in selected_package_ids
+    )
     activation_path = target / ACTIVATION_LOCK
     if not _path_exists(activation_path):
-        raise ContractError("managed source install is missing its activation lock")
+        # Core/package-only installs (including Desktop and wheel-installed CLI
+        # installs) own only MANAGED_ROOTS and intentionally have no external
+        # activation lock.  Apple source installs select the Codex runtime and
+        # must retain the lock so missing activation evidence cannot turn into
+        # an unsafe best-effort cleanup of external files.
+        if activation_owned:
+            raise ContractError("managed source install is missing its activation lock")
+        if (target.stat().st_dev, target.stat().st_ino) != target_identity:
+            raise ContractError("uninstall target directory identity changed")
+        return target, lock, [], target_identity, None
+    if not activation_owned:
+        raise ContractError("non-activated install must not contain an activation lock")
     activation = load(activation_path)
-    if (
-        activation.get("schema_version") != "1.0"
-        or activation.get("manager") != MANAGER_ID
-        or not isinstance(activation.get("files"), list)
-    ):
-        raise ContractError("activation lock is not owned by agent-development-skills")
+    validate_activation_lock(activation)
     activation_files = activation["files"]
     activated_paths = [item.get("path") for item in activation_files if isinstance(item, dict)]
     actual_paths = frozenset(activated_paths)
@@ -116,7 +274,9 @@ def _managed_state(raw_target: str | Path) -> tuple[Path, dict[str, Any], list[d
         or actual_paths not in SUPPORTED_ACTIVATED_PATH_SETS
     ):
         raise ContractError("activation lock does not cover the supported managed file set")
-    return target, lock, activation_files
+    if (target.stat().st_dev, target.stat().st_ino) != target_identity:
+        raise ContractError("uninstall target directory identity changed")
+    return target, lock, activation_files, target_identity, sha256(activation)
 
 
 def _selected_platforms(lock: dict[str, Any], requested: list[str]) -> tuple[str, ...]:
@@ -139,10 +299,9 @@ def _selected_platforms(lock: dict[str, Any], requested: list[str]) -> tuple[str
 
 
 def _remove_managed_instructions_assignment(
-    path: Path,
+    original: bytes,
     config: dict[str, Any],
 ) -> bytes:
-    original = path.read_bytes()
     try:
         text = original.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -180,23 +339,33 @@ def _remove_managed_instructions_assignment(
     return candidate
 
 
-def _config_plan(target: Path) -> tuple[bytes | None, int | None, str]:
+def _config_plan(
+    target: Path,
+    *,
+    activation_owned: bool,
+) -> tuple[bytes | None, int | None, str, bytes | None]:
     path = target / "config.toml"
     if not _path_exists(path):
-        return None, None, "missing"
+        return None, None, "missing", None
     if path.is_symlink() or not path.is_file():
         raise ContractError("config.toml must be a regular file")
 
     mode = path.stat().st_mode & 0o777
-    tools = _load_config_tools()
-    config = tools.load_toml(str(path))
+    original = path.read_bytes()
+    if not activation_owned:
+        return original, mode, "preserved", original
+    try:
+        config = tomllib.loads(original.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise ContractError(f"config.toml must be valid UTF-8 TOML: {error}") from error
     managed_agents_path = str(target / "AGENTS.md")
     if config.get("model_instructions_file") != managed_agents_path:
-        return path.read_bytes(), mode, "preserved"
+        return original, mode, "preserved", original
     return (
-        _remove_managed_instructions_assignment(path, config),
+        _remove_managed_instructions_assignment(original, config),
         mode,
         "removed-managed-instructions-path",
+        original,
     )
 
 
@@ -205,10 +374,19 @@ def _build_plan(
     lock: dict[str, Any],
     activation_files: list[dict[str, Any]],
     platforms: tuple[str, ...],
+    target_identity: tuple[int, int],
+    activation_identity: str | None,
 ) -> dict[str, Any]:
-    config_candidate, config_mode, config_action = _config_plan(target)
+    if (target.stat().st_dev, target.stat().st_ino) != target_identity:
+        raise ContractError("uninstall target directory identity changed")
+    config_candidate, config_mode, config_action, config_original = _config_plan(
+        target,
+        activation_owned=bool(activation_files),
+    )
     preserved_profiles = [name for name in PROFILE_NAMES if _path_exists(target / name)]
     preserved_system_skills = (target / "skills" / ".system").is_dir()
+    if (target.stat().st_dev, target.stat().st_ino) != target_identity:
+        raise ContractError("uninstall target directory identity changed")
     return {
         "schema_version": "1.0",
         "status": "planned",
@@ -223,22 +401,41 @@ def _build_plan(
         "legacy_links_restored": False,
         "_config_candidate": config_candidate,
         "_config_mode": config_mode,
+        "_config_original": config_original,
+        "_activation_lock_identity": activation_identity,
+        "_install_lock_identity": sha256(lock),
+        "_target_identity": target_identity,
     }
 
 
-def _verify_uninstalled_state(target: Path, plan: dict[str, Any]) -> None:
-    if _path_exists(target / "AGENTS.md") or _path_exists(target / ".agent-skills"):
+def _verify_uninstalled_state(target_descriptor: int, plan: dict[str, Any]) -> None:
+    if _fd_exists(target_descriptor, "AGENTS.md") or _fd_exists(target_descriptor, ".agent-skills"):
         raise ContractError("managed roots remain after uninstall")
     for path in plan["activated_files"]:
-        if _path_exists(_resolve_child(target, path, label="activated file")):
-            raise ContractError(f"activated file remains after uninstall: {path}")
+        relative = Path(path)
+        try:
+            parent_descriptor = _open_descendant_directory(
+                target_descriptor,
+                tuple(relative.parts[:-1]),
+            )
+        except FileNotFoundError:
+            continue
+        try:
+            if _fd_exists(parent_descriptor, relative.name):
+                raise ContractError(f"activated file remains after uninstall: {path}")
+        finally:
+            os.close(parent_descriptor)
     if plan["preserved_system_skills"]:
-        system_skills = target / "skills" / ".system"
-        if system_skills.is_symlink() or not system_skills.is_dir():
-            raise ContractError("Codex system skills were not preserved")
-    config_candidate = plan["_config_candidate"]
-    if config_candidate is not None and (target / "config.toml").read_bytes() != config_candidate:
-        raise ContractError("config.toml differs from the uninstall plan")
+        skills_descriptor = _open_descendant_directory(target_descriptor, ("skills",))
+        try:
+            system_descriptor = os.open(".system", _DIRECTORY_FLAGS, dir_fd=skills_descriptor)
+            os.close(system_descriptor)
+        finally:
+            os.close(skills_descriptor)
+    if plan["config_action"] == "removed-managed-instructions-path":
+        content, mode = _fd_file_snapshot(target_descriptor, "config.toml")
+        if content != plan["_config_candidate"] or mode != plan["_config_mode"]:
+            raise ContractError("config.toml differs from the uninstall plan")
 
 
 def _execute_uninstall(
@@ -246,97 +443,342 @@ def _execute_uninstall(
     activation_files: list[dict[str, Any]],
     plan: dict[str, Any],
 ) -> None:
-    backup = Path(tempfile.mkdtemp(prefix=".agent-skills-uninstall-backup-", dir=target))
-    moved_roots: list[tuple[Path, Path]] = []
-    moved_activated: list[tuple[Path, Path]] = []
-    config_backup: Path | None = None
+    target_descriptor = _open_relative_directory(
+        target,
+        (),
+        expected_root_identity=plan["_target_identity"],
+    )
+    backup_name = _create_private_directory(
+        target_descriptor,
+        ".agent-skills-uninstall-backup-",
+    )
+    backup = target / backup_name
+    backup_descriptor = _open_descendant_directory(target_descriptor, (backup_name,))
+    os.mkdir("managed", MANAGED_DIRECTORY_MODE, dir_fd=backup_descriptor)
+    managed_backup_descriptor = _open_descendant_directory(backup_descriptor, ("managed",))
+    managed_backup = backup / "managed"
+    moved_roots: list[str] = []
+    moved_activated: list[dict[str, Any]] = []
+    config_backup = False
+    config_written = False
     system_restored = False
+    descriptors_open = True
+
+    def close_backup_descriptors() -> None:
+        nonlocal descriptors_open
+        if descriptors_open:
+            os.close(managed_backup_descriptor)
+            os.close(backup_descriptor)
+            descriptors_open = False
+
     try:
-        managed_backup = backup / "managed"
-        managed_backup.mkdir()
-        for name in MANAGED_ROOTS:
-            source = target / name
-            destination = managed_backup / name
-            os.replace(source, destination)
-            moved_roots.append((source, destination))
-
-        activated_backup = backup / "activated"
-        for item in activation_files:
-            source = _resolve_child(target, item["path"], label="activated file")
-            destination = activated_backup / item["path"]
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(source, destination)
-            moved_activated.append((source, destination))
-
-        config_candidate = plan["_config_candidate"]
-        config_path = target / "config.toml"
-        if config_candidate is not None and config_path.read_bytes() != config_candidate:
-            config_backup = backup / "config.toml"
-            os.replace(config_path, config_backup)
-            descriptor, temporary_name = tempfile.mkstemp(prefix=".config.toml.", dir=target)
-            temporary = Path(temporary_name)
-            try:
-                with os.fdopen(descriptor, "wb") as stream:
-                    stream.write(config_candidate)
-                temporary.chmod(plan["_config_mode"])
-                os.replace(temporary, config_path)
-            finally:
-                temporary.unlink(missing_ok=True)
-
-        preserved_system = managed_backup / "skills" / ".system"
-        if preserved_system.is_dir() and not preserved_system.is_symlink():
-            (target / "skills").mkdir()
-            (target / "skills").chmod(MANAGED_DIRECTORY_MODE)
-            os.replace(preserved_system, target / "skills" / ".system")
-            system_restored = True
-
-        _verify_uninstalled_state(target, plan)
-    except Exception as primary_error:
-        recovery_errors: list[str] = []
-        if system_restored:
-            try:
-                os.replace(target / "skills" / ".system", backup / "managed" / "skills" / ".system")
-                (target / "skills").rmdir()
-            except OSError as error:
-                recovery_errors.append(f"restore system skills: {error}")
-        if config_backup is not None:
-            try:
-                (target / "config.toml").unlink(missing_ok=True)
-                os.replace(config_backup, target / "config.toml")
-            except OSError as error:
-                recovery_errors.append(f"restore config.toml: {error}")
-        for source, destination in reversed(moved_activated):
-            try:
-                source.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(destination, source)
-            except OSError as error:
-                recovery_errors.append(f"restore {source.relative_to(target)}: {error}")
-        for source, destination in reversed(moved_roots):
-            try:
-                os.replace(destination, source)
-            except OSError as error:
-                recovery_errors.append(f"restore {source.name}: {error}")
-        if recovery_errors:
-            raise ContractError(
-                f"uninstall failed ({primary_error}); rollback incomplete; recovery backup preserved at {backup}: "
-                + "; ".join(recovery_errors)
-            ) from primary_error
         try:
-            shutil.rmtree(backup)
-        except OSError as cleanup_error:
-            raise ContractError(
-                f"uninstall failed ({primary_error}); rollback succeeded but temporary backup "
-                f"cleanup failed at {backup}: {cleanup_error}"
-            ) from primary_error
-        raise
-    try:
-        shutil.rmtree(backup)
-    except OSError as error:
-        raise ContractError(
-            "managed files were removed, but temporary backup cleanup failed; "
-            f"remove the residual backup manually: {backup}: {error}"
-        ) from error
+            for name in MANAGED_ROOTS:
+                os.rename(
+                    name,
+                    name,
+                    src_dir_fd=target_descriptor,
+                    dst_dir_fd=managed_backup_descriptor,
+                )
+                moved_roots.append(name)
 
+            managed_state_descriptor = _open_descendant_directory(
+                managed_backup_descriptor,
+                (".agent-skills",),
+            )
+            try:
+                moved_lock_bytes, _ = _fd_file_snapshot(
+                    managed_state_descriptor,
+                    "install-lock.json",
+                )
+                moved_lock = json.loads(moved_lock_bytes.decode("utf-8"))
+                if sha256(moved_lock) != plan["_install_lock_identity"]:
+                    raise ContractError("uninstall plan install lock differs from moved target")
+                if _fd_exists(managed_state_descriptor, EXTERNAL_ACTIVATION_LOCK):
+                    moved_activation_bytes, _ = _fd_file_snapshot(
+                        managed_state_descriptor,
+                        EXTERNAL_ACTIVATION_LOCK,
+                    )
+                    moved_activation = json.loads(moved_activation_bytes.decode("utf-8"))
+                    moved_activation_identity = sha256(moved_activation)
+                else:
+                    moved_activation_identity = None
+                if moved_activation_identity != plan["_activation_lock_identity"]:
+                    raise ContractError(
+                        "uninstall plan activation lock differs from moved target"
+                    )
+            finally:
+                os.close(managed_state_descriptor)
+
+            for item in activation_files:
+                relative = Path(item["path"])
+                parent_parts = tuple(relative.parts[:-1])
+                source_parent = _open_descendant_directory(target_descriptor, parent_parts)
+                try:
+                    destination_parent = _open_or_create_descendant_directory(
+                        managed_backup_descriptor,
+                        parent_parts,
+                    )
+                    try:
+                        parent_identity = _directory_identity(source_parent)
+                        os.rename(
+                            relative.name,
+                            relative.name,
+                            src_dir_fd=source_parent,
+                            dst_dir_fd=destination_parent,
+                        )
+                        moved_activated.append({
+                            "destination": managed_backup / item["path"],
+                            "item": item,
+                            "parent_identity": parent_identity,
+                            "parent_parts": parent_parts,
+                            "source": target / item["path"],
+                        })
+                        if not _fd_file_matches(destination_parent, relative.name, item):
+                            raise ContractError(
+                                f"activated file changed during uninstall: {item['path']}"
+                            )
+                    finally:
+                        os.close(destination_parent)
+                finally:
+                    os.close(source_parent)
+            if not _is_managed_install(_stable_fd_path(managed_backup_descriptor)):
+                raise ContractError("managed install changed during uninstall")
+
+            if plan["config_action"] == "removed-managed-instructions-path":
+                content, mode = _fd_file_snapshot(target_descriptor, "config.toml")
+                if content != plan["_config_original"] or mode != plan["_config_mode"]:
+                    raise ContractError("config.toml changed during uninstall")
+                os.rename(
+                    "config.toml",
+                    "config.toml",
+                    src_dir_fd=target_descriptor,
+                    dst_dir_fd=backup_descriptor,
+                )
+                config_backup = True
+                content, mode = _fd_file_snapshot(backup_descriptor, "config.toml")
+                if content != plan["_config_original"] or mode != plan["_config_mode"]:
+                    raise ContractError("config.toml changed during uninstall")
+                temporary_name = ".config.toml." + secrets.token_hex(8)
+                temporary_descriptor = os.open(
+                    temporary_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    plan["_config_mode"],
+                    dir_fd=target_descriptor,
+                )
+                try:
+                    view = memoryview(plan["_config_candidate"])
+                    while view:
+                        written = os.write(temporary_descriptor, view)
+                        view = view[written:]
+                    os.fchmod(temporary_descriptor, plan["_config_mode"])
+                finally:
+                    os.close(temporary_descriptor)
+                try:
+                    os.link(
+                        temporary_name,
+                        "config.toml",
+                        src_dir_fd=target_descriptor,
+                        dst_dir_fd=target_descriptor,
+                        follow_symlinks=False,
+                    )
+                    config_written = True
+                finally:
+                    os.unlink(temporary_name, dir_fd=target_descriptor)
+
+            try:
+                backup_skills = _open_descendant_directory(
+                    managed_backup_descriptor,
+                    ("skills",),
+                )
+                try:
+                    system_descriptor = os.open(
+                        ".system",
+                        _DIRECTORY_FLAGS,
+                        dir_fd=backup_skills,
+                    )
+                    os.close(system_descriptor)
+                    has_system = True
+                except FileNotFoundError:
+                    has_system = False
+            except FileNotFoundError:
+                has_system = False
+                backup_skills = None
+            if has_system and backup_skills is not None:
+                try:
+                    os.mkdir("skills", MANAGED_DIRECTORY_MODE, dir_fd=target_descriptor)
+                    os.chmod("skills", MANAGED_DIRECTORY_MODE, dir_fd=target_descriptor)
+                    target_skills = _open_descendant_directory(target_descriptor, ("skills",))
+                    try:
+                        os.rename(
+                            ".system",
+                            ".system",
+                            src_dir_fd=backup_skills,
+                            dst_dir_fd=target_skills,
+                        )
+                    finally:
+                        os.close(target_skills)
+                    system_restored = True
+                finally:
+                    os.close(backup_skills)
+
+            for record in moved_activated:
+                parent_descriptor = _open_descendant_directory(
+                    target_descriptor,
+                    record["parent_parts"],
+                )
+                try:
+                    if _directory_identity(parent_descriptor) != record["parent_identity"]:
+                        raise ContractError(
+                            "activated file parent changed during uninstall: "
+                            + record["item"]["path"]
+                        )
+                finally:
+                    os.close(parent_descriptor)
+
+            _verify_uninstalled_state(target_descriptor, plan)
+        except Exception as primary_error:
+            recovery_errors: list[str] = []
+            if system_restored:
+                try:
+                    target_skills = _open_descendant_directory(target_descriptor, ("skills",))
+                    backup_skills = _open_descendant_directory(
+                        managed_backup_descriptor,
+                        ("skills",),
+                    )
+                    try:
+                        os.rename(
+                            ".system",
+                            ".system",
+                            src_dir_fd=target_skills,
+                            dst_dir_fd=backup_skills,
+                        )
+                    finally:
+                        os.close(backup_skills)
+                        os.close(target_skills)
+                    os.rmdir("skills", dir_fd=target_descriptor)
+                except OSError as error:
+                    recovery_errors.append(f"restore system skills: {error}")
+            if config_backup:
+                try:
+                    config_backup_path = backup / "config.toml"
+                    if config_written:
+                        if _fd_exists(target_descriptor, "config.toml"):
+                            content, mode = _fd_file_snapshot(target_descriptor, "config.toml")
+                            config_changed = (
+                                content != plan["_config_candidate"]
+                                or mode != plan["_config_mode"]
+                            )
+                        else:
+                            config_changed = False
+                        if config_changed:
+                            recovery_errors.append(
+                                "restore config.toml: destination changed after managed rewrite; "
+                                f"recovery copy remains at {config_backup_path}"
+                            )
+                        else:
+                            if _fd_exists(target_descriptor, "config.toml"):
+                                os.unlink("config.toml", dir_fd=target_descriptor)
+                            os.rename(
+                                "config.toml",
+                                "config.toml",
+                                src_dir_fd=backup_descriptor,
+                                dst_dir_fd=target_descriptor,
+                            )
+                    elif not _fd_exists(target_descriptor, "config.toml"):
+                        os.rename(
+                            "config.toml",
+                            "config.toml",
+                            src_dir_fd=backup_descriptor,
+                            dst_dir_fd=target_descriptor,
+                        )
+                    else:
+                        recovery_errors.append(
+                            "restore config.toml: destination was recreated before managed rewrite; "
+                            f"recovery copy remains at {config_backup_path}"
+                        )
+                except (ContractError, OSError) as error:
+                    recovery_errors.append(f"restore config.toml: {error}")
+            for record in reversed(moved_activated):
+                source = record["source"]
+                destination = record["destination"]
+                try:
+                    source_parent = _open_descendant_directory(
+                        target_descriptor,
+                        record["parent_parts"],
+                    )
+                    try:
+                        destination_parent = _open_descendant_directory(
+                            managed_backup_descriptor,
+                            record["parent_parts"],
+                        )
+                        try:
+                            if _directory_identity(source_parent) != record["parent_identity"]:
+                                recovery_errors.append(
+                                    f"restore {source.relative_to(target)}: parent directory changed; "
+                                    f"recovery copy remains at {destination}"
+                                )
+                            elif _fd_exists(source_parent, source.name):
+                                recovery_errors.append(
+                                    f"restore {source.relative_to(target)}: destination was recreated; "
+                                    f"recovery copy remains at {destination}"
+                                )
+                            else:
+                                os.rename(
+                                    destination.name,
+                                    source.name,
+                                    src_dir_fd=destination_parent,
+                                    dst_dir_fd=source_parent,
+                                )
+                        finally:
+                            os.close(destination_parent)
+                    finally:
+                        os.close(source_parent)
+                except (ContractError, OSError) as error:
+                    recovery_errors.append(f"restore {source.relative_to(target)}: {error}")
+            for name in reversed(moved_roots):
+                try:
+                    destination = managed_backup / name
+                    if _fd_exists(target_descriptor, name):
+                        recovery_errors.append(
+                            f"restore {name}: destination was recreated; "
+                            f"recovery copy remains at {destination}"
+                        )
+                    else:
+                        os.rename(
+                            name,
+                            name,
+                            src_dir_fd=managed_backup_descriptor,
+                            dst_dir_fd=target_descriptor,
+                        )
+                except OSError as error:
+                    recovery_errors.append(f"restore {name}: {error}")
+            if recovery_errors:
+                raise ContractError(
+                    f"uninstall failed ({primary_error}); rollback incomplete; "
+                    f"recovery backup preserved at {backup}: " + "; ".join(recovery_errors)
+                ) from primary_error
+            close_backup_descriptors()
+            try:
+                shutil.rmtree(backup_name, dir_fd=target_descriptor)
+            except OSError as cleanup_error:
+                raise ContractError(
+                    f"uninstall failed ({primary_error}); rollback succeeded but temporary "
+                    f"backup cleanup failed at {backup}: {cleanup_error}"
+                ) from primary_error
+            raise
+
+        close_backup_descriptors()
+        try:
+            shutil.rmtree(backup_name, dir_fd=target_descriptor)
+        except OSError as error:
+            raise ContractError(
+                "managed files were removed, but temporary backup cleanup failed; "
+                f"remove the residual backup manually: {backup}: {error}"
+            ) from error
+    finally:
+        close_backup_descriptors()
+        os.close(target_descriptor)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -363,13 +805,24 @@ def run(args: argparse.Namespace | None = None) -> dict[str, Any]:
         raise ContractError("uninstall.sh requires Python 3.11+")
     if args is None:
         args = parse_args()
-    target, lock, activation_files = _managed_state(args.target_root)
-    platforms = _selected_platforms(lock, args.platform)
-    plan = _build_plan(target, lock, activation_files, platforms)
     if args.dry_run:
+        target, lock, activation_files, target_identity, activation_identity = _managed_state(
+            args.target_root
+        )
+        platforms = _selected_platforms(lock, args.platform)
+        plan = _build_plan(
+            target, lock, activation_files, platforms, target_identity, activation_identity
+        )
         return {key: value for key, value in plan.items() if not key.startswith("_")}
-
-    _execute_uninstall(target, activation_files, plan)
+    with target_lifecycle_lock(args.target_root):
+        target, lock, activation_files, target_identity, activation_identity = _managed_state(
+            args.target_root
+        )
+        platforms = _selected_platforms(lock, args.platform)
+        plan = _build_plan(
+            target, lock, activation_files, platforms, target_identity, activation_identity
+        )
+        _execute_uninstall(target, activation_files, plan)
     result = {key: value for key, value in plan.items() if not key.startswith("_")}
     result["status"] = "uninstalled"
     return result

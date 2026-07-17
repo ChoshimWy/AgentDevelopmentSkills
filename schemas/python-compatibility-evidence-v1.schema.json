@@ -1,0 +1,51 @@
+{
+  "$id": "https://agent-workflow.local/schemas/python-compatibility-evidence-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifact_set_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "environments": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "artifacts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "filename": {"minLength": 1, "type": "string"},
+                "kind": {"enum": ["sdist", "wheel"]},
+                "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+                "size": {"minimum": 1, "type": "integer"}
+              },
+              "required": ["filename", "kind", "sha256", "size"],
+              "type": "object"
+            },
+            "minItems": 2,
+            "type": "array"
+          },
+          "implementation": {"const": "CPython"},
+          "machine": {"minLength": 1, "type": "string"},
+          "pep517_wheel_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+          "platform": {"minLength": 1, "type": "string"},
+          "python_minor": {"enum": ["3.11", "3.12", "3.13", "3.14"]},
+          "python_version": {"pattern": "^3\\.(11|12|13|14)\\.[0-9]+([+.-][A-Za-z0-9.-]+)?$", "type": "string"},
+          "status": {"const": "passed"},
+          "test_count": {"minimum": 1, "type": "integer"}
+        },
+        "required": ["python_minor", "python_version", "implementation", "platform", "machine", "artifacts", "pep517_wheel_sha256", "test_count", "status"],
+        "type": "object"
+      },
+      "maxItems": 4,
+      "minItems": 1,
+      "type": "array"
+    },
+    "fingerprint": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "schema_version": {"const": "1.0"},
+    "source_dirty": {"type": "boolean"},
+    "source_revision": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+    "status": {"enum": ["partial", "passed"]}
+  },
+  "required": ["schema_version", "source_revision", "source_dirty", "environments", "artifact_set_sha256", "status", "fingerprint"],
+  "title": "Python Compatibility Evidence v1",
+  "type": "object"
+}

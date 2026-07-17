@@ -57,6 +57,18 @@ class SchedulerAndApprovalTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             gate.decide(record, "granted", {"node": "2"})
 
+    def test_granted_approval_can_only_be_revoked_for_its_exact_scope(self) -> None:
+        gate = ApprovalGate()
+        record = gate.request("attempt", "design-write", "test", {"node": "1"})
+        gate.decide(record, "granted", {"node": "1"})
+        with self.assertRaisesRegex(ContractError, "scope differs"):
+            gate.revoke(record, {"node": "2"})
+        gate.revoke(record, {"node": "1"})
+        self.assertEqual(record["status"], "revoked")
+        self.assertFalse(gate.is_granted(record, "attempt", {"node": "1"}))
+        with self.assertRaisesRegex(ContractError, "only a granted"):
+            gate.revoke(record, {"node": "1"})
+
 
 class ExecutorTests(unittest.TestCase):
     @classmethod

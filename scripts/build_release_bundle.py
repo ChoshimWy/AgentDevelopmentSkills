@@ -27,17 +27,19 @@ RELEASE_ROOTS = (
     "providers",
     "runtime-configs",
     "schemas",
+    "scripts",
     "src/agent_workflow",
+    "tests",
 )
 RELEASE_FILES = (
+    ".github/workflows/conformance.yml",
     "README.md",
+    "agent_build_backend.py",
+    "install.ps1",
+    "install.sh",
     "pyproject.toml",
     "skill-naming-policy.json",
-    "scripts/install_local.py",
-    "scripts/run_ios_installed_workflow_smoke.py",
-)
-RELEASE_FIXTURES = (
-    "tests/fixtures/apple-app",
+    "uninstall.sh",
 )
 BOOTSTRAP_FILES = ("install.sh", "install.ps1", "scripts/bootstrap_install.py")
 IGNORED_NAMES = {".DS_Store", "__pycache__"}
@@ -55,6 +57,16 @@ def _load_bootstrap_module():
     spec = importlib.util.spec_from_file_location("agent_skills_bootstrap_contract", path)
     if spec is None or spec.loader is None:
         raise ReleaseBuildError("cannot load bootstrap manifest contract")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_python_artifact_module():
+    path = ROOT / "scripts/build_python_artifacts.py"
+    spec = importlib.util.spec_from_file_location("agent_skills_python_artifact_builder", path)
+    if spec is None or spec.loader is None:
+        raise ReleaseBuildError("cannot load Python artifact builder")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -113,7 +125,7 @@ def _iter_tree(root: Path, relative_root: str) -> Iterable[Path]:
 
 def release_files(root: Path) -> list[Path]:
     paths: list[Path] = []
-    for relative_root in (*RELEASE_ROOTS, *RELEASE_FIXTURES):
+    for relative_root in RELEASE_ROOTS:
         paths.extend(_iter_tree(root, relative_root))
     for relative_file in RELEASE_FILES:
         path = root / relative_file
@@ -227,6 +239,7 @@ def build_release_bundle(
         stage.mkdir()
         artifact_path = stage / artifact_name
         _write_zip(root, artifact_path, bundle_root=bundle_root, clean_source=not dirty)
+        python_artifacts = _load_python_artifact_module().build_python_artifacts(root, stage)
         bootstrap_assets = []
         for relative in BOOTSTRAP_FILES:
             source = root / relative
@@ -238,6 +251,71 @@ def build_release_bundle(
             destination.write_bytes(data)
             bootstrap_assets.append({"filename": filename, "sha256": _sha256(data), "size": len(data)})
         artifact_data = artifact_path.read_bytes()
+        python_index = {
+            "artifacts": python_artifacts,
+            "product": "agent-development-skills",
+            "schema_version": "1.0",
+            "version": version,
+        }
+        python_index["fingerprint"] = _sha256(_canonical_json(python_index))
+        (stage / "python-artifacts.json").write_bytes(_canonical_json(python_index))
+        git_modes = _git_file_modes(root)
+        sbom_files = []
+        for path in release_files(root):
+            relative = path.relative_to(root).as_posix()
+            content = _git_blob(root, relative) if not dirty else path.read_bytes()
+            sbom_files.append({
+                "classification": "redistributable-source",
+                "mode": _file_mode(path, relative, git_modes),
+                "path": relative,
+                "sha256": _sha256(content),
+                "size": len(content),
+            })
+        sbom = {
+            "exclusions": [{
+                "id": "xcode-official-export-content",
+                "reason": "Runtime-federated Apple official expertise is identity/hash metadata only and is not redistributed.",
+            }],
+            "files": sbom_files,
+            "format": "agent-skills-sbom-v1",
+            "product": "agent-development-skills",
+            "schema_version": "1.0",
+            "source_revision": revision,
+            "version": version,
+        }
+        sbom["fingerprint"] = _sha256(_canonical_json(sbom))
+        sbom_bytes = _canonical_json(sbom)
+        (stage / "sbom.json").write_bytes(sbom_bytes)
+        generated_artifacts = [{
+            "filename": artifact_name,
+            "kind": "source-bundle",
+            "sha256": _sha256(artifact_data),
+            "size": len(artifact_data),
+        }, *python_artifacts, *[
+            {**item, "kind": "bootstrap"} for item in bootstrap_assets
+        ]]
+        builder_relative = "scripts/build_release_bundle.py"
+        builder_bytes = _git_blob(root, builder_relative) if not dirty else (root / builder_relative).read_bytes()
+        provenance = {
+            "artifacts": sorted(generated_artifacts, key=lambda item: (item["kind"], item["filename"])),
+            "builder": {
+                "id": "agent-development-skills.release-builder-v1",
+                "sha256": _sha256(builder_bytes),
+            },
+            "materials_sha256": _sha256(_canonical_json(sbom_files)),
+            "product": "agent-development-skills",
+            "reproducible": True,
+            "sbom_sha256": _sha256(sbom_bytes),
+            "schema_version": "1.0",
+            "source": {
+                "dirty": dirty,
+                "repository": repository,
+                "revision": revision,
+            },
+            "version": version,
+        }
+        provenance["fingerprint"] = _sha256(_canonical_json(provenance))
+        (stage / "provenance.json").write_bytes(_canonical_json(provenance))
         manifest = {
             "asset_base_url": asset_base_url,
             "artifacts": [{

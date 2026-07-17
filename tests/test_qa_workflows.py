@@ -24,6 +24,7 @@ from agent_workflow.qa import (
 from agent_workflow.registry import ManifestRegistry
 from agent_workflow.reporting import delivery_report
 from agent_workflow.runtime import NodeStateMachine, RunLedger
+from scripts.build_phase4_qa_goldens import _canonical_fixture_profile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -291,7 +292,9 @@ def _release_request_for_test(identity: str) -> dict:
 
 def _workflow_plan() -> dict:
     registry = ManifestRegistry.from_directory(MANIFESTS)
-    profile = DiscoveryEngine(registry).discover(FIXTURES / "desktop-tauri")
+    profile = _canonical_fixture_profile(
+        DiscoveryEngine(registry).discover(FIXTURES / "desktop-tauri")
+    )
     policy = PolicyResolver().resolve(profile, "执行 Desktop Bug 回归测试", explicit_platforms=["desktop"])
     return PlanCompiler(registry).compile(profile, policy)
 

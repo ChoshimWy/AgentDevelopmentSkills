@@ -8,20 +8,116 @@ import os
 from pathlib import Path
 import sys
 
+from .activation import (
+    ACTIVATION_HANDLER_ID,
+    DEACTIVATION_HANDLER_ID,
+    PRESERVE_HANDLER_ID,
+    activation_handler_sha256,
+    external_paths as activation_external_paths,
+    deactivation_external_paths,
+)
 from .adapters import build_adapter_request, validate_adapter_result
-from .canonical_json import dumps, load
+from .canonical_json import dump, dumps, load
 from .contracts import validate
 from .discovery import DiscoveryEngine
+from .doctor import diagnose_install
 from .installation import build_install_bundle, install_bundle
 from .models import ContractError
+from .package_lock import (
+    diff_package_locks,
+    explain_package_lock,
+    resolve_package_lock,
+    validate_package_lock,
+    validate_plan_package_lock,
+)
 from .planning import PlanCompiler
 from .policy import PolicyResolver
 from .registry import ManifestRegistry
 from .reporting import delivery_report
 from .runtime import FakeAdapterExecutor, RecordedAdapterExecutor
+from .upgrade import (
+    apply_upgrade,
+    plan_upgrade,
+    prepare_upgrade_candidate,
+    rollback_upgrade,
+    run_upgrade_conformance,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _source_upgrade_context(
+    manifests: str | Path,
+    target_root: str | Path,
+    selection: dict[str, object],
+):
+    """Build the trusted Core activation rollback scope and handler identity."""
+
+    target = Path(target_root).expanduser().resolve()
+    activation_lock_path = target / ".agent-skills" / "activation-lock.json"
+    if not activation_lock_path.exists():
+        return (), "none", None
+    if activation_lock_path.is_symlink() or not activation_lock_path.is_file():
+        raise ContractError("source activation lock is missing or unsafe")
+    if "apple" in selection["platforms"] and "codex" in selection["runtime_configs"]:
+        return activation_external_paths(target), ACTIVATION_HANDLER_ID, activation_handler_sha256()
+    return deactivation_external_paths(target), DEACTIVATION_HANDLER_ID, activation_handler_sha256()
+
+
+def _partial_uninstall_external_context(
+    target_root: str | Path,
+    removed_platforms: list[str],
+):
+    """Return the only external lifecycle action allowed for a partial uninstall.
+
+    Activation owned by a remaining Apple selection is deliberately left untouched.
+    Only removal of an activated Apple package may invoke the deactivation handler.
+    """
+
+    target = Path(target_root).expanduser().resolve()
+    activation_lock_path = target / ".agent-skills" / "activation-lock.json"
+    if not activation_lock_path.exists():
+        return (), "none", None
+    if activation_lock_path.is_symlink() or not activation_lock_path.is_file():
+        raise ContractError("source activation lock is missing or unsafe")
+    if "apple" not in removed_platforms:
+        return deactivation_external_paths(target), PRESERVE_HANDLER_ID, activation_handler_sha256()
+    return deactivation_external_paths(target), DEACTIVATION_HANDLER_ID, activation_handler_sha256()
+
+
+def _partial_uninstall_selection(target_root: str | Path, requested: list[str]) -> dict[str, object]:
+    target = Path(target_root).expanduser().resolve()
+    lock = load(target / ".agent-skills" / "install-lock.json")
+    validate("install-plan", lock)
+    installed = list(lock["selected_platforms"])
+    if requested == ["all"]:
+        removed = set(installed)
+    else:
+        if "all" in requested or len(requested) != len(set(requested)):
+            raise ContractError("partial uninstall platforms must be unique; all cannot be combined")
+        unknown = sorted(set(requested) - set(installed))
+        if unknown:
+            raise ContractError("platform is not installed: " + ", ".join(unknown))
+        removed = set(requested)
+    if not removed:
+        raise ContractError("partial uninstall requires at least one installed platform")
+    remaining = sorted(set(installed) - removed)
+    runtime_configs = list(lock["selected_runtime_configs"])
+    if "apple" in removed and (target / ".agent-skills" / "activation-lock.json").is_file():
+        runtime_configs = [item for item in runtime_configs if item != "codex"]
+    disciplines = list(lock["selected_disciplines"])
+    remaining_runtime_configs = runtime_configs
+    return {
+        "core_only": not remaining and not disciplines and not runtime_configs,
+        "disciplines": disciplines,
+        "platforms": remaining,
+        "removed_platforms": sorted(removed),
+        "removed_runtime_configs": sorted(
+            set(lock["selected_runtime_configs"]) - set(remaining_runtime_configs)
+        ),
+        "runtime_configs": remaining_runtime_configs,
+    }
 
 
 def default_manifest_directory() -> Path:
@@ -29,6 +125,14 @@ def default_manifest_directory() -> Path:
     if source_checkout.is_dir():
         return source_checkout
     installed = Path(sys.prefix) / "share" / "agent-workflow" / "platforms"
+    return installed
+
+
+def default_schema_directory() -> Path:
+    source_checkout = PROJECT_ROOT / "schemas"
+    if source_checkout.is_dir():
+        return source_checkout
+    installed = Path(sys.prefix) / "share" / "agent-workflow" / "schemas"
     return installed
 
 
@@ -61,6 +165,25 @@ def build_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     plan.add_argument("--target-file", action="append", default=[])
     plan.add_argument("--changed-file", action="append", default=[])
     plan.add_argument("--dry-run", action="store_true")
+    plan.add_argument("--lock", help="validated agent-skills.lock used to freeze the plan")
+
+    lock = subparsers.add_parser("lock")
+    lock_commands = lock.add_subparsers(dest="lock_command", required=True)
+    lock_resolve = lock_commands.add_parser("resolve")
+    lock_resolve.add_argument("install_plan")
+    lock_resolve.add_argument("--schemas", default=str(default_schema_directory()))
+    lock_resolve.add_argument("--previous")
+    lock_resolve.add_argument("--source", action="append", default=[])
+    lock_resolve.add_argument("--source-base", default=".")
+    lock_resolve.add_argument("--source-sha256", action="append", default=[])
+    lock_resolve.add_argument("--output")
+    lock_validate = lock_commands.add_parser("validate")
+    lock_validate.add_argument("lockfile")
+    lock_diff = lock_commands.add_parser("diff")
+    lock_diff.add_argument("before")
+    lock_diff.add_argument("after")
+    lock_explain = lock_commands.add_parser("explain")
+    lock_explain.add_argument("lockfile")
 
     validate_parser = subparsers.add_parser("validate")
     validate_parser.add_argument("kind")
@@ -71,6 +194,7 @@ def build_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     prepare_adapter.add_argument("node_id")
     prepare_adapter.add_argument("--context", required=True)
     prepare_adapter.add_argument("--invocation-id", required=True)
+    prepare_adapter.add_argument("--lock")
 
     validate_adapter = subparsers.add_parser("validate-adapter-result")
     validate_adapter.add_argument("request")
@@ -84,6 +208,40 @@ def build_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     install.add_argument("--target-root", default=str(Path.home() / ".codex"))
     install.add_argument("--dry-run", action="store_true")
 
+    doctor = subparsers.add_parser("doctor")
+    doctor.add_argument("--target-root", default=str(Path.home() / ".codex"))
+    doctor.add_argument("--schemas", default=str(default_schema_directory()))
+
+    upgrade = subparsers.add_parser("upgrade")
+    upgrade.add_argument("--target-root", default=str(Path.home() / ".codex"))
+    upgrade.add_argument("--schemas", default=str(default_schema_directory()))
+    upgrade.add_argument("--platform", action="append", default=None)
+    upgrade.add_argument("--discipline", action="append", default=None)
+    upgrade.add_argument("--runtime-config", action="append", default=None)
+    upgrade.add_argument("--core-only", action="store_true", default=None)
+    upgrade.add_argument("--dry-run", action="store_true")
+    upgrade.add_argument("--output")
+    upgrade.add_argument("--evidence-output")
+    upgrade.add_argument("--plan")
+    upgrade.add_argument("--approve-plan")
+    upgrade.add_argument("--approve", action="append", default=[])
+
+    uninstall = subparsers.add_parser("uninstall")
+    uninstall.add_argument("--target-root", default=str(Path.home() / ".codex"))
+    uninstall.add_argument("--schemas", default=str(default_schema_directory()))
+    uninstall.add_argument("--platform", action="append", required=True)
+    uninstall.add_argument("--dry-run", action="store_true")
+    uninstall.add_argument("--output")
+    uninstall.add_argument("--evidence-output")
+    uninstall.add_argument("--plan")
+    uninstall.add_argument("--approve-plan")
+    uninstall.add_argument("--approve", action="append", default=[])
+
+    rollback = subparsers.add_parser("rollback")
+    rollback.add_argument("--target-root", default=str(Path.home() / ".codex"))
+    rollback.add_argument("--approve-current-lock", required=True)
+    rollback.add_argument("--approve-rollback-point", required=True)
+
     run = subparsers.add_parser("run")
     run.add_argument("plan")
     run.add_argument("--ledger", default="run-ledger.jsonl")
@@ -91,6 +249,7 @@ def build_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     run_mode.add_argument("--fake-adapters", action="store_true")
     run_mode.add_argument("--adapter-results")
     run.add_argument("--adapter-context")
+    run.add_argument("--lock")
 
     resume = subparsers.add_parser("resume")
     resume.add_argument("plan")
@@ -99,12 +258,40 @@ def build_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     resume_mode.add_argument("--fake-adapters", action="store_true")
     resume_mode.add_argument("--adapter-results")
     resume.add_argument("--adapter-context")
+    resume.add_argument("--lock")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "lock":
+            if args.lock_command == "resolve":
+                sources = _parse_lock_sources(args.source)
+                artifact_hashes = _parse_package_hashes(args.source_sha256)
+                package_lock = resolve_package_lock(
+                    load(args.install_plan),
+                    schema_root=args.schemas,
+                    package_sources=sources,
+                    package_source_artifact_hashes=artifact_hashes,
+                    source_base=args.source_base,
+                    previous_lock=load(args.previous) if args.previous else None,
+                )
+                if args.output:
+                    dump(package_lock, args.output)
+                print(dumps(package_lock), end="")
+                return 0
+            if args.lock_command == "validate":
+                package_lock = load(args.lockfile)
+                validate_package_lock(package_lock)
+                print(dumps({"lock_hash": package_lock["fingerprint"], "status": "passed"}), end="")
+                return 0
+            if args.lock_command == "diff":
+                print(dumps(diff_package_locks(load(args.before), load(args.after))), end="")
+                return 0
+            if args.lock_command == "explain":
+                print(dumps(explain_package_lock(load(args.lockfile))), end="")
+                return 0
         if args.command == "install":
             bundle = build_install_bundle(
                 args.manifests,
@@ -112,8 +299,138 @@ def main(argv: list[str] | None = None) -> int:
                 disciplines=args.discipline,
                 runtime_configs=args.runtime_config,
                 core_only=args.core_only,
+                schema_root=Path(args.manifests).resolve().parent / "schemas",
             )
             print(dumps(install_bundle(bundle, args.target_root, dry_run=args.dry_run)), end="")
+            return 0
+        if args.command == "doctor":
+            report = diagnose_install(args.target_root, schema_root=args.schemas)
+            print(dumps(report), end="")
+            return 0 if report["status"] == "passed" else 2
+        if args.command == "upgrade":
+            saved_plan = load(args.plan) if args.plan else None
+            selection = saved_plan.get("selection", {}) if saved_plan else {}
+            candidate = prepare_upgrade_candidate(
+                args.manifests,
+                args.target_root,
+                platforms=(selection.get("platforms") if saved_plan else args.platform),
+                disciplines=(selection.get("disciplines") if saved_plan else args.discipline),
+                runtime_configs=(selection.get("runtime_configs") if saved_plan else args.runtime_config),
+                core_only=(selection.get("core_only") if saved_plan else args.core_only),
+            )
+            evidence = run_upgrade_conformance(args.manifests, candidate.bundle.package_lock)
+            if args.evidence_output:
+                dump(evidence, args.evidence_output)
+            external_paths, external_handler, external_handler_sha256 = _source_upgrade_context(
+                args.manifests,
+                args.target_root,
+                candidate.selection,
+            )
+            operation = plan_upgrade(
+                args.manifests,
+                args.target_root,
+                evidence,
+                schema_root=args.schemas,
+                platforms=(selection.get("platforms") if saved_plan else args.platform),
+                disciplines=(selection.get("disciplines") if saved_plan else args.discipline),
+                runtime_configs=(selection.get("runtime_configs") if saved_plan else args.runtime_config),
+                core_only=(selection.get("core_only") if saved_plan else args.core_only),
+                external_paths=external_paths,
+                external_handler=external_handler,
+                external_handler_sha256=external_handler_sha256,
+            )
+            if saved_plan is not None and saved_plan != operation.plan:
+                raise ContractError("saved upgrade plan is stale or differs from the current candidate")
+            if args.dry_run:
+                if args.approve_plan or args.approve:
+                    raise ContractError("upgrade --dry-run does not accept approvals")
+                if args.output:
+                    dump(operation.plan, args.output)
+                print(dumps(operation.plan), end="")
+                return 0
+            if saved_plan is None or args.approve_plan is None:
+                raise ContractError("upgrade apply requires --plan and --approve-plan")
+            result = apply_upgrade(
+                operation,
+                args.target_root,
+                approve_plan=args.approve_plan,
+                approvals=args.approve,
+            )
+            print(dumps(result), end="")
+            return 0
+        if args.command == "uninstall":
+            saved_plan = load(args.plan) if args.plan else None
+            request = _partial_uninstall_selection(args.target_root, args.platform)
+            selection = (
+                saved_plan.get("selection", {})
+                if saved_plan is not None
+                else request
+            )
+            if saved_plan is not None and saved_plan.get("action") != "partial-uninstall":
+                raise ContractError("saved plan is not a partial-uninstall plan")
+            if saved_plan is not None and (
+                saved_plan.get("removed_platforms") != request["removed_platforms"]
+                or saved_plan.get("removed_runtime_configs") != request["removed_runtime_configs"]
+            ):
+                raise ContractError("apply platform request differs from the saved partial-uninstall plan")
+            candidate = prepare_upgrade_candidate(
+                args.manifests,
+                args.target_root,
+                platforms=selection["platforms"],
+                disciplines=selection["disciplines"],
+                runtime_configs=selection["runtime_configs"],
+                core_only=selection["core_only"],
+            )
+            evidence = run_upgrade_conformance(args.manifests, candidate.bundle.package_lock)
+            if args.evidence_output:
+                dump(evidence, args.evidence_output)
+            external_paths, external_handler, external_handler_sha256 = _partial_uninstall_external_context(
+                args.target_root,
+                request["removed_platforms"],
+            )
+            operation = plan_upgrade(
+                args.manifests,
+                args.target_root,
+                evidence,
+                schema_root=args.schemas,
+                platforms=selection["platforms"],
+                disciplines=selection["disciplines"],
+                runtime_configs=selection["runtime_configs"],
+                core_only=selection["core_only"],
+                external_paths=external_paths,
+                external_handler=external_handler,
+                external_handler_sha256=external_handler_sha256,
+                action="partial-uninstall",
+                removed_platforms=request["removed_platforms"],
+                removed_runtime_configs=request["removed_runtime_configs"],
+            )
+            if saved_plan is not None and saved_plan != operation.plan:
+                raise ContractError("saved partial-uninstall plan is stale or differs from the current candidate")
+            if args.dry_run:
+                if args.approve_plan or args.approve:
+                    raise ContractError("uninstall --dry-run does not accept approvals")
+                if args.output:
+                    dump(operation.plan, args.output)
+                print(dumps(operation.plan), end="")
+                return 0
+            if saved_plan is None or args.approve_plan is None:
+                raise ContractError("partial uninstall apply requires --plan and --approve-plan")
+            result = apply_upgrade(
+                operation,
+                args.target_root,
+                approve_plan=args.approve_plan,
+                approvals=args.approve,
+            )
+            result["status"] = "partially-uninstalled"
+            print(dumps(result), end="")
+            return 0
+        if args.command == "rollback":
+            result = rollback_upgrade(
+                args.target_root,
+                approve_current_lock=args.approve_current_lock,
+                approve_rollback_point=args.approve_rollback_point,
+            )
+            print(dumps(result), end="")
             return 0
         if args.command == "validate":
             validate(args.kind, load(args.artifact))
@@ -122,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prepare-adapter":
             plan = load(args.plan)
             validate("workflow-plan", plan)
+            _require_active_package_lock(plan, args.lock)
             request = build_adapter_request(
                 plan, args.node_id, context=load(args.context), invocation_id=args.invocation_id
             )
@@ -135,13 +453,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.command in {"run", "resume"}:
             plan = load(args.plan)
             validate("workflow-plan", plan)
+            active_package_lock = _require_active_package_lock(plan, args.lock)
             if args.adapter_results:
                 if not args.adapter_context:
                     raise ContractError("--adapter-context is required with --adapter-results")
                 executor = RecordedAdapterExecutor(load(args.adapter_results), context=load(args.adapter_context))
             else:
                 executor = FakeAdapterExecutor()
-            ledger = executor.run(plan, ledger_path=args.ledger, resume=args.command == "resume")
+            ledger = executor.run(
+                plan,
+                ledger_path=args.ledger,
+                package_lock=active_package_lock,
+                resume=args.command == "resume",
+            )
             print(dumps(delivery_report(plan, ledger)), end="")
             return 0
 
@@ -164,12 +488,70 @@ def main(argv: list[str] | None = None) -> int:
             output = policy if args.explain else {"schema_version": "1.0", "selected_platforms": policy["selected_platforms"], "task": policy["task"]}
             print(dumps(output), end="")
             return 0
-        workflow_plan = PlanCompiler(registry).compile(profile, policy)
+        package_lock = None
+        if getattr(args, "lock", None):
+            package_lock = load(args.lock)
+            validate_package_lock(package_lock)
+        workflow_plan = PlanCompiler(registry).compile(
+            profile,
+            policy,
+            package_lock=package_lock,
+        )
         print(dumps(workflow_plan), end="")
         return 0 if workflow_plan["status"] != "blocked" else 2
-    except (ContractError, OSError, json.JSONDecodeError) as error:
+    except (ContractError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
         print(dumps({"error": str(error), "status": "blocked"}), end="", file=sys.stderr)
         return 2
+
+
+def _parse_lock_sources(values: list[str]) -> dict[str, dict[str, str]]:
+    sources: dict[str, dict[str, str]] = {}
+    for value in values:
+        package_id, separator, uri = value.partition("=")
+        if not separator or not package_id or not uri:
+            raise ContractError("--source must use PACKAGE=URI")
+        if package_id in sources:
+            raise ContractError(f"duplicate --source package: {package_id}")
+        if uri.startswith("registry://"):
+            kind = "local-registry"
+        elif uri.startswith("./"):
+            kind = "relative-path"
+        elif uri.startswith("https://"):
+            kind = "https"
+        else:
+            raise ContractError(f"unsupported --source URI: {package_id}")
+        sources[package_id] = {"kind": kind, "uri": uri}
+    return sources
+
+
+def _parse_package_hashes(values: list[str]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for value in values:
+        package_id, separator, digest = value.partition("=")
+        if not separator or not package_id or not digest:
+            raise ContractError("--source-sha256 must use PACKAGE=SHA256")
+        if package_id in hashes:
+            raise ContractError(f"duplicate --source-sha256 package: {package_id}")
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise ContractError(f"invalid --source-sha256 digest: {package_id}")
+        hashes[package_id] = digest
+    return hashes
+
+
+def _require_active_package_lock(
+    plan: dict[str, Any],
+    lock_path: str | None,
+) -> dict[str, Any] | None:
+    if plan.get("package_lock_hash") is None:
+        if lock_path is not None:
+            raise ContractError("workflow plan is not frozen to the supplied package Lockfile")
+        return None
+    if lock_path is None:
+        raise ContractError("locked workflow operation requires the current package Lockfile")
+    package_lock = load(lock_path)
+    validate_package_lock(package_lock)
+    validate_plan_package_lock(plan, package_lock)
+    return package_lock
 
 
 if __name__ == "__main__":

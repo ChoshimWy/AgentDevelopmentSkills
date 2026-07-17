@@ -1,0 +1,33 @@
+{
+  "$id": "https://agent-workflow.local/schemas/migration-report-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "after_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "artifact": {"minLength": 1, "type": "string"},
+    "before_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "fingerprint": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "from_version": {"minLength": 1, "type": "string"},
+    "lossless": {"type": "boolean"},
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["applied", "planned"]},
+    "steps": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "changes": {"items": {"type": "string"}, "type": "array", "uniqueItems": true},
+          "from_version": {"minLength": 1, "type": "string"},
+          "lossless": {"type": "boolean"},
+          "to_version": {"minLength": 1, "type": "string"}
+        },
+        "required": ["from_version", "to_version", "lossless", "changes"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "to_version": {"minLength": 1, "type": "string"}
+  },
+  "required": ["schema_version", "artifact", "from_version", "to_version", "lossless", "steps", "before_sha256", "after_sha256", "status", "fingerprint"],
+  "title": "Migration Report v1",
+  "type": "object"
+}

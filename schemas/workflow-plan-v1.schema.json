@@ -81,6 +81,10 @@
       },
       "type": "array"
     },
+    "package_lock_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
     "plan_id": {
       "type": "string"
     },

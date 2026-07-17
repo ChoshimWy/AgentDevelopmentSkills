@@ -30,6 +30,29 @@ def load_script(name: str):
 
 bootstrap = load_script("bootstrap_install.py")
 builder = load_script("build_release_bundle.py")
+FIXTURE_SOURCE_REVISION = "1" * 40
+
+
+def build_fixture_release(
+    output: Path,
+    *,
+    host_os: tuple[str, ...] = builder.DEFAULT_HOST_OS,
+):
+    # Distribution contract tests must also run from the extracted source bundle,
+    # which deliberately has no repository metadata.  Git-specific failure paths
+    # remain production behavior; only this dirty development fixture is frozen.
+    with mock.patch.object(
+        builder,
+        "_source_identity",
+        return_value=(FIXTURE_SOURCE_REVISION, True),
+    ), mock.patch.object(builder, "_git_file_modes", return_value={}):
+        return builder.build_release_bundle(
+            ROOT,
+            output,
+            allow_dirty=True,
+            channel="development",
+            host_os=host_os,
+        )
 
 
 class DistributionTests(unittest.TestCase):
@@ -38,12 +61,7 @@ class DistributionTests(unittest.TestCase):
         cls.temporary = tempfile.TemporaryDirectory(prefix="agent-skills-distribution-tests-")
         cls.root = Path(cls.temporary.name)
         cls.release = cls.root / "release"
-        cls.manifest = builder.build_release_bundle(
-            ROOT,
-            cls.release,
-            allow_dirty=True,
-            channel="development",
-        )
+        cls.manifest = build_fixture_release(cls.release)
         cls.fixture_release = cls.root / "fixture-release"
         cls.fixture_release.mkdir()
         cls._write_fixture_release(cls.fixture_release)
@@ -124,12 +142,7 @@ class DistributionTests(unittest.TestCase):
 
     def test_release_bundle_is_deterministic_and_manifest_hashes_every_asset(self) -> None:
         second = self.root / "release-second"
-        second_manifest = builder.build_release_bundle(
-            ROOT,
-            second,
-            allow_dirty=True,
-            channel="development",
-        )
+        second_manifest = build_fixture_release(second)
         self.assertEqual(self.manifest, second_manifest)
         self.assertEqual(
             (self.release / "release-manifest.json").read_bytes(),
@@ -144,6 +157,27 @@ class DistributionTests(unittest.TestCase):
             data = (self.release / asset["filename"]).read_bytes()
             self.assertEqual(len(data), asset["size"])
             self.assertEqual(hashlib.sha256(data).hexdigest(), asset["sha256"])
+        for filename in ("python-artifacts.json", "sbom.json", "provenance.json"):
+            self.assertEqual((self.release / filename).read_bytes(), (second / filename).read_bytes())
+            value = json.loads((self.release / filename).read_text(encoding="utf-8"))
+            fingerprint = value.pop("fingerprint")
+            self.assertEqual(fingerprint, hashlib.sha256(bootstrap._canonical_json(value)).hexdigest())
+        python_artifacts = json.loads(
+            (self.release / "python-artifacts.json").read_text(encoding="utf-8")
+        )["artifacts"]
+        self.assertEqual([item["kind"] for item in python_artifacts], ["wheel", "sdist"])
+        for item in python_artifacts:
+            data = (self.release / item["filename"]).read_bytes()
+            self.assertEqual((len(data), hashlib.sha256(data).hexdigest()), (item["size"], item["sha256"]))
+        sbom = json.loads((self.release / "sbom.json").read_text(encoding="utf-8"))
+        self.assertIn("xcode-official-export-content", [item["id"] for item in sbom["exclusions"]])
+        self.assertNotIn("XcodeSkills", [item["path"] for item in sbom["files"]])
+        provenance = json.loads((self.release / "provenance.json").read_text(encoding="utf-8"))
+        self.assertTrue(provenance["reproducible"])
+        self.assertEqual(
+            provenance["sbom_sha256"],
+            hashlib.sha256((self.release / "sbom.json").read_bytes()).hexdigest(),
+        )
 
     def test_default_release_hosts_are_posix_and_windows_remains_fail_closed(self) -> None:
         self.assertEqual(builder.DEFAULT_HOST_OS, ("darwin", "linux"))
@@ -153,11 +187,8 @@ class DistributionTests(unittest.TestCase):
         with self.assertRaisesRegex(bootstrap.BootstrapError, "host_os=windows"):
             bootstrap.select_artifact(posix_manifest, host_os="windows")
         with self.assertRaisesRegex(builder.ReleaseBuildError, "Windows Conformance"):
-            builder.build_release_bundle(
-                ROOT,
+            build_fixture_release(
                 self.root / "windows-release",
-                allow_dirty=True,
-                channel="development",
                 host_os=("windows",),
             )
 
@@ -219,10 +250,18 @@ class DistributionTests(unittest.TestCase):
         prefix = artifact["root"] + "/"
         with zipfile.ZipFile(self.release / artifact["filename"]) as archive:
             names = set(archive.namelist())
+            source_files = [archive.read(name) for name in names]
         self.assertIn(prefix + artifact["entrypoint"], names)
         self.assertTrue(any(name.startswith(prefix + "src/agent_workflow/") for name in names))
         self.assertTrue(any(name.startswith(prefix + "platforms/") for name in names))
         self.assertTrue(any(name.startswith(prefix + "disciplines/") for name in names))
+        self.assertIn(prefix + ".github/workflows/conformance.yml", names)
+        for marker in (
+            b"-----BEGIN " + b"PRIVATE KEY-----",
+            b"-----BEGIN RSA " + b"PRIVATE KEY-----",
+            b"TEST_RSA_PRIVATE_" + b"EXPONENT_HEX",
+        ):
+            self.assertFalse(any(marker in value for value in source_files))
 
     def test_tampered_artifact_is_rejected_before_target_write(self) -> None:
         tampered = self.root / "tampered-release"

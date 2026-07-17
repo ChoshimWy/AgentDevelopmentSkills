@@ -27,6 +27,9 @@ def _manifest_root_default() -> Path | None:
         installed = executable.parents[1] / ".agent-skills" / "packages"
         if installed.is_dir() and not installed.is_symlink():
             return installed
+    wheel_data = Path(sys.prefix) / "share" / "agent-workflow" / "platforms"
+    if wheel_data.is_dir() and not wheel_data.is_symlink():
+        return wheel_data
     candidate = Path(__file__).resolve().parents[3] / "platforms"
     return candidate if candidate.is_dir() else None
 

@@ -41,13 +41,14 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from agent_workflow.canonical_json import dumps, load  # noqa: E402
-from agent_workflow.contracts import validate_manifest  # noqa: E402
+from agent_workflow.contracts import validate_activation_lock, validate_manifest  # noqa: E402
 from agent_workflow.installation import (  # noqa: E402
     MANAGED_DIRECTORY_MODE,
     MANAGED_FILE_MODE,
     MANAGED_ROOTS,
     build_install_bundle,
     install_bundle,
+    target_lifecycle_lock,
 )
 from agent_workflow.models import ContractError  # noqa: E402
 
@@ -581,8 +582,7 @@ def _validate_activation_lock(target: Path) -> bool:
     if lock_path.is_symlink() or not lock_path.is_file():
         raise ContractError("activation lock must be a regular file")
     lock = load(lock_path)
-    if lock.get("schema_version") != "1.0" or lock.get("manager") != "agent-development-skills":
-        raise ContractError("activation lock is not owned by agent-development-skills")
+    validate_activation_lock(lock)
     files = lock.get("files")
     if not isinstance(files, list):
         raise ContractError("activation lock files must be a list")
@@ -694,10 +694,17 @@ def _activate(target: Path, config_candidate: bytes) -> dict[str, Any]:
         if not _path_exists(path):
             writes.append((path, (ROOT / source).read_bytes(), mode))
     if plan["config_changed"]:
-        writes.append((target / "config.toml", config_candidate, MANAGED_FILE_MODE))
+        config_path = target / "config.toml"
+        config_mode = (
+            config_path.stat().st_mode & 0o777
+            if config_path.is_file() and not config_path.is_symlink()
+            else MANAGED_FILE_MODE
+        )
+        writes.append((config_path, config_candidate, config_mode))
     activation_lock = {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "manager": "agent-development-skills",
+        "handler": "core.source-activation.apple-codex-v1",
         "files": _activation_records(target),
     }
     writes.append((target / ACTIVATION_LOCK, dumps(activation_lock).encode("utf-8"), MANAGED_FILE_MODE))
@@ -842,21 +849,21 @@ def run(args: argparse.Namespace | None = None) -> dict[str, Any]:
     if not args.dry_run:
         target.mkdir(parents=True, exist_ok=True)
 
-    legacy_links = _classify_legacy(target) if apple_selected else {}
-    if apple_selected:
-        _preflight_activation(target, adopting_legacy=bool(legacy_links))
-        config_candidate = _config_candidate(target)
-        activation = _activation_plan(target, config_candidate)
-    else:
-        config_candidate = b""
-        activation = _empty_activation_plan()
     bundle = build_install_bundle(
         ROOT / "platforms",
         platforms=selected_platforms,
         runtime_configs=["codex"] if apple_selected else [],
+        schema_root=ROOT / "schemas",
     )
 
     if args.dry_run:
+        legacy_links = _classify_legacy(target) if apple_selected else {}
+        if apple_selected:
+            _preflight_activation(target, adopting_legacy=bool(legacy_links))
+            config_candidate = _config_candidate(target)
+            activation = _activation_plan(target, config_candidate)
+        else:
+            activation = _empty_activation_plan()
         if not legacy_links:
             # Managed/fresh targets use the same fail-closed preflight as a real install.
             install_bundle(bundle, target, dry_run=True)
@@ -875,20 +882,32 @@ def run(args: argparse.Namespace | None = None) -> dict[str, Any]:
         }
 
     post_install: dict[str, Any] = {}
+    with target_lifecycle_lock(target) as lifecycle_token:
+        legacy_links = _classify_legacy(target) if apple_selected else {}
+        if apple_selected:
+            _preflight_activation(target, adopting_legacy=bool(legacy_links))
+            config_candidate = _config_candidate(target)
+        else:
+            config_candidate = b""
 
-    def complete_install(installed_target: Path, _: dict[str, Any]) -> None:
-        post_install["preserved_system_skills"] = _copy_legacy_system_skills(installed_target, legacy_links) if apple_selected else False
-        post_install["smoke"] = _run_target_smoke(installed_target, selected_platforms)
-        post_install["activation"] = _activate(installed_target, config_candidate) if apple_selected else _empty_activation_plan()
+        def complete_install(installed_target: Path, _: dict[str, Any]) -> None:
+            post_install["preserved_system_skills"] = _copy_legacy_system_skills(installed_target, legacy_links) if apple_selected else False
+            post_install["smoke"] = _run_target_smoke(installed_target, selected_platforms)
+            post_install["activation"] = _activate(installed_target, config_candidate) if apple_selected else _empty_activation_plan()
 
-    try:
-        for name in legacy_links:
-            (target / name).unlink()
-        install_result = install_bundle(bundle, target, post_install=complete_install)
-    except Exception:
-        if legacy_links:
-            _restore_legacy(target, legacy_links)
-        raise
+        try:
+            for name in legacy_links:
+                (target / name).unlink()
+            install_result = install_bundle(
+                bundle,
+                target,
+                post_install=complete_install,
+                lifecycle_token=lifecycle_token,
+            )
+        except Exception:
+            if legacy_links:
+                _restore_legacy(target, legacy_links)
+            raise
 
     return {
         "schema_version": "1.0",

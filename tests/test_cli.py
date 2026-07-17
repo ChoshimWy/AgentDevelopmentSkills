@@ -9,13 +9,15 @@ import tempfile
 import unittest
 
 from tests.support import FIXTURES, MANIFESTS, ROOT
-from agent_workflow.cli import default_manifest_directory
+from agent_workflow.cli import default_manifest_directory, default_schema_directory
 
 
 class CLITests(unittest.TestCase):
     def test_source_checkout_default_manifests_exist(self) -> None:
         self.assertEqual(default_manifest_directory(), MANIFESTS)
         self.assertTrue((default_manifest_directory() / "core" / "manifest.json").exists())
+        self.assertEqual(default_schema_directory(), ROOT / "schemas")
+        self.assertTrue((default_schema_directory() / "doctor-report-v1.schema.json").exists())
 
     def run_cli(self, *args: str) -> subprocess.CompletedProcess[str]:
         environment = dict(os.environ)
@@ -151,6 +153,74 @@ class CLITests(unittest.TestCase):
             self.assertEqual(json.loads(installed.stdout)["status"], "installed")
             self.assertTrue((target / "AGENTS.md").is_file())
             self.assertEqual(list((target / "skills").iterdir()), [])
+
+    def test_lock_lifecycle_and_plan_freeze_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "codex"
+            install_plan_path = root / "install-plan.json"
+            lock_path = root / "agent-skills.lock"
+            planned = self.run_cli(
+                "install", "--platform", "apple", "--target-root", str(target), "--dry-run"
+            )
+            self.assertEqual(planned.returncode, 0, planned.stderr)
+            install_plan_path.write_text(planned.stdout, encoding="utf-8")
+            resolved = self.run_cli(
+                "lock", "resolve", str(install_plan_path), "--output", str(lock_path)
+            )
+            self.assertEqual(resolved.returncode, 0, resolved.stderr)
+            lock = json.loads(resolved.stdout)
+            self.assertEqual(json.loads(lock_path.read_text(encoding="utf-8")), lock)
+            validated = self.run_cli("lock", "validate", str(lock_path))
+            self.assertEqual(validated.returncode, 0, validated.stderr)
+            malformed = dict(lock)
+            malformed["packages"] = [dict(item) for item in lock["packages"]]
+            malformed["packages"][0]["kind"] = []
+            malformed_path = root / "malformed-agent-skills.lock"
+            malformed_path.write_text(json.dumps(malformed), encoding="utf-8")
+            rejected = self.run_cli("lock", "validate", str(malformed_path))
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(json.loads(rejected.stderr)["status"], "blocked")
+            self.assertNotIn("Traceback", rejected.stderr)
+            explained = self.run_cli("lock", "explain", str(lock_path))
+            self.assertEqual(json.loads(explained.stdout)["lock_hash"], lock["fingerprint"])
+            diffed = self.run_cli("lock", "diff", str(lock_path), str(lock_path))
+            self.assertEqual(json.loads(diffed.stdout)["status"], "unchanged")
+            workflow = self.run_cli(
+                "plan", str(FIXTURES / "apple-app"), "--task", "实现 iOS 功能",
+                "--lock", str(lock_path), "--dry-run",
+            )
+            self.assertEqual(workflow.returncode, 0, workflow.stderr)
+            self.assertEqual(json.loads(workflow.stdout)["package_lock_hash"], lock["fingerprint"])
+            workflow_path = root / "workflow-plan.json"
+            workflow_path.write_text(workflow.stdout, encoding="utf-8")
+            context_path = root / "context.json"
+            context_path.write_text(json.dumps({
+                "task": {"text": "实现 iOS 功能", "type": "code-medium", "risk": "medium"},
+                "target_modules": ["."],
+                "user_constraints": [],
+                "checkpoints": {"CP0": "completed", "CP1": "in_progress", "CP2": "pending", "CP3": "pending"},
+            }), encoding="utf-8")
+            prepare_without_lock = self.run_cli(
+                "prepare-adapter", str(workflow_path), "apple-2", "--context", str(context_path),
+                "--invocation-id", "locked-prepare-1",
+            )
+            self.assertEqual(prepare_without_lock.returncode, 2)
+            prepared = self.run_cli(
+                "prepare-adapter", str(workflow_path), "apple-2", "--context", str(context_path),
+                "--invocation-id", "locked-prepare-2", "--lock", str(lock_path),
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            missing_lock = self.run_cli(
+                "run", str(workflow_path), "--ledger", str(root / "missing-lock.jsonl"), "--fake-adapters"
+            )
+            self.assertEqual(missing_lock.returncode, 2)
+            self.assertIn("current package Lockfile", missing_lock.stderr)
+            executed = self.run_cli(
+                "run", str(workflow_path), "--ledger", str(root / "locked.jsonl"),
+                "--lock", str(lock_path), "--fake-adapters",
+            )
+            self.assertEqual(executed.returncode, 0, executed.stderr)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,242 @@
+{
+  "$id": "https://agent-workflow.local/schemas/doctor-report-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "checks": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "enum": [
+              "environment",
+              "filesystem",
+              "install",
+              "lock",
+              "schema",
+              "package",
+              "skill",
+              "instructions",
+              "binding",
+              "permission",
+              "activation",
+              "recovery"
+            ]
+          },
+          "details": {
+            "type": "object"
+          },
+          "id": {
+            "pattern": "^[a-z][a-z0-9.-]*$",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "passed",
+              "failed",
+              "skipped",
+              "warning"
+            ]
+          },
+          "summary": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "category",
+          "status",
+          "summary",
+          "details"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "environment": {
+      "additionalProperties": false,
+      "properties": {
+        "core_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "python_required": {
+          "const": ">=3.11"
+        },
+        "python_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "schema_root": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "python_version",
+        "python_required",
+        "core_version",
+        "schema_root"
+      ],
+      "type": "object"
+    },
+    "fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "install": {
+      "additionalProperties": false,
+      "properties": {
+        "install_plan_fingerprint": {
+          "oneOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "package_lock_hash": {
+          "oneOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "selected_disciplines": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "selected_platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "selected_runtime_configs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "install_plan_fingerprint",
+        "package_lock_hash",
+        "selected_platforms",
+        "selected_disciplines",
+        "selected_runtime_configs"
+      ],
+      "type": "object"
+    },
+    "recovery": {
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": [
+                  "install-backup",
+                  "install-stage",
+                  "lifecycle-lock",
+                  "uninstall-backup"
+                ]
+              },
+              "path": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "path"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "clean",
+            "attention",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "candidates"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "status": {
+      "enum": [
+        "passed",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "additionalProperties": false,
+      "properties": {
+        "failed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warning": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "passed",
+        "failed",
+        "skipped",
+        "warning"
+      ],
+      "type": "object"
+    },
+    "target_root": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "target_root",
+    "status",
+    "environment",
+    "install",
+    "recovery",
+    "checks",
+    "summary",
+    "fingerprint"
+  ],
+  "title": "Doctor Report v1",
+  "type": "object"
+}

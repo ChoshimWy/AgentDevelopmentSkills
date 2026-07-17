@@ -1,0 +1,28 @@
+{
+  "$id": "https://agent-workflow.local/schemas/release-gate-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "blockers": {"items": {"type": "string"}, "type": "array", "uniqueItems": true},
+    "checks": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "details": {"type": "object"},
+          "id": {"pattern": "^release\\.[a-z0-9-]+$", "type": "string"},
+          "status": {"enum": ["blocked", "passed"]}
+        },
+        "required": ["id", "status", "details"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "fingerprint": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "release_identity_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["blocked", "passed"]}
+  },
+  "required": ["schema_version", "status", "blockers", "checks", "release_identity_sha256", "fingerprint"],
+  "title": "Release Gate v1",
+  "type": "object"
+}

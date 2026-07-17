@@ -231,6 +231,85 @@ class UninstallScriptTests(unittest.TestCase):
             self.assertTrue((target / "AGENTS.md").is_file())
             self.assertTrue((target / "templates" / "ui-smoke.example.yml").is_file())
 
+    def test_missing_activation_lock_is_allowed_only_for_non_activated_installs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".codex"
+            self.install(target)
+            (target / ".agent-skills" / "activation-lock.json").unlink()
+
+            blocked = self.uninstall(target, check=False)
+            self.assertEqual(blocked.returncode, 2)
+            self.assertIn("missing its activation lock", blocked.stderr)
+            self.assertTrue((target / "AGENTS.md").is_file())
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".codex"
+            target.mkdir()
+            config = target / "config.toml"
+            config.write_text(
+                f'model_instructions_file = "{target / "AGENTS.md"}"\nmodel = "keep"\n',
+                encoding="utf-8",
+            )
+            config.chmod(0o600)
+            expected_config = config.read_bytes()
+            installed = subprocess.run(
+                [
+                    str(INSTALL), "--target-root", str(target),
+                    "--platform", "desktop", "--json",
+                ],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(json.loads(installed.stdout)["selected_runtime_configs"], [])
+            self.assertFalse((target / ".agent-skills" / "activation-lock.json").exists())
+
+            result = json.loads(self.uninstall(target, "--platform", "all").stdout)
+            self.assertEqual(result["status"], "uninstalled")
+            self.assertEqual(result["activated_files"], [])
+            self.assertFalse((target / ".agent-skills").exists())
+            self.assertFalse((target / "AGENTS.md").exists())
+            self.assertEqual(config.read_bytes(), expected_config)
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
+    def test_non_activated_install_rejects_injected_activation_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            activated_target = root / "activated"
+            desktop_target = root / "desktop"
+            self.install(activated_target)
+            subprocess.run(
+                [
+                    str(INSTALL), "--target-root", str(desktop_target),
+                    "--platform", "desktop", "--json",
+                ],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            activation_lock = json.loads(
+                (activated_target / ".agent-skills" / "activation-lock.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            shutil.copy2(
+                activated_target / ".agent-skills" / "activation-lock.json",
+                desktop_target / ".agent-skills" / "activation-lock.json",
+            )
+            for item in activation_lock["files"]:
+                source = activated_target / item["path"]
+                destination = desktop_target / item["path"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+
+            blocked = self.uninstall(desktop_target, check=False)
+            self.assertEqual(blocked.returncode, 2)
+            self.assertIn("must not contain an activation lock", blocked.stderr)
+            self.assertTrue((desktop_target / "AGENTS.md").is_file())
+            self.assertTrue((desktop_target / "agents" / "reviewer.toml").is_file())
+
     def test_source_installer_activation_baseline_can_be_uninstalled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / ".codex"
@@ -282,23 +361,22 @@ class UninstallScriptTests(unittest.TestCase):
             arguments = SimpleNamespace(
                 target_root=str(target), platform=["apple"], dry_run=False, json=True
             )
-            original_replace = os.replace
+            original_rename = os.rename
             injected_path = target / "agents" / "reviewer.toml"
             failure_injected = False
 
-            def fail_on_reviewer(source, destination):
+            def fail_on_reviewer(source, destination, *args, **kwargs):
                 nonlocal failure_injected
-                source_path = Path(source)
                 if (
                     not failure_injected
-                    and source_path.name == "reviewer.toml"
-                    and source_path.parent.name == "agents"
+                    and source == "reviewer.toml"
+                    and kwargs.get("src_dir_fd") is not None
                 ):
                     failure_injected = True
                     raise OSError("injected uninstall failure")
-                return original_replace(source, destination)
+                return original_rename(source, destination, *args, **kwargs)
 
-            with mock.patch.object(module.os, "replace", side_effect=fail_on_reviewer):
+            with mock.patch.object(module.os, "rename", side_effect=fail_on_reviewer):
                 with self.assertRaisesRegex(OSError, "injected uninstall failure"):
                     module.run(arguments)
 
@@ -307,6 +385,256 @@ class UninstallScriptTests(unittest.TestCase):
             self.assertTrue((target / ".agent-skills" / "install-lock.json").is_file())
             self.assertTrue(injected_path.is_file())
             module._managed_state(target)
+            self.assertFalse(any(target.glob(".agent-skills-uninstall-backup-*")))
+
+    def test_activation_toctou_is_rejected_and_concurrent_bytes_are_restored(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".codex"
+            self.install(target)
+            module = load_uninstaller_module()
+            arguments = SimpleNamespace(
+                target_root=str(target), platform=["apple"], dry_run=False, json=True
+            )
+            reviewer = target / "agents" / "reviewer.toml"
+            concurrent = b"user-concurrent = true\n"
+            original_rename = os.rename
+            injected = False
+
+            def replace_after_preflight(source, destination, *args, **kwargs):
+                nonlocal injected
+                if (
+                    not injected
+                    and source == "reviewer.toml"
+                    and kwargs.get("src_dir_fd") is not None
+                ):
+                    injected = True
+                    reviewer.write_bytes(concurrent)
+                return original_rename(source, destination, *args, **kwargs)
+
+            with mock.patch.object(module.os, "rename", side_effect=replace_after_preflight):
+                with self.assertRaisesRegex(module.ContractError, "changed during uninstall"):
+                    module.run(arguments)
+
+            self.assertEqual(reviewer.read_bytes(), concurrent)
+            self.assertTrue((target / "AGENTS.md").is_file())
+            self.assertFalse(any(target.glob(".agent-skills-uninstall-backup-*")))
+
+    def test_config_toctou_is_rejected_without_losing_concurrent_update(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".codex"
+            self.install(target)
+            module = load_uninstaller_module()
+            arguments = SimpleNamespace(
+                target_root=str(target), platform=["apple"], dry_run=False, json=True
+            )
+            config = target / "config.toml"
+            concurrent = b'model = "concurrent-user-value"\n'
+            original_rename = os.rename
+            injected = False
+
+            def replace_after_preflight(source, destination, *args, **kwargs):
+                nonlocal injected
+                if (
+                    not injected
+                    and source == "config.toml"
+                    and kwargs.get("src_dir_fd") is not None
+                ):
+                    injected = True
+                    config.write_bytes(concurrent)
+                return original_rename(source, destination, *args, **kwargs)
+
+            with mock.patch.object(module.os, "rename", side_effect=replace_after_preflight):
+                with self.assertRaisesRegex(module.ContractError, "config.toml changed"):
+                    module.run(arguments)
+
+            self.assertEqual(config.read_bytes(), concurrent)
+            self.assertTrue((target / "AGENTS.md").is_file())
+            self.assertFalse(any(target.glob(".agent-skills-uninstall-backup-*")))
+
+    def test_config_recreation_before_publish_preserves_both_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".codex"
+            self.install(target)
+            module = load_uninstaller_module()
+            arguments = SimpleNamespace(
+                target_root=str(target), platform=["apple"], dry_run=False, json=True
+            )
+            config = target / "config.toml"
+            original = config.read_bytes()
+            concurrent = b'model = "concurrent-recreated"\n'
+
+            def recreate_before_link(source, destination, *args, **kwargs):
+                config.write_bytes(concurrent)
+                raise FileExistsError("injected concurrent config recreation")
+
+            with mock.patch.object(module.os, "link", side_effect=recreate_before_link):
+                with self.assertRaisesRegex(module.ContractError, "rollback incomplete"):
+                    module.run(arguments)
+
+            self.assertEqual(config.read_bytes(), concurrent)
+            self.assertTrue((target / "AGENTS.md").is_file())
+            backups = list(target.glob(".agent-skills-uninstall-backup-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual((backups[0] / "config.toml").read_bytes(), original)
+
+    def test_activation_parent_symlink_race_cannot_reach_external_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / ".codex"
+            self.install(target)
+            module = load_uninstaller_module()
+            arguments = SimpleNamespace(
+                target_root=str(target), platform=["apple"], dry_run=False, json=True
+            )
+            templates = target.resolve() / "templates"
+            held_templates = root / "held-templates"
+            external = root / "external"
+            external.mkdir()
+            victim = external / "ui-smoke.example.yml"
+            victim_content = (templates / "ui-smoke.example.yml").read_bytes()
+            victim.write_bytes(victim_content)
+            original_rename = os.rename
+            injected = False
+
+            def swap_parent_during_fd_rename(source, destination, *args, **kwargs):
+                nonlocal injected
+                if (
+                    not injected
+                    and source == "ui-smoke.example.yml"
+                    and kwargs.get("src_dir_fd") is not None
+                ):
+                    injected = True
+                    original_rename(templates, held_templates)
+                    templates.symlink_to(external, target_is_directory=True)
+                    try:
+                        return original_rename(source, destination, *args, **kwargs)
+                    finally:
+                        templates.unlink()
+                        original_rename(held_templates, templates)
+                return original_rename(source, destination, *args, **kwargs)
+
+            with mock.patch.object(module.os, "rename", side_effect=swap_parent_during_fd_rename):
+                result = module.run(arguments)
+
+            self.assertTrue(injected)
+            self.assertEqual(result["status"], "uninstalled")
+            self.assertEqual(victim.read_bytes(), victim_content)
+            self.assertTrue(victim.is_file())
+
+    def test_target_root_swap_cannot_redirect_managed_or_config_moves(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / ".codex"
+            self.install(target)
+            module = load_uninstaller_module()
+            arguments = SimpleNamespace(
+                target_root=str(target), platform=["apple"], dry_run=False, json=True
+            )
+            target = target.resolve()
+            held = root / "held-target"
+            replacement = root / "replacement-target"
+            replacement.mkdir()
+            replacement_agents = b"replacement user agents\n"
+            replacement_config = b'model = "replacement-user-config"\n'
+            (replacement / "AGENTS.md").write_bytes(replacement_agents)
+            (replacement / "config.toml").write_bytes(replacement_config)
+            original_rename = os.rename
+            injected: set[str] = set()
+
+            def swap_root_during_fd_rename(source, destination, *args, **kwargs):
+                if (
+                    source in {"AGENTS.md", "config.toml"}
+                    and source not in injected
+                    and kwargs.get("src_dir_fd") is not None
+                ):
+                    injected.add(source)
+                    original_rename(target, held)
+                    original_rename(replacement, target)
+                    try:
+                        return original_rename(source, destination, *args, **kwargs)
+                    finally:
+                        original_rename(target, replacement)
+                        original_rename(held, target)
+                return original_rename(source, destination, *args, **kwargs)
+
+            with mock.patch.object(
+                module.os,
+                "rename",
+                side_effect=swap_root_during_fd_rename,
+            ):
+                result = module.run(arguments)
+
+            self.assertEqual(injected, {"AGENTS.md", "config.toml"})
+            self.assertEqual(result["status"], "uninstalled")
+            self.assertEqual((replacement / "AGENTS.md").read_bytes(), replacement_agents)
+            self.assertEqual((replacement / "config.toml").read_bytes(), replacement_config)
+
+    def test_preflight_root_swap_cannot_cross_bind_activation_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            replacement = root / "replacement"
+            held = root / "held-target"
+            subprocess.run(
+                [
+                    str(INSTALL), "--target-root", str(target),
+                    "--platform", "desktop", "--json",
+                ],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.install(replacement)
+            victim = target / "agents" / "reviewer.toml"
+            victim.parent.mkdir()
+            victim_content = (replacement / "agents" / "reviewer.toml").read_bytes()
+            victim.write_bytes(victim_content)
+            victim.chmod((replacement / "agents" / "reviewer.toml").stat().st_mode & 0o777)
+
+            module = load_uninstaller_module()
+            original_is_managed = module._is_managed_install
+            original_load = module.load
+            original_rename = os.rename
+            swapped = False
+            restored = False
+
+            def swap_during_validation(path):
+                nonlocal swapped
+                if not swapped:
+                    original_rename(target, held)
+                    original_rename(replacement, target)
+                    swapped = True
+                return original_is_managed(path)
+
+            def restore_after_activation_load(path):
+                nonlocal restored
+                value = original_load(path)
+                if (
+                    swapped
+                    and not restored
+                    and Path(path).name == "activation-lock.json"
+                ):
+                    original_rename(target, replacement)
+                    original_rename(held, target)
+                    restored = True
+                return value
+
+            arguments = SimpleNamespace(
+                target_root=str(target), platform=["all"], dry_run=False, json=True
+            )
+            with mock.patch.object(
+                module,
+                "_is_managed_install",
+                side_effect=swap_during_validation,
+            ), mock.patch.object(module, "load", side_effect=restore_after_activation_load):
+                with self.assertRaisesRegex(module.ContractError, "install lock differs"):
+                    module.run(arguments)
+
+            self.assertTrue(swapped and restored)
+            self.assertEqual(victim.read_bytes(), victim_content)
+            self.assertTrue((target / "AGENTS.md").is_file())
+            self.assertTrue((replacement / "AGENTS.md").is_file())
             self.assertFalse(any(target.glob(".agent-skills-uninstall-backup-*")))
 
     def test_late_transaction_failure_restores_config_system_skills_and_modes(self) -> None:

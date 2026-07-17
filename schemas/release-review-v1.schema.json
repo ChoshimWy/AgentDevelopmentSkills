@@ -1,0 +1,18 @@
+{
+  "$id": "https://agent-workflow.local/schemas/release-review-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "blockers": {"items": {"type": "string"}, "type": "array"},
+    "fingerprint": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "reviewed_release_identity_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "reviewer": {"const": "independent"},
+    "schema_version": {"const": "1.0"},
+    "scope": {"const": "phase-6-release"},
+    "source_revision": {"minLength": 1, "type": "string"},
+    "status": {"const": "approved"}
+  },
+  "required": ["schema_version", "scope", "reviewer", "status", "blockers", "reviewed_release_identity_sha256", "source_revision", "fingerprint"],
+  "title": "Release Review Evidence v1",
+  "type": "object"
+}

@@ -1010,7 +1010,7 @@ agent-skills uninstall --platform desktop --dry-run</code></pre>
   → conflict validation
   → deterministic ~/.codex/AGENTS.md</code></pre>
         <h3>23.2 可复现 Lockfile</h3>
-        <p>Install Plan/Lock v2 已冻结 Core、package source hash、Manifest、Capability Provider/Binding、flattened asset allowlist 与 AGENTS rule trace；下例是与 Schema 同名的关键字段结构节选，不是完整 artifact。Phase 6 继续补齐持久化生命周期、diff、doctor、upgrade 与 uninstall：</p>
+        <p>Install Plan/Lock v2 已冻结 Core、package source hash、Manifest、Capability Provider/Binding、flattened asset allowlist 与 AGENTS rule trace；下例是与 Schema 同名的关键字段结构节选，不是完整 artifact。Phase 6 已补齐独立 Persistent Lock v1、diff、Plan/RunLedger 指纹、只读 Doctor，以及 managed-root/source activation/config/profile 可逆 Upgrade/Rollback；Schema transform 与部分 uninstall 继续实施：</p>
         <pre><code>{
   "lock_schema_version": "2.0",
   "core_version": "0.2.0",
@@ -1032,8 +1032,9 @@ agent-skills uninstall --platform desktop --dry-run</code></pre>
     "sha256": "..."
   }
 }</code></pre>
+        <p><code>agent-skills doctor</code> 只读消费 Install Lock、Persistent Lock、安装快照和运行时 Schema，输出 canonical <code>doctor-report</code> v1；它分别报告 Python/Core、Schema inventory、package/Skill/Manifest、Binding、permission、唯一全局 AGENTS 的分片来源/顺序/rule trace/最终 hash、activation 以及安装/卸载恢复残留。任何失败返回 <code>blocked</code>，不提供隐式修复，也不读取凭据或业务仓库。</p>
         <p>每份 Workflow Plan 同时生成 fingerprint，包含 project profile、resolved policy、插件锁定、目标模块、环境基线和 DAG identity；只有 fingerprint 相同时才允许复用缓存证据。</p>
-        <div class="callout warn"><strong>事务边界</strong>源码安装器覆盖受管根目录的单进程 staged swap；<code>install.sh</code> 将后置 smoke/activation 纳入底层单进程临时回滚窗口，失败时恢复写入前受管目录或旧软链，但按用户约束不创建持久配置备份。跨进程互斥、进程崩溃恢复日志、doctor 自动修复以及 upgrade/uninstall 事务仍属于 Phase 6，当前不得宣称为跨进程原子安装或发布包完成。</div>
+        <div class="callout warn"><strong>事务边界</strong>源码安装器覆盖受管根目录的单进程 staged swap；<code>install.sh</code> 将后置 smoke/activation 纳入底层单进程临时回滚窗口，失败时恢复写入前受管目录或旧软链，但按用户约束不创建持久配置备份。Install、Source Install、Upgrade、Rollback 与 Uninstall 现共享目标级跨进程 lifecycle lock；Doctor 能识别 lock/stage/backup 残留并 fail-closed。activation-lock v1→v2 已提供真实 migration 与 exact rollback；进程崩溃后的自动修复仍不执行，RC gate 在 License/NOTICE 未 verified 或证据不完整时保持 blocked。</div>
         <h3>23.3 插件权限与信任边界</h3>
         <ul>
           <li>Discovery 默认只读，不执行仓库任意脚本，也不访问凭据。</li>
@@ -1067,9 +1068,9 @@ design-source read/write boundary test</code></pre>
             <tr><td>Phase 2B</td><td><span class="check">√</span> Apple AgentSkills 单仓迁移、选择安装、单一 AGENTS 与 CP0–CP3 已完成</td><td>源码/隔离安装以 <code>platforms/apple/</code> 为真源；本机旧安装迁移不静默执行并归 Phase 6</td></tr>
             <tr><td>Phase 2C</td><td><span class="check">√</span> Shared Discipline Extraction &amp; Contract Repair A–G 实现与 Conformance 已完成</td><td>共享 ownership、Migration Audit v2、Apple Normalize、bootstrap-only、Lock v2 与 Runtime Config 已落地；独立最终审查阻塞问题：无</td></tr>
             <tr><td>Phase 3</td><td><span class="check">√</span> Product Design / Figma 显式 Provider、Design Source Gateway、Canonical IR / Registry / Packet 与 Apple Packet v2 已实现；Conformance 与独立 reviewer 均通过</td><td>credential-free source fixture 到 Apple Agent Packet 可追溯；live Connector 保持显式授权</td></tr>
-            <tr><td>Phase 4</td><td><span class="check">√</span> QA Core、PRD/Bug/Release、Desktop 最小 Provider/Adapter、真实 Plan/RunLedger 聚合与 goldens 已落地</td><td>CP0–CP3；当前工作区 43 Schema、19 Manifest、325 个 unittest、完整 Conformance 与独立 reviewer 均通过</td></tr>
+            <tr><td>Phase 4</td><td><span class="check">√</span> QA Core、PRD/Bug/Release、Desktop 最小 Provider/Adapter、真实 Plan/RunLedger 聚合与 goldens 已落地</td><td>CP0–CP3；当前工作区 45 Schema、19 Manifest、353 个 unittest、完整 Conformance 与独立 reviewer 均通过</td></tr>
             <tr><td>Phase 5</td><td><span class="todo">□</span> 暂缓 Android、Web、Backend 与更多平台/UI Binding；Desktop 最小包已由 Phase 4 提供</td><td>先以获准真实 Xcode 工程完成 Apple host readiness，再启动其余平台 Provider；Desktop 后续只扩展 framework Adapter/UI Binding</td></tr>
-            <tr><td>Phase 6</td><td><span class="todo">□</span> 在 P2C Lock v2 / source hash / asset allowlist / rule trace 基础上完成 doctor、升级卸载、打包与发布治理；Apple 本机官方知识源已具备 metadata-only 联邦合同，仍待 Xcode 27 host export smoke</td><td>单一发布物可选择平台且可移植、可复现、可回滚、冲突安全；本地知识源不进入再分发产物</td></tr>
+            <tr><td>Phase 6</td><td><span class="todo">□</span> 技术链路已完成 Persistent Lock、Doctor、Upgrade/Rollback、部分卸载、activation-lock migration、deterministic wheel/sdist、SBOM/provenance 与 fail-closed RC gate；等待 Python 3.11–3.14 clean CI aggregate、真实可信 release signer 签字，且 License/NOTICE provenance 未 verified 时发布资格必须 blocked</td><td>单一发布物可选择平台且可移植、可复现、可回滚、冲突安全；本地知识源正文不进入再分发产物</td></tr>
           </tbody>
         </table>
         <div class="callout info"><strong>推荐扩展顺序</strong>Apple installed-contract smoke → 获准真实 Xcode host smoke → Android → Web TypeScript → Backend Node/Java/Go → Desktop framework expansion → Unity → Flutter / React Native。Apple host readiness 未通过前，Android、Web、Backend 保持 <code>bootstrap-only</code>；Desktop 仅维持 Phase 4 最小闭包。</div>
@@ -1125,7 +1126,7 @@ design-source read/write boundary test</code></pre>
         </ul>
         <div class="callout warn">
           <strong>当前完成度声明</strong>
-          本文已更新为 Architecture Baseline v1.2。Phase 1、Phase 2A–2C、Phase 3 与 Phase 4 已完成；当前工作区以 43 个 Schema、19 个 Manifest、325 个 unittest、全量 Conformance 与 Phase 4 独立最终审查收口，Phase 4 阻塞问题：无。共享 workflow/review/documentation/git/design/qa 已从平台去重，Desktop 最小 Provider 已实现，Android/Web/Backend 保持 bootstrap-only，Codex Runtime Config 只允许显式选择。真实本机旧安装迁移、License/NOTICE 发布决策和发布级生命周期仍未完成并归 Phase 6。
+          本文已更新为 Architecture Baseline v1.2。Phase 1、Phase 2A–2C、Phase 3 与 Phase 4 已完成；当前 Phase 6 工作区包含 61 个 Schema、19 个 Manifest、18 个非法 golden 与 423 个 unittest；Lock/Doctor/Upgrade/Rollback/全量与部分卸载/Migration/Packaging/RC gate/可信 review 验签/qualification handoff 已分别完成独立复审门禁，P1/P2 阻塞问题：无。全量卸载对 target root、activation parent、managed roots 与 config 全程使用 no-follow FD-relative 原语，并把 moved original Lock/activation exact cross-bind 到 Plan，避免路径替换与并发更新跨 ownership 删除。共享 workflow/review/documentation/git/design/qa 已从平台去重，Desktop 最小 Provider 已实现，Android/Web/Backend 保持 bootstrap-only，Codex Runtime Config 只允许显式选择。RC Gate 的 signed review 是 candidate 执行授权边界而非 hostile-code sandbox；正式 Gate 必须运行在可销毁隔离 worker，daemon/setsid 风险由 Release Engineering 持有。签名同时绑定 Python 3.11–3.14 aggregate compatibility evidence；缺版本、source/artifact 漂移时不得执行 candidate。显式 workflow dispatch 通过 qualification handoff 把 exact candidate Lock、clean candidate、matrix、candidate-bound Conformance、fresh Gate static preflight 与无签名 payload 冻结为单一可审计 artifact；source ZIP、wheel data 与 sdist 同步携带该 Conformance workflow，使发布物内执行不依赖 checkout 外文件，外部 signer 与最终隔离 Gate 仍保持职责分离。License/NOTICE provenance 仍为 pending，Python 3.11–3.14 clean CI aggregate、可信 review 签发者与 Xcode 27 host export smoke 尚无当前证据，因此不得宣称 release-ready。
         </div>
       </section>
     </div>

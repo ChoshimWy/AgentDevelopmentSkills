@@ -1,0 +1,18 @@
+{
+  "$id": "https://agent-workflow.local/schemas/release-sbom-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "exclusions": {"items": {"additionalProperties": false, "properties": {"id": {"type": "string"}, "reason": {"type": "string"}}, "required": ["id", "reason"], "type": "object"}, "type": "array"},
+    "files": {"items": {"additionalProperties": false, "properties": {"classification": {"const": "redistributable-source"}, "mode": {"enum": [420, 493]}, "path": {"minLength": 1, "type": "string"}, "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"}, "size": {"minimum": 0, "type": "integer"}}, "required": ["path", "mode", "size", "sha256", "classification"], "type": "object"}, "minItems": 1, "type": "array"},
+    "fingerprint": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "format": {"const": "agent-skills-sbom-v1"},
+    "product": {"const": "agent-development-skills"},
+    "schema_version": {"const": "1.0"},
+    "source_revision": {"minLength": 1, "type": "string"},
+    "version": {"type": "string"}
+  },
+  "required": ["schema_version", "format", "product", "version", "source_revision", "files", "exclusions", "fingerprint"],
+  "title": "Release SBOM v1",
+  "type": "object"
+}

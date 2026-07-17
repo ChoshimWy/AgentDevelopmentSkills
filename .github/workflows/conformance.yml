@@ -4,6 +4,18 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_channel:
+        description: Clean candidate channel to freeze into the qualification handoff
+        required: true
+        default: beta
+        type: choice
+        options: [beta, stable]
+      review_key_id:
+        description: SHA-256 identity of the external release-review signing key
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -56,3 +68,114 @@ jobs:
         env:
           PYTHONPATH: src
         run: python scripts/run_conformance.py
+
+  python-distribution:
+    name: Python artifacts (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run deterministic distribution compatibility evidence
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/python_compatibility_evidence.py run \
+            --source-revision "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/python-${{ matrix.python-version }}.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-compatibility-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/python-${{ matrix.python-version }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  python-compatibility-matrix:
+    name: Python 3.11-3.14 compatibility evidence
+    needs: python-distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: python-compatibility-*
+          path: ${{ runner.temp }}/python-compatibility
+          merge-multiple: true
+      - name: Merge and validate exact compatibility matrix
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/python_compatibility_evidence.py merge \
+            "$RUNNER_TEMP"/python-compatibility/python-*.json \
+            --output "$RUNNER_TEMP/python-compatibility-v1.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-compatibility-v1
+          path: ${{ runner.temp }}/python-compatibility-v1.json
+          if-no-files-found: error
+          retention-days: 30
+
+  release-qualification-handoff:
+    name: Release qualification handoff
+    if: github.event_name == 'workflow_dispatch'
+    needs: python-compatibility-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-compatibility-v1
+          path: ${{ runner.temp }}/qualification
+      - name: Resolve candidate lock and execute candidate-bound Conformance
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m agent_workflow.cli install \
+            --platform apple --platform desktop --dry-run \
+            > "$RUNNER_TEMP/qualification/install-plan.json"
+          python -m agent_workflow.cli lock resolve \
+            "$RUNNER_TEMP/qualification/install-plan.json" \
+            --output "$RUNNER_TEMP/qualification/agent-skills.lock" \
+            > "$RUNNER_TEMP/qualification/lock-report.json"
+          python scripts/run_conformance.py \
+            --upgrade-lock "$RUNNER_TEMP/qualification/agent-skills.lock" \
+            > "$RUNNER_TEMP/qualification/conformance-evidence.json"
+      - name: Build clean release candidate
+        env:
+          PYTHONPATH: src
+          RELEASE_CHANNEL: ${{ inputs.release_channel }}
+        run: |
+          python scripts/build_release_bundle.py \
+            --channel "$RELEASE_CHANNEL" \
+            --output "$RUNNER_TEMP/qualification/release"
+      - name: Freeze unsigned external-review handoff
+        env:
+          PYTHONPATH: src
+          REVIEW_KEY_ID: ${{ inputs.review_key_id }}
+        run: |
+          python scripts/prepare_release_qualification.py prepare \
+            --release-dir "$RUNNER_TEMP/qualification/release" \
+            --candidate-lock "$RUNNER_TEMP/qualification/agent-skills.lock" \
+            --conformance-evidence "$RUNNER_TEMP/qualification/conformance-evidence.json" \
+            --python-compatibility-evidence "$RUNNER_TEMP/qualification/python-compatibility-v1.json" \
+            --review-key-id "$REVIEW_KEY_ID" \
+            --output "$RUNNER_TEMP/release-qualification-handoff"
+          python scripts/prepare_release_qualification.py validate \
+            "$RUNNER_TEMP/release-qualification-handoff"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-qualification-${{ github.sha }}
+          path: ${{ runner.temp }}/release-qualification-handoff
+          if-no-files-found: error
+          retention-days: 90
