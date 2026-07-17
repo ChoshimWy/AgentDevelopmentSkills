@@ -2,7 +2,7 @@
 
 面向 Codex 与其他开发 Agent 的跨平台工作流 Core。项目通过只读仓库发现、策略解析、Capability 合同和确定性 DAG，自动判断目标模块所需的研发流程，并以可解释、可恢复、fail-closed 的 Runtime 执行计划。
 
-> 当前版本：`0.2.0`。Phase 1、Phase 2A–2C、Phase 3 与 Phase 4 已完成且不回滚；Phase 6 仓内实现已完成 Persistent Lock、只读 Doctor、managed-root/source 可逆 Upgrade/Rollback、多平台部分卸载、真实 Schema migration、deterministic Packaging、qualification handoff 与供应链/RC 门禁，并通过 v23 Conformance 和独立复审。发布资格仍由真实 Python 3.11–3.14 clean CI aggregate、仓库级 License/NOTICE owner 决策及可信 signer 签字 fail-closed；真实本机旧安装切换、live Connector/设备采集与发布动作必须显式执行。
+> 当前版本：`0.2.0`。Phase 1、Phase 2A–2C、Phase 3 与 Phase 4 已完成且不回滚；Phase 6 仓内实现已完成 Persistent Lock、只读 Doctor、managed-root/source 可逆 Upgrade/Rollback、多平台部分卸载、真实 Schema migration、deterministic Packaging、qualification handoff 与供应链/RC 门禁，并通过 v23 Conformance 和独立复审。Python 3.11–3.14 clean CI aggregate 已在 commit `44c52d2` 与 run `29550350238` 通过；发布资格仍由仓库级 License/NOTICE owner 决策及可信 signer 签字 fail-closed，真实本机旧安装切换、live Connector/设备采集与发布动作必须显式执行。
 
 ## 为什么需要它
 
@@ -416,7 +416,7 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 
 当前基线：
 
-- 423 个 P1–P6 scoped unittest
+- 424 个 P1–P6 scoped unittest
 - 61 个 Core / Shared Discipline / Phase 6 JSON Schema
 - 18 个非法 contract golden
 - 17 个仓内/运行时 Manifest + 2 个显式外部 Provider Manifest：Core、Apple/Desktop package 与 provider、3 个 bootstrap-only 平台、6 个共享 Discipline、2 个 Design Provider bootstrap 与 1 个显式 Codex Runtime Config；外部 Provider 默认不启用
@@ -447,7 +447,7 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 | Phase 3 | 已完成；Conformance 与独立 reviewer 均通过 | Product Design / Figma 显式 Provider、只读 Gateway、共享 Evidence/IR/Registry/Packet、Apple Packet v2 与 UI report 已贯通；live Connector 仍需显式授权 |
 | Phase 4 | 已完成；CP0–CP3、Conformance 与独立 reviewer 均通过 | QA Core、三类 QA workflow、Desktop 最小 Provider/Adapter、环境画像、真实 Plan/RunLedger 聚合与 goldens 已落地 |
 | Phase 5 | 暂缓（先完成 iOS host readiness） | Android、Web、Backend 继续保持 bootstrap-only；Desktop 后续仅扩展更多 framework Adapter/UI Binding |
-| Phase 6 | 技术实现已收口；发布资格 blocked | Lock/Doctor/Upgrade/Rollback/全量与部分卸载、activation-lock v1→v2 migration、deterministic wheel/sdist、SBOM/provenance、signed review、Python compatibility evidence 与 fail-closed RC gate 已落地并完成独立复审；仍需真实 Python 3.11–3.14 clean CI aggregate、仓库级 License/NOTICE owner 决策及真实 release signer 签字 |
+| Phase 6 | 技术实现与 clean CI aggregate 已收口；发布资格 blocked | Lock/Doctor/Upgrade/Rollback/全量与部分卸载、activation-lock v1→v2 migration、deterministic wheel/sdist、SBOM/provenance、signed review、Python 3.11–3.14 compatibility aggregate 与 fail-closed RC gate 已落地并完成独立复审；仍需仓库级 License/NOTICE owner 决策及真实 release signer 签字 |
 
 ## 当前限制
 
@@ -461,7 +461,7 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 - 支持矩阵：Core 与 deterministic wheel/sdist 目标 Python 3.11–3.14；production bootstrap 当前仅 macOS、Linux 与 WSL2。Windows bootstrap/语法/源码 dry-run 进入 CI，但 Windows transaction 未 ready，production manifest fail-closed；Xcode 27 官方知识源 host smoke、真实设备/Remote/Design Connector 均不随发布物伪造。
 - Telemetry 默认且始终关闭：Core、installer、Doctor、migration、packaging 与 RC gate 不上传源码、凭据、设计数据、设备数据或运行日志；诊断只写用户显式指定的本地 canonical artifacts。删除 release/rollback/evidence 由操作者按本地 retention policy 显式执行，不提供隐式远端收集或自动清理用户文件。
 - 版本与弃用：Core/package 使用 SemVer compatibility range，Schema 使用显式 `schema_version` 与 migration graph；deprecated artifact 先保持 readable + Doctor warning，再 blocked-new-use，只有 Lock/rollback 不再引用且迁移窗口关闭后才能移除。activation-lock v1 当前为 readable/blocked-new-use，所有新 writer 只生成 v2。
-- 本地只验证了 Python 3.14.3；Python 3.11–3.14 由 CI matrix 覆盖。
+- 本地 Python 3.14.3 完整 Conformance 已通过；2026-07-17 的 clean CI run `29550350238` 已通过 macOS、Linux、Windows bootstrap，并在 CPython 3.11.15、3.12.13、3.13.14、3.14.6 完成 byte-identical wheel/sdist aggregate，fingerprint 为 `6b2893c5a938`，四版本完整 Conformance 均通过。
 - 远程 bootstrap 当前具备离线 fixture、deterministic development bundle、wheel/sdist clean-venv smoke 与 supply-chain metadata 证据；默认 production manifest 仅允许 macOS/Linux/WSL2。公开 distribution host、Windows install transaction、crash-residue 自动恢复与 License/NOTICE 决策仍未完成；RC gate 对这些边界保持 fail-closed。
 
 ## 设计原则
