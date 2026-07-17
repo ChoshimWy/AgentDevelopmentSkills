@@ -166,6 +166,64 @@ class PlannerTests(unittest.TestCase):
 
 
 class WrapperPolicyTests(unittest.TestCase):
+    @staticmethod
+    def wrapper_env(root: Path, queue: Path) -> dict[str, str]:
+        fake_bin = root / "fake-apple-toolchain"
+        fake_bin.mkdir(exist_ok=True)
+        xcodebuild = fake_bin / "xcodebuild"
+        xcodebuild.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$#\" -eq 1 ] && [ \"$1\" = '-version' ]; then\n"
+            "  printf 'Xcode 99.0\\nBuild version 99A1\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 64\n",
+            encoding="utf-8",
+        )
+        xcodebuild.chmod(0o755)
+        xcrun = fake_bin / "xcrun"
+        xcrun.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$#\" -eq 3 ] && [ \"$1\" = '--sdk' ] "
+            "&& [ \"$2\" = 'iphonesimulator' ] && [ \"$3\" = '--show-sdk-version' ]; then\n"
+            "  printf '99.0\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 64\n",
+            encoding="utf-8",
+        )
+        xcrun.chmod(0o755)
+        return {
+            **os.environ,
+            "CODEX_BUILD_QUEUE_ROOT": str(queue),
+            "HOME": str(root / "home"),
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+        }
+
+    @staticmethod
+    def stop_queue_daemon(queue: Path) -> None:
+        import time
+
+        pid_path = queue / "daemon.pid"
+        if not pid_path.is_file():
+            return
+        raw_pid = pid_path.read_text(encoding="utf-8").strip()
+        if not raw_pid.isdigit():
+            return
+        pid = int(raw_pid)
+        try:
+            os.kill(pid, 15)
+        except ProcessLookupError:
+            return
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        raise AssertionError(f"queue daemon did not terminate: {pid}")
+
     def test_queue_doctor_is_read_only_and_rejects_forged_live_active_job(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -432,117 +490,117 @@ class WrapperPolicyTests(unittest.TestCase):
     def test_live_repair_is_refused_and_tampered_queued_job_unblocks_waiter(self) -> None:
         import time
 
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            queue = root / "queue"
-            slow = root / "slow.sh"
-            slow.write_text("#!/bin/sh\nsleep 3\nexit 0\n", encoding="utf-8")
-            slow.chmod(0o755)
-            quick = root / "quick.sh"
-            quick.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            quick.chmod(0o755)
-            wrapper = ROOT / "platforms/apple/config/codex/templates/codex_verify.example.sh"
-            env = {**os.environ, "CODEX_BUILD_QUEUE_ROOT": str(queue), "HOME": str(root / "home")}
+        temporary = self.enterContext(tempfile.TemporaryDirectory())
+        root = Path(temporary)
+        queue = root / "queue"
+        slow = root / "slow.sh"
+        slow.write_text("#!/bin/sh\nsleep 3\nexit 0\n", encoding="utf-8")
+        slow.chmod(0o755)
+        quick = root / "quick.sh"
+        quick.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        quick.chmod(0o755)
+        wrapper = ROOT / "platforms/apple/config/codex/templates/codex_verify.example.sh"
+        env = self.wrapper_env(root, queue)
+        self.addCleanup(self.stop_queue_daemon, queue)
 
-            first = subprocess.Popen(
-                ["bash", str(wrapper), "--build-check", str(slow), str(root)],
-                cwd=ROOT,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            self.addCleanup(lambda: first.poll() is None and first.terminate())
+        first = subprocess.Popen(
+            ["bash", str(wrapper), "--build-check", str(slow), str(root)],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(lambda: first.poll() is None and first.terminate())
 
-            deadline = time.time() + 10
-            running = None
-            while time.time() < deadline:
-                for candidate in (queue / "jobs").glob("*") if (queue / "jobs").is_dir() else []:
-                    if (candidate / "state").read_text(encoding="utf-8").strip() == "running":
-                        running = candidate
-                        break
-                if running is not None:
+        deadline = time.time() + 10
+        running = None
+        while time.time() < deadline:
+            for candidate in (queue / "jobs").glob("*") if (queue / "jobs").is_dir() else []:
+                if (candidate / "state").read_text(encoding="utf-8").strip() == "running":
+                    running = candidate
                     break
-                time.sleep(0.05)
-            self.assertIsNotNone(running)
+            if running is not None:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(running)
 
-            repair = subprocess.run(
-                ["bash", str(wrapper), "--queue-doctor", "--repair"],
-                cwd=ROOT,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            self.assertEqual(75, repair.returncode, repair.stderr)
-            self.assertEqual("running", (running / "state").read_text(encoding="utf-8").strip())
+        repair = subprocess.run(
+            ["bash", str(wrapper), "--queue-doctor", "--repair"],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(75, repair.returncode, repair.stderr)
+        self.assertEqual("running", (running / "state").read_text(encoding="utf-8").strip())
 
-            second = subprocess.Popen(
-                ["bash", str(wrapper), "--build-check", str(quick), str(root)],
-                cwd=ROOT,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            self.addCleanup(lambda: second.poll() is None and second.terminate())
-            queued = None
-            deadline = time.time() + 10
-            while time.time() < deadline:
-                candidates = [path for path in (queue / "jobs").glob("*") if path != running]
-                for candidate in candidates:
-                    if (candidate / "state").read_text(encoding="utf-8").strip() == "queued":
-                        queued = candidate
-                        break
-                if queued is not None:
+        second = subprocess.Popen(
+            ["bash", str(wrapper), "--build-check", str(quick), str(root)],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(lambda: second.poll() is None and second.terminate())
+        queued = None
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            candidates = [path for path in (queue / "jobs").glob("*") if path != running]
+            for candidate in candidates:
+                if (candidate / "state").read_text(encoding="utf-8").strip() == "queued":
+                    queued = candidate
                     break
-                time.sleep(0.05)
-            self.assertIsNotNone(queued)
-            with (queued / "command.args0").open("ab") as stream:
-                stream.write(b"tampered\0")
+            if queued is not None:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(queued)
+        with (queued / "command.args0").open("ab") as stream:
+            stream.write(b"tampered\0")
 
-            _first_stdout, first_stderr = first.communicate(timeout=15)
-            second_stdout, second_stderr = second.communicate(timeout=15)
-            self.assertEqual(0, first.returncode, first_stderr)
-            self.assertEqual(70, second.returncode, second_stdout + second_stderr)
-            self.assertIn("invalid, missing, or quarantined", second_stderr)
-            self.assertFalse(queued.exists())
-            self.assertTrue(any((queue / "quarantine").rglob(queued.name)))
+        _first_stdout, first_stderr = first.communicate(timeout=15)
+        second_stdout, second_stderr = second.communicate(timeout=15)
+        self.assertEqual(0, first.returncode, first_stderr)
+        self.assertEqual(70, second.returncode, second_stdout + second_stderr)
+        self.assertIn("invalid, missing, or quarantined", second_stderr)
+        self.assertFalse(queued.exists())
+        self.assertTrue(any((queue / "quarantine").rglob(queued.name)))
 
-            daemon_pid = int((queue / "daemon.pid").read_text(encoding="utf-8").strip())
-            os.kill(daemon_pid, 15)
+        self.stop_queue_daemon(queue)
 
     def test_legacy_succeeded_job_without_v2_manifest_is_not_reused(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
-            subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
-            script = root / "check.sh"
-            script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            script.chmod(0o755)
-            subprocess.run(["git", "add", "check.sh"], cwd=root, check=True)
-            subprocess.run(
-                ["git", "commit", "-qm", "test(queue): [Codex-GENERATED] 创建队列测试仓库"],
-                cwd=root,
-                check=True,
-            )
-            queue = root / "queue"
-            wrapper = ROOT / "platforms/apple/config/codex/templates/codex_verify.example.sh"
-            env = {**os.environ, "CODEX_BUILD_QUEUE_ROOT": str(queue), "HOME": str(root / "home")}
-            command = ["bash", str(wrapper), "--build-check", str(script), str(root)]
-            first = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=15, check=False)
-            self.assertEqual(0, first.returncode, first.stderr)
-            first_job = Path(json.loads(first.stdout.strip().splitlines()[-1])["queue_job_dir"])
-            (first_job / "job-manifest.json").unlink()
-            (first_job / "job_manifest_sha256").unlink()
-            second = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=15, check=False)
-            self.assertEqual(0, second.returncode, second.stderr)
-            second_job = Path(json.loads(second.stdout.strip().splitlines()[-1])["queue_job_dir"])
-            self.assertNotEqual(first_job, second_job)
-            daemon_pid = int((queue / "daemon.pid").read_text(encoding="utf-8").strip())
-            os.kill(daemon_pid, 15)
+        temporary = self.enterContext(tempfile.TemporaryDirectory())
+        root = Path(temporary)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+        script = root / "check.sh"
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+        subprocess.run(["git", "add", "check.sh"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "test(queue): [Codex-GENERATED] 创建队列测试仓库"],
+            cwd=root,
+            check=True,
+        )
+        queue = root / "queue"
+        wrapper = ROOT / "platforms/apple/config/codex/templates/codex_verify.example.sh"
+        env = self.wrapper_env(root, queue)
+        self.addCleanup(self.stop_queue_daemon, queue)
+        command = ["bash", str(wrapper), "--build-check", str(script), str(root)]
+        first = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=15, check=False)
+        self.assertEqual(0, first.returncode, first.stderr)
+        first_job = Path(json.loads(first.stdout.strip().splitlines()[-1])["queue_job_dir"])
+        (first_job / "job-manifest.json").unlink()
+        (first_job / "job_manifest_sha256").unlink()
+        second = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=15, check=False)
+        self.assertEqual(0, second.returncode, second.stderr)
+        second_job = Path(json.loads(second.stdout.strip().splitlines()[-1])["queue_job_dir"])
+        self.assertNotEqual(first_job, second_job)
+        self.stop_queue_daemon(queue)
 
     def test_build_check_blocks_worktree_test_without_immutable_artifact_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
