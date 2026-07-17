@@ -681,7 +681,8 @@ class ReleaseGateTests(unittest.TestCase):
             checks = {item["id"]: item for item in report["checks"]}
             self.assertEqual(checks["release.conformance"]["status"], "passed")
             self.assertEqual(checks["release.independent-review"]["status"], "passed")
-            self.assertEqual(report["blockers"], ["release.license-notice", "release.source-policy"])
+            self.assertEqual(checks["release.license-notice"]["status"], "passed")
+            self.assertEqual(report["blockers"], ["release.source-policy"])
 
     def test_python_matrix_is_required_bound_and_precedes_candidate_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
