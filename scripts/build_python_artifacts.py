@@ -26,6 +26,7 @@ DATA_ROOTS = (
 )
 DATA_FILES = (
     ".github/workflows/conformance.yml", ".github/workflows/publish-release.yml",
+    "LICENSE", "NOTICE",
     "README.md", "agent_build_backend.py",
     "pyproject.toml", "skill-naming-policy.json",
     "install.sh", "install.ps1", "uninstall.sh",

@@ -48,7 +48,7 @@ class MigrationAuditTests(unittest.TestCase):
                 ("workflow", 14),
             ],
         )
-        self.assertEqual(self.audit["source"]["license"]["status"], "pending")
+        self.assertEqual(self.audit["source"]["license"]["status"], "verified")
         apple_inventory = next(item for item in self.inventory["packages"] if item["id"] == "apple")
         self.assertEqual(len(apple_inventory["capabilities"]), 29)
         self.assertEqual(
@@ -126,6 +126,9 @@ class MigrationAuditTests(unittest.TestCase):
 
         audit = deepcopy(self.audit)
         audit["source"]["license"]["status"] = "verified"
+        audit["source"]["license"]["spdx"] = None
+        audit["source"]["license"]["notice_path"] = None
+        audit["source"]["license"]["notice_sha256"] = None
         refresh_content_digest(audit)
         with self.assertRaisesRegex(ContractError, "requires SPDX and notice digest"):
             validate_migration_audit(ROOT, self.source, audit, self.inventory)

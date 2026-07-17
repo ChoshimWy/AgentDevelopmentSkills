@@ -169,6 +169,16 @@ def build_documents(audit_template: dict[str, Any] | None = None) -> tuple[dict[
     map_path = ROOT / "migration" / "ios-agent-skills-map-v2.json"
     if audit_template is None:
         audit_template = load(map_path) if map_path.is_file() else _initial_audit(source, overrides_document)
+    license_path = ROOT / "LICENSE"
+    notice_path = ROOT / "NOTICE"
+    if license_path.is_file() and notice_path.is_file():
+        audit_template = deepcopy(audit_template)
+        audit_template.setdefault("source", {})["license"] = {
+            "notice_path": "NOTICE",
+            "notice_sha256": file_digest(notice_path),
+            "spdx": "MIT",
+            "status": "verified",
+        }
     audit_template = _apply_apple_override_records(audit_template, source, overrides_document)
     map_document = _with_content_digest({
         key: value for key, value in audit_template.items() if key != "content_sha256"
