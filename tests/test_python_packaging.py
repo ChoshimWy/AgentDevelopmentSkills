@@ -68,6 +68,7 @@ class PythonPackagingTests(unittest.TestCase):
                     destination.chmod(member.mode & 0o777)
             source = next(extracted.iterdir())
             self.assertTrue((source / ".github/workflows/conformance.yml").is_file())
+            self.assertTrue((source / ".github/workflows/publish-release.yml").is_file())
             rebuilt = root / "rebuilt"
             completed = subprocess.run(
                 [sys.executable, str(source / "scripts/build_python_artifacts.py"), "--output", str(rebuilt)],

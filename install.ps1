@@ -175,7 +175,7 @@ try {
     $releaseBaseUrl = if ($env:AGENT_SKILLS_RELEASE_BASE_URL) {
         $env:AGENT_SKILLS_RELEASE_BASE_URL.TrimEnd("/")
     } else {
-        "https://github.com/ChoshimWy/AgentDevelopmentSkills/releases/latest/download"
+        "https://choshimwy.github.io/AgentDevelopmentSkills"
     }
     $manifestUrl = if ($env:AGENT_SKILLS_RELEASE_MANIFEST_URL) {
         $env:AGENT_SKILLS_RELEASE_MANIFEST_URL

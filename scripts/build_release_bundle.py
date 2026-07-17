@@ -33,6 +33,7 @@ RELEASE_ROOTS = (
 )
 RELEASE_FILES = (
     ".github/workflows/conformance.yml",
+    ".github/workflows/publish-release.yml",
     "README.md",
     "agent_build_backend.py",
     "install.ps1",

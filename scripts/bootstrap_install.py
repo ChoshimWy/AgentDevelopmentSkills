@@ -35,7 +35,7 @@ if sys.version_info < (3, 11):
 
 
 DEFAULT_RELEASE_BASE_URL = (
-    "https://github.com/ChoshimWy/AgentDevelopmentSkills/releases/latest/download/"
+    "https://choshimwy.github.io/AgentDevelopmentSkills/"
 )
 DEFAULT_MANIFEST_URL = DEFAULT_RELEASE_BASE_URL + "release-manifest.json"
 MAX_MANIFEST_BYTES = 1024 * 1024

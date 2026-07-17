@@ -25,7 +25,8 @@ DATA_ROOTS = (
     "schemas", "scripts", "src", "tests",
 )
 DATA_FILES = (
-    ".github/workflows/conformance.yml", "README.md", "agent_build_backend.py",
+    ".github/workflows/conformance.yml", ".github/workflows/publish-release.yml",
+    "README.md", "agent_build_backend.py",
     "pyproject.toml", "skill-naming-policy.json",
     "install.sh", "install.ps1", "uninstall.sh",
 )

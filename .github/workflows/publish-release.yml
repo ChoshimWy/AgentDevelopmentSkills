@@ -1,0 +1,322 @@
+name: Publish verified release
+
+on:
+  workflow_dispatch:
+    inputs:
+      qualification_run_id:
+        description: Run ID that produced the release-qualification handoff
+        required: true
+        type: string
+      source_revision:
+        description: Exact 40-character commit frozen by the qualification handoff
+        required: true
+        type: string
+      review_signature_base64:
+        description: Public external-review signature bytes encoded as standard base64
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify, publish assets, and stage Pages
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    environment:
+      name: release
+    outputs:
+      page_url: ${{ steps.pages.outputs.base_url }}
+      gate_fingerprint: ${{ steps.publication.outputs.gate_fingerprint }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14"
+      - name: Validate publication request identity
+        env:
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          if re.fullmatch(r"[0-9]+", os.environ["QUALIFICATION_RUN_ID"]) is None:
+              raise SystemExit("qualification_run_id must contain decimal digits only")
+          if re.fullmatch(r"[0-9a-f]{40}", os.environ["SOURCE_REVISION"]) is None:
+              raise SystemExit("source_revision must be a full lowercase Git commit")
+          if os.environ["SOURCE_REVISION"] != os.environ["GITHUB_SHA"]:
+              raise SystemExit("source_revision must equal the workflow revision")
+          PY
+      - name: Fetch qualification and protected main identities
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID" \
+            > "$RUNNER_TEMP/qualification-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/branches/main" \
+            > "$RUNNER_TEMP/main-branch.json"
+      - name: Validate qualification provenance and current main
+        env:
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          python scripts/validate_github_publication.py request \
+            --run-json "$RUNNER_TEMP/qualification-run.json" \
+            --main-branch-json "$RUNNER_TEMP/main-branch.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-revision "$SOURCE_REVISION" \
+            --workflow-revision "$GITHUB_SHA"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-qualification-${{ inputs.source_revision }}
+          path: ${{ runner.temp }}/release-qualification-handoff
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.qualification_run_id }}
+      - name: Restore public signature and external trust store
+        env:
+          REVIEW_SIGNATURE_BASE64: ${{ inputs.review_signature_base64 }}
+          REVIEW_TRUST_STORE_BASE64: ${{ secrets.RELEASE_REVIEW_TRUST_STORE_BASE64 }}
+        run: |
+          python - "$RUNNER_TEMP/release-review.sig" "$RUNNER_TEMP/release-review-trust-store.json" <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+          import sys
+
+          signature_output, trust_output = map(Path, sys.argv[1:])
+          for value, output, label in (
+              (os.environ.get("REVIEW_SIGNATURE_BASE64", ""), signature_output, "review signature"),
+              (os.environ.get("REVIEW_TRUST_STORE_BASE64", ""), trust_output, "review trust store"),
+          ):
+              try:
+                  decoded = base64.b64decode(value, validate=True)
+              except ValueError as error:
+                  raise SystemExit(f"{label} is not valid standard base64: {error}") from error
+              if not decoded:
+                  raise SystemExit(f"{label} must not be empty")
+              output.write_bytes(decoded)
+              output.chmod(0o600)
+          PY
+      - name: Validate qualification handoff
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/prepare_release_qualification.py validate \
+            "$RUNNER_TEMP/release-qualification-handoff"
+      - name: Finalize externally signed review
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/prepare_release_review.py finalize \
+            --draft "$RUNNER_TEMP/release-qualification-handoff/release-review-draft.json" \
+            --signature "$RUNNER_TEMP/release-review.sig" \
+            --review-trust-store "$RUNNER_TEMP/release-review-trust-store.json" \
+            --output "$RUNNER_TEMP/release-review.json"
+      - name: Execute final release gate
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/run_release_gate.py \
+            --release-dir "$RUNNER_TEMP/release-qualification-handoff/release" \
+            --conformance-evidence "$RUNNER_TEMP/release-qualification-handoff/conformance-evidence.json" \
+            --python-compatibility-evidence "$RUNNER_TEMP/release-qualification-handoff/python-compatibility-evidence.json" \
+            --review-evidence "$RUNNER_TEMP/release-review.json" \
+            --review-trust-store "$RUNNER_TEMP/release-review-trust-store.json" \
+            --output "$RUNNER_TEMP/release-gate.json"
+      - name: Freeze publication metadata
+        id: publication
+        env:
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          python - "$RUNNER_TEMP/release-qualification-handoff/release/release-manifest.json" \
+            "$RUNNER_TEMP/release-gate.json" "$GITHUB_OUTPUT" "$RUNNER_TEMP/release-notes.md" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          manifest_path, gate_path, output_path, notes_path = map(Path, sys.argv[1:])
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          gate = json.loads(gate_path.read_text(encoding="utf-8"))
+          revision = os.environ["SOURCE_REVISION"]
+          if manifest.get("source", {}).get("revision") != revision:
+              raise SystemExit("qualification source revision differs from the publication request")
+          if gate.get("status") != "passed" or gate.get("blockers") != []:
+              raise SystemExit("release gate did not pass")
+          version = manifest.get("version")
+          channel = manifest.get("channel")
+          if channel not in {"beta", "stable"}:
+              raise SystemExit("only beta or stable candidates can be published")
+          tag = f"v{version}"
+          expected_asset_base = (
+              "https://github.com/"
+              + os.environ["GITHUB_REPOSITORY"]
+              + f"/releases/download/{tag}/"
+          )
+          if manifest.get("asset_base_url") != expected_asset_base:
+              raise SystemExit("release asset_base_url differs from the GitHub Release tag")
+          with output_path.open("a", encoding="utf-8") as stream:
+              stream.write(f"channel={channel}\n")
+              stream.write(f"tag={tag}\n")
+              stream.write(f"version={version}\n")
+              stream.write(f"gate_fingerprint={gate['fingerprint']}\n")
+          notes_path.write_text(
+              "# AgentDevelopmentSkills " + version + "\n\n"
+              + "- Channel: `" + channel + "`\n"
+              + "- Source revision: `" + revision + "`\n"
+              + "- Release Gate: `passed`\n"
+              + "- Gate fingerprint: `" + gate["fingerprint"] + "`\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Prepare public release assets
+        run: |
+          PYTHONPATH=src python - "$RUNNER_TEMP/release-qualification-handoff/release" "$RUNNER_TEMP/release-gate.json" <<'PY'
+          import json, sys
+          from pathlib import Path
+          from agent_workflow.canonical_json import sha256
+          from scripts import run_release_gate
+          release, gate_path = map(Path, sys.argv[1:])
+          gate = json.loads(gate_path.read_text(encoding="utf-8"))
+          if gate.get("status") != "passed" or gate.get("release_identity_sha256") != sha256(run_release_gate._release_directory_identity(release)):
+              raise SystemExit("public asset source is not Gate-bound")
+          PY
+          mkdir "$RUNNER_TEMP/release-assets"
+          cp "$RUNNER_TEMP/release-qualification-handoff/release/"* "$RUNNER_TEMP/release-assets/"
+          cp "$RUNNER_TEMP/release-qualification-handoff/conformance-evidence.json" \
+            "$RUNNER_TEMP/release-assets/conformance-evidence.json"
+          cp "$RUNNER_TEMP/release-qualification-handoff/python-compatibility-evidence.json" \
+            "$RUNNER_TEMP/release-assets/python-compatibility-evidence.json"
+          cp "$RUNNER_TEMP/release-review.json" "$RUNNER_TEMP/release-assets/release-review.json"
+          cp "$RUNNER_TEMP/release-gate.json" "$RUNNER_TEMP/release-assets/release-gate.json"
+          python - "$RUNNER_TEMP/release-assets" "$RUNNER_TEMP/release-assets-manifest.json" <<'PY'
+          import hashlib, json, os, sys
+          from pathlib import Path
+          source, output = map(Path, sys.argv[1:])
+          files = {}
+          for path in sorted(source.iterdir()):
+              if not path.is_file() or path.is_symlink():
+                  raise SystemExit(f"unsafe public asset: {path.name}")
+              value = path.read_bytes()
+              files[path.name] = {"sha256": hashlib.sha256(value).hexdigest(), "size": len(value)}
+          output.write_text(json.dumps({"files": files, "schema_version": "1.0"}, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+          PY
+      - name: Build gated GitHub Pages control plane
+        id: pages
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/build_pages_site.py \
+            --release-dir "$RUNNER_TEMP/release-qualification-handoff/release" \
+            --release-gate "$RUNNER_TEMP/release-gate.json" \
+            --output "$RUNNER_TEMP/pages"
+          echo "base_url=https://choshimwy.github.io/AgentDevelopmentSkills/" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          path: ${{ runner.temp }}/pages
+      - name: Create immutable GitHub Release
+        env:
+          CHANNEL: ${{ steps.publication.outputs.channel }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.publication.outputs.tag }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+          VERSION: ${{ steps.publication.outputs.version }}
+        run: |
+          python - "$RUNNER_TEMP/release-assets" "$RUNNER_TEMP/release-assets-manifest.json" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          directory, manifest_path = map(Path, sys.argv[1:])
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          actual = {}
+          for path in sorted(directory.iterdir()):
+              if not path.is_file() or path.is_symlink():
+                  raise SystemExit(f"public asset changed unsafely: {path.name}")
+              value = path.read_bytes()
+              actual[path.name] = {"sha256": hashlib.sha256(value).hexdigest(), "size": len(value)}
+          if actual != manifest.get("files"):
+              raise SystemExit("public release asset snapshot changed")
+          PY
+          gh api "repos/$GITHUB_REPOSITORY/branches/main" > "$RUNNER_TEMP/final-main-branch.json"
+          python scripts/validate_github_publication.py request \
+            --run-json "$RUNNER_TEMP/qualification-run.json" \
+            --main-branch-json "$RUNNER_TEMP/final-main-branch.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-revision "$SOURCE_REVISION" \
+            --workflow-revision "$GITHUB_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$RELEASE_TAG" \
+            > "$RUNNER_TEMP/matching-tag-refs.json"
+          python scripts/validate_github_publication.py tag-absent \
+            --refs-json "$RUNNER_TEMP/matching-tag-refs.json" \
+            --tag "$RELEASE_TAG"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release tag already exists and will not be replaced: $RELEASE_TAG" >&2
+            exit 2
+          fi
+          options=()
+          if [[ "$CHANNEL" == "beta" ]]; then
+            options+=(--prerelease)
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$SOURCE_REVISION"
+          gh release create "$RELEASE_TAG" --verify-tag \
+            "$RUNNER_TEMP/release-assets/"* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SOURCE_REVISION" \
+            --title "AgentDevelopmentSkills $VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            "${options[@]}"
+
+  deploy-pages:
+    name: Deploy GitHub Pages control plane
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pages: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy verified control plane
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+      - name: Smoke deployed Pages against immutable Release
+        env:
+          EXPECTED_GATE: ${{ needs.publish.outputs.gate_fingerprint }}
+          EXPECTED_REVISION: ${{ inputs.source_revision }}
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          set -euo pipefail
+          base="${PAGE_URL%/}/"
+          curl --fail --silent --show-error --location --retry 10 --retry-delay 5 \
+            "$base/release.json" > "$RUNNER_TEMP/pages-release.json"
+          curl --fail --silent --show-error --location --retry 10 --retry-delay 5 \
+            "$base/release-manifest.json" > "$RUNNER_TEMP/pages-manifest.json"
+          curl --fail --silent --show-error --location --retry 10 --retry-delay 5 \
+            "$base/install.sh" > "$RUNNER_TEMP/pages-install.sh"
+          asset_base=$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["asset_base_url"])' "$RUNNER_TEMP/pages-manifest.json")
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --retry 10 --retry-delay 5 "${asset_base}install.sh" > "$RUNNER_TEMP/release-install.sh"
+          python - "$RUNNER_TEMP/pages-release.json" "$RUNNER_TEMP/pages-manifest.json" "$RUNNER_TEMP/pages-install.sh" <<'PY'
+          import hashlib, json, os, sys
+          release, manifest = (json.load(open(path, encoding="utf-8")) for path in sys.argv[1:3])
+          if release.get("source_revision") != os.environ["EXPECTED_REVISION"] or release.get("gate_fingerprint") != os.environ.get("EXPECTED_GATE"):
+              raise SystemExit("deployed Pages identity does not match publication")
+          value = open(sys.argv[3], "rb").read()
+          release_value = open(os.path.join(os.environ["RUNNER_TEMP"], "release-install.sh"), "rb").read()
+          asset = next((item for item in manifest.get("bootstrap_assets", []) if item.get("filename") == "install.sh"), None)
+          if not asset or asset.get("sha256") != hashlib.sha256(value).hexdigest() or asset.get("size") != len(value):
+              raise SystemExit("deployed bootstrap does not match the immutable manifest")
+          if release_value != value:
+              raise SystemExit("GitHub Release bootstrap differs from Pages manifest asset")
+          PY

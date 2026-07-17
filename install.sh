@@ -73,7 +73,7 @@ if [[ -n "$SCRIPT_SOURCE" ]]; then
     fi
 fi
 
-RELEASE_BASE_URL="${AGENT_SKILLS_RELEASE_BASE_URL:-https://github.com/ChoshimWy/AgentDevelopmentSkills/releases/latest/download}"
+RELEASE_BASE_URL="${AGENT_SKILLS_RELEASE_BASE_URL:-https://choshimwy.github.io/AgentDevelopmentSkills}"
 RELEASE_BASE_URL="${RELEASE_BASE_URL%/}"
 MANIFEST_URL="${AGENT_SKILLS_RELEASE_MANIFEST_URL:-$RELEASE_BASE_URL/release-manifest.json}"
 

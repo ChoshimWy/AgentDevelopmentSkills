@@ -256,6 +256,8 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(any(name.startswith(prefix + "platforms/") for name in names))
         self.assertTrue(any(name.startswith(prefix + "disciplines/") for name in names))
         self.assertIn(prefix + ".github/workflows/conformance.yml", names)
+        self.assertIn(prefix + ".github/workflows/publish-release.yml", names)
+        self.assertIn(prefix + "scripts/validate_github_publication.py", names)
         for marker in (
             b"-----BEGIN " + b"PRIVATE KEY-----",
             b"-----BEGIN RSA " + b"PRIVATE KEY-----",

@@ -2,7 +2,7 @@
 
 面向 Codex 与其他开发 Agent 的跨平台工作流 Core。项目通过只读仓库发现、策略解析、Capability 合同和确定性 DAG，自动判断目标模块所需的研发流程，并以可解释、可恢复、fail-closed 的 Runtime 执行计划。
 
-> 当前版本：`0.2.0`。Phase 1、Phase 2A–2C、Phase 3 与 Phase 4 已完成且不回滚；Phase 6 仓内实现已完成 Persistent Lock、只读 Doctor、managed-root/source 可逆 Upgrade/Rollback、多平台部分卸载、真实 Schema migration、deterministic Packaging、qualification handoff 与供应链/RC 门禁，并通过 v23 Conformance 和独立复审。Python 3.11–3.14 clean CI aggregate 已在 commit `44c52d2` 与 run `29550350238` 通过；发布资格仍由仓库级 License/NOTICE owner 决策及可信 signer 签字 fail-closed，真实本机旧安装切换、live Connector/设备采集与发布动作必须显式执行。
+> 当前版本：`0.2.0`。Phase 1、Phase 2A–2C、Phase 3 与 Phase 4 已完成且不回滚；Phase 6 仓内实现已完成 Persistent Lock、只读 Doctor、managed-root/source 可逆 Upgrade/Rollback、多平台部分卸载、真实 Schema migration、deterministic Packaging、qualification handoff、GitHub Pages 控制面与 GitHub Releases 不可变资产发布链路，并通过供应链/RC 门禁。Python 3.11–3.14 clean CI aggregate 已在 commit `44c52d2` 与 run `29550350238` 通过；发布资格仍由仓库级 License/NOTICE owner 决策及可信 signer 签字 fail-closed，Pages 当前未部署，真实本机旧安装切换、live Connector/设备采集与发布动作必须显式执行。
 
 ## 为什么需要它
 
@@ -128,19 +128,20 @@ PYTHONPATH=src python3 -m agent_workflow.cli detect /path/to/repository
 
 ### 远程一键安装发布合同（Bootstrap Anchor）
 
-发布后面向用户的入口采用两个薄 bootstrap；当前尚未发布公开 distribution host，因此以下 URL 仅表示冻结后的交付形态，不是已可用地址：
+发布控制面采用 GitHub Pages，版本化不可变资产采用 GitHub Releases。当前 Pages 尚未通过最终 Release Gate 部署，因此以下 URL 是已冻结但尚不可用的正式入口：
 
 ```bash
 # macOS / Linux / WSL2
-curl -fsSL --proto '=https' --tlsv1.2 https://<distribution-host>/install.sh | bash
+curl -fsSL --proto '=https' --tlsv1.2 \
+  https://choshimwy.github.io/AgentDevelopmentSkills/install.sh | bash
 ```
 
 ```powershell
 # Windows PowerShell；当前 release manifest 尚未声明 windows artifact，会 fail-closed
-iwr -useb https://<distribution-host>/install.ps1 | iex
+iwr -useb https://choshimwy.github.io/AgentDevelopmentSkills/install.ps1 | iex
 ```
 
-`install.sh` / `install.ps1` 只负责运行时定位、先下载 canonical `release-manifest.json`、读取其中版本固定的 `asset_base_url`，再按 manifest 声明的 size + SHA-256 校验共享 `bootstrap_install.py` 后执行并透传参数；共享 Core 按 host 选择唯一 artifact，验证 size + SHA-256，拒绝非 HTTPS/降级重定向、ZIP 规范化别名、大小写或 Unicode normalization 冲突、symlink、path traversal 和解压上限越界，再从临时目录调用同一 `scripts/install_local.py`。默认发布 artifact 当前仅声明 `darwin` / `linux`，WSL2 复用 Linux；Windows bootstrap 已进入源码与 CI 的 source-checkout 真实执行门禁，但在 Windows 权限/路径/事务 Conformance 完成前不得把 `windows` 写入 production manifest。
+Pages 只发布 `index.html`、两个薄 bootstrap、canonical `release-manifest.json`、Gate/版本摘要和 `.nojekyll`，不承载 ZIP、wheel 或 sdist。Manifest 的 `asset_base_url` 固定指向 `https://github.com/ChoshimWy/AgentDevelopmentSkills/releases/download/v<version>/`。`install.sh` / `install.ps1` 先从 Pages 下载 manifest，再按 manifest 声明的 size + SHA-256 验证 Releases 中的共享 `bootstrap_install.py`；共享 Core 按 host 选择唯一 artifact，验证 size + SHA-256，拒绝非 HTTPS/降级重定向、ZIP 规范化别名、大小写或 Unicode normalization 冲突、symlink、path traversal 和解压上限越界，再从临时目录调用同一 `scripts/install_local.py`。默认发布 artifact 当前仅声明 `darwin` / `linux`，WSL2 复用 Linux；Windows bootstrap 已进入源码与 CI 的 source-checkout 真实执行门禁，但在 Windows 权限/路径/事务 Conformance 完成前不得把 `windows` 写入 production manifest。
 
 开发态可生成确定性 ZIP、bootstrap assets 与 manifest：
 
@@ -201,6 +202,18 @@ python3 scripts/run_release_gate.py \
   --output /tmp/release-gate.json
 ```
 
+最终发布由受保护的 `Publish verified release` workflow 完成。仓库 `main` 必须启用 branch protection；Environment `release` 必须限制为 `main`、配置 required reviewers，并保存 `RELEASE_REVIEW_TRUST_STORE_BASE64` secret（候选外部 trust store 的标准 Base64）。`workflow_dispatch` 只接受 qualification run ID、冻结的 40 位 source revision 和公开 review signature 的 Base64。Workflow 通过 GitHub API 要求 qualification run 来自本仓 `.github/workflows/conformance.yml` 的 successful `workflow_dispatch`、其 `head_branch/head_sha` 为 `main` 与当前 workflow revision，且该 revision 仍是受保护 `main` 的当前 commit；随后从指定 run 下载 exact handoff，验证外部签名，并在 GitHub-hosted disposable runner 重新执行完整 Gate。只有 Gate 为 `passed` 才创建 `v<version>` GitHub Release、上传候选及公开 evidence，并通过 `build_pages_site.py` 从 bounded snapshot 生成小型 Pages control plane（单文件 2 MiB、总计 8 MiB；构建期间输入变化即阻塞）。所有第三方 Actions 固定到完整 commit SHA。Pages Source 必须在仓库 Settings 中选择 **GitHub Actions**；任意同名 lightweight/annotated tag 或 Release 已存在时 workflow fail-closed，不覆盖、移动或重签已有资产。
+
+### 首次真实发布前的外部收口清单
+
+以下项目不能由仓内代码伪造，必须由仓库管理员和外部 signer 在首次发布前完成并留存证据：
+
+1. 在 Settings → Branches 为 `main` 启用 required status checks、禁止 force-push，并确认 API 返回 `protected: true`。
+2. 在 Settings → Environments 创建 `release` 与 `github-pages`；`release` 限制部署分支为 `main`、启用 required reviewers，写入 `RELEASE_REVIEW_TRUST_STORE_BASE64`；Pages Source 选择 **GitHub Actions**。
+3. License/NOTICE owner 提供仓库级授权决策及 exact NOTICE 文件；重新生成 qualification handoff，使 Migration Audit 为 `verified`。
+4. 外部 signer 审阅冻结 payload，使用 trust store 中 `trusted`、`phase-6-release` scope 的密钥签发 review signature；不得把私钥或 signer 工作目录上传到仓库/候选。
+5. 仅使用当前受保护 `main` 的 qualification run、source revision 与 review signature dispatch 发布；workflow 完成后保存 Release、Pages `release.json`、manifest 与部署 smoke 输出，作为首次线上证据。
+
 Handoff preflight 有意在签名前阻断 `release.independent-review`、candidate Conformance 与 wheel/sdist execution；只有 supply-chain、source policy、完整 Python matrix 等静态前置检查必须通过。最终 Gate 仍须在可销毁隔离 worker 中执行。
 
 Release Candidate 不能只凭“构建成功”或自哈希 receipt 放行。`run_release_gate.py` 先把完整候选、evidence、signed review 与候选外部的 trust store 复制到有大小上限的稳定 snapshot，exact 绑定 source ZIP、sdist、wheel、standalone bootstrap、Manifest、Python index、SBOM 与 provenance；随后从 sdist 重建并逐字节比较 wheel/sdist，在干净 venv 离线安装 wheel，执行 Apple+Desktop install→Doctor，再用实际 Package Lock 在已验证 source ZIP 内真实运行完整 Conformance，并要求外部 receipt 的 suite/count/command identity 与真实结果一致。独立 review v3 必须绑定完整 release directory identity、source revision 与完整 Python compatibility matrix fingerprint，并由 trust store 中状态为 `trusted`、scope 包含 `phase-6-release` 的 RSA-2048+ key 使用 `rsa-pkcs1v15-sha256` 签发。私钥不得进入候选、仓库或 trust store；可先生成 canonical payload，交给外部签名设备，再组装并本地验签：
@@ -243,7 +256,7 @@ Gate 只接受 clean `beta` / `stable` source；development/dirty build、缺 ev
 
 `uninstall.sh` 只接受 Lock、AGENTS、Skills、package snapshot 与（存在时）activation file 均未被修改的受管安装；dry-run 与真实卸载执行相同 preflight。它是 source install 以及 wheel CLI package-only install 的全量卸载入口：选择了 Codex Runtime Config/Package 的安装必须具备 activation lock，缺失时 fail-closed；core-only、Desktop 或未激活的 CLI 安装允许无 activation lock，并只移除三个受管根。事务使用单进程临时回滚窗口，移除受管根与 activation lock 记录的 custom agents/bin/templates，保留 Codex 自身的 `skills/.system`、现有 profiles、未归属本工具的目录内容，以及 ownership 未记录的 activation 父目录；`config.toml` 只定向移除仍指向受管 `AGENTS.md` 的根级 `model_instructions_file` assignment，保留其余原始 bytes、注释、排版和文件 mode。旧 iOSAgentSkills 软链因安装时未创建持久备份而不会自动恢复。多平台安装的定向移除改用底层 `agent-skills uninstall`，它从剩余 selection 重新解析闭包和唯一全局 AGENTS，保留显式 Discipline/Runtime Config；只有移除已激活 Apple 时才移除 activation-owned Codex Runtime Config，并以 exact rollback point 支持逆转。
 
-仓库内执行 `./install.sh` 时继续走 source-checkout fast path，不联网且不默认执行 `pip`；只有托管/管道执行且找不到同目录 `scripts/install_local.py` 时才进入远程 bootstrap。确定性 ZIP/manifest/wheel/sdist、底层只读 Doctor、managed-root/source 可逆 Upgrade/Rollback、多平台部分卸载与 activation-lock v1→v2 migration 已具备；公开 distribution host 与 stable release 仍受最终 RC gate 和 License/NOTICE provenance 阻塞。
+仓库内执行 `./install.sh` 时继续走 source-checkout fast path，不联网且不默认执行 `pip`；只有托管/管道执行且找不到同目录 `scripts/install_local.py` 时才进入 Pages → Releases 远程 bootstrap。确定性 ZIP/manifest/wheel/sdist、底层只读 Doctor、managed-root/source 可逆 Upgrade/Rollback、多平台部分卸载与 activation-lock v1→v2 migration 已具备；Pages workflow 已落地但不会绕过最终 RC gate，公开入口与 stable release 仍受 License/NOTICE provenance 和真实 signer 阻塞。
 
 ### 底层安装 CLI
 
@@ -416,7 +429,7 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 
 当前基线：
 
-- 424 个 P1–P6 scoped unittest
+- 436 个 P1–P6 scoped unittest
 - 61 个 Core / Shared Discipline / Phase 6 JSON Schema
 - 18 个非法 contract golden
 - 17 个仓内/运行时 Manifest + 2 个显式外部 Provider Manifest：Core、Apple/Desktop package 与 provider、3 个 bootstrap-only 平台、6 个共享 Discipline、2 个 Design Provider bootstrap 与 1 个显式 Codex Runtime Config；外部 Provider 默认不启用
@@ -462,7 +475,7 @@ PYTHONPATH=src python3 -m compileall -q src scripts tests
 - Telemetry 默认且始终关闭：Core、installer、Doctor、migration、packaging 与 RC gate 不上传源码、凭据、设计数据、设备数据或运行日志；诊断只写用户显式指定的本地 canonical artifacts。删除 release/rollback/evidence 由操作者按本地 retention policy 显式执行，不提供隐式远端收集或自动清理用户文件。
 - 版本与弃用：Core/package 使用 SemVer compatibility range，Schema 使用显式 `schema_version` 与 migration graph；deprecated artifact 先保持 readable + Doctor warning，再 blocked-new-use，只有 Lock/rollback 不再引用且迁移窗口关闭后才能移除。activation-lock v1 当前为 readable/blocked-new-use，所有新 writer 只生成 v2。
 - 本地 Python 3.14.3 完整 Conformance 已通过；2026-07-17 的 clean CI run `29550350238` 已通过 macOS、Linux、Windows bootstrap，并在 CPython 3.11.15、3.12.13、3.13.14、3.14.6 完成 byte-identical wheel/sdist aggregate，fingerprint 为 `6b2893c5a938`，四版本完整 Conformance 均通过。
-- 远程 bootstrap 当前具备离线 fixture、deterministic development bundle、wheel/sdist clean-venv smoke 与 supply-chain metadata 证据；默认 production manifest 仅允许 macOS/Linux/WSL2。公开 distribution host、Windows install transaction、crash-residue 自动恢复与 License/NOTICE 决策仍未完成；RC gate 对这些边界保持 fail-closed。
+- 远程 bootstrap 当前具备离线 fixture、deterministic development bundle、wheel/sdist clean-venv smoke、GitHub Pages 控制面 builder、受 Gate 约束的 GitHub Release/Pages workflow 与 supply-chain metadata 证据；默认 production manifest 仅允许 macOS/Linux/WSL2。Pages 尚未实际部署，Windows install transaction、crash-residue 自动恢复、License/NOTICE 决策与真实 signer 仍未完成；RC gate 对这些边界保持 fail-closed。
 
 ## 设计原则
 
