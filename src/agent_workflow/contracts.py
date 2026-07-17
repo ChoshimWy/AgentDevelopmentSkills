@@ -409,7 +409,7 @@ def validate_manifest(value: dict[str, Any]) -> None:
     if value["kind"] not in {"core", "platform", "stack", "discipline", "adapter", "runtime-config"}:
         raise ContractError("plugin-manifest kind is invalid")
     implementation_status = value.get("implementation_status")
-    if implementation_status not in {None, "implemented", "bootstrap-only"}:
+    if "implementation_status" in value and implementation_status not in {"implemented", "bootstrap-only"}:
         raise ContractError("plugin-manifest implementation_status is invalid")
     if implementation_status is not None and value["kind"] != "platform":
         raise ContractError("plugin-manifest implementation_status is only valid for platform packages")
@@ -419,7 +419,7 @@ def validate_manifest(value: dict[str, Any]) -> None:
     if None in ids or len(ids) != len(set(ids)):
         raise ContractError("plugin-manifest capability ids must be present and unique")
     role = value.get("role", "builtin")
-    if role not in {"builtin", "bootstrap", "provider"}:
+    if not isinstance(role, str) or role not in {"builtin", "bootstrap", "provider"}:
         raise ContractError("plugin-manifest role is invalid")
     bindings = value.get("bindings", {})
     if not isinstance(bindings, dict):
@@ -471,7 +471,9 @@ def validate_manifest(value: dict[str, Any]) -> None:
         if len(fragment_ids) != len(set(fragment_ids)):
             raise ContractError("plugin-manifest.installation instruction fragment ids must be unique")
         provider_manifest = installation.get("provider_manifest")
-        if provider_manifest is not None and (not isinstance(provider_manifest, str) or not provider_manifest):
+        if "provider_manifest" in installation and (
+            not isinstance(provider_manifest, str) or not provider_manifest
+        ):
             raise ContractError("plugin-manifest.installation provider_manifest is invalid")
         version = value.get("version")
         if not isinstance(version, str) or not version:
@@ -568,6 +570,18 @@ def validate_capability_contract(value: dict[str, Any]) -> None:
         },
         "capability-contract",
     )
+    for field in ("id", "version", "input_schema", "output_schema", "permission_profile"):
+        if not isinstance(value[field], str):
+            raise ContractError(f"capability-contract {field} must be a string")
+    if len(value["id"]) < 3:
+        raise ContractError("capability-contract id is invalid")
+    if not isinstance(value["idempotent"], bool):
+        raise ContractError("capability-contract idempotent must be a boolean")
+    for field in ("side_effects", "concurrency_keys", "failure_codes"):
+        if not isinstance(value[field], list):
+            raise ContractError(f"capability-contract {field} must be an array")
+        if any(not isinstance(item, str) for item in value[field]):
+            raise ContractError(f"capability-contract {field} must contain strings")
 
 
 def validate_resolved_policy(value: dict[str, Any]) -> None:

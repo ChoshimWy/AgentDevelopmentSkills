@@ -1,5 +1,5 @@
 [package]
-name = "agent-skills-rs"
+name = "agent-registry"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,9 +8,9 @@ rust-version.workspace = true
 
 [dependencies]
 agent-contracts = { path = "../agent-contracts" }
-agent-registry = { path = "../agent-registry" }
-clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

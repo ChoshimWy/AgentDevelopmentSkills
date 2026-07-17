@@ -53,6 +53,10 @@ class ContractTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ContractError, "implementation_status"):
             validate("plugin-manifest", manifest)
+        manifest["implementation_status"] = None
+        with self.assertRaisesRegex(ContractError, "implementation_status"):
+            validate("plugin-manifest", manifest)
+        manifest["implementation_status"] = "pretend-ready"
         bootstrap = {
             **manifest,
             "implementation_status": "bootstrap-only",

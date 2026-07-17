@@ -16,7 +16,7 @@ AgentDevelopmentSkills is an offline-first, fail-closed workflow core for coding
 
 ## Status
 
-The current Python implementation and validation suite are complete. An incremental Rust migration is now in progress: Rust components remain parallel and non-default until their behavior is proven byte-for-byte compatible with the existing contracts. The repository carries an MIT `LICENSE`, a `NOTICE`, and verified migration-audit hashes. Public release publication remains gated on an external release signature and GitHub environment approval. GitHub Pages has not been deployed yet.
+The current Python implementation and validation suite are complete. An incremental Rust migration is now in progress: Rust components remain parallel and non-default until their behavior is proven byte-for-byte compatible with the existing contracts. The repository carries an MIT `LICENSE`, a `NOTICE`, and verified migration-audit hashes. The GitHub Pages control plane is deployed; public release assets and remote installation remain gated on an external release signature and GitHub environment approval.
 
 ## Requirements
 
@@ -54,7 +54,7 @@ Windows PowerShell:
 iwr -useb https://choshimwy.github.io/AgentDevelopmentSkills/install.ps1 | iex
 ```
 
-The Pages site is currently a prepared, not-yet-deployed release surface. Do not treat these commands as live until a signed release has been published.
+The Pages control plane is online, but the remote installer remains unavailable until a signed release has been published. Use a source checkout before that release gate is satisfied.
 
 ## Development
 
@@ -83,10 +83,17 @@ AGENT_SKILLS_RUST_COMPATIBILITY=1 \
   PYTHONPATH=src python3 -m unittest tests.test_rust_compatibility -v
 ```
 
+Inspect the current registry through the non-default native CLI:
+
+```bash
+cargo run --locked -p agent-skills-rs -- registry-snapshot platforms
+```
+
 The migration sequence and cutover gates are documented in
 [`docs/rust-migration.md`](docs/rust-migration.md). The Python CLI remains the
 production entry point until every relevant differential test and release gate
-passes.
+passes. The current native lane includes canonical contracts and a read-only
+manifest registry; it does not execute package code or alter installations.
 
 ## Release governance
 

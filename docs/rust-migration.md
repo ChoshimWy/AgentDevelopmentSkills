@@ -16,6 +16,8 @@ Every migrated component must preserve:
 - schema-version rejection and all other fail-closed behavior;
 - CLI stdout, stderr, exit-code, and filesystem side-effect contracts;
 - manifest capability, permission, dependency, and provenance checks;
+- bounded native registry discovery (128 directory levels, 100,000 entries,
+  4,096 manifests) and bounded capability graphs (16,384 nodes, 65,536 edges);
 - transactional lifecycle safety, including symlink, inode, mode, rollback,
   and concurrent-update behavior;
 - deterministic release artifacts, SBOM, provenance, and qualification gates.
@@ -55,21 +57,32 @@ file layout:
 
 ## Current state
 
-Phase 1 is active. The repository contains:
+Phase 1 is complete and Phase 2 is active. The repository contains:
 
 - a Rust workspace pinned to Rust 1.97.1;
 - `agent-contracts` canonical JSON, SHA-256, and schema-version primitives;
 - a parallel `agent-skills-rs` diagnostic CLI;
-- Python-to-Rust differential tests;
-- formatting, unit-test, Clippy, and Python 3.11–3.14 compatibility gates in
-  CI;
+- an `agent-registry` crate for read-only manifest discovery, manifest shape
+  validation, version ranges, graph conflicts and cycles, provider/bootstrap
+  compatibility, permission and side-effect ceilings, binding normalization,
+  external provider roots, disabled providers, and deterministic registry
+  snapshots;
+- schema-aligned capability-contract type validation shared by the Python
+  baseline and native normalization path;
+- Python-to-Rust byte-level differential tests covering malicious provider
+  roles, optional Manifest fields, symlinks, normalization mutations,
+  unbounded-size numeric SemVer components, recipe closures, and failure
+  limits;
+- formatting, unit-test, Clippy, Python 3.11–3.14, Linux, and macOS
+  compatibility gates in CI;
 - Rust workspace sources in source releases, Python sdists/wheels, SBOM, and
   provenance inputs, without shipping or activating a Rust executable.
 
 The Rust binary is not yet installed by the production bootstrap and is not a
-binary release artifact. The parallel CLI currently covers only canonical JSON,
-hashing, and the shared schema-version boundary; production CLI parity is a
-later phase gate.
+binary release artifact. The parallel CLI currently covers canonical JSON,
+hashing, the shared schema-version boundary, registry snapshots, targeted
+binding resolution, and an internal recipe-closure compatibility probe.
+Production CLI parity is a later phase gate.
 
 ## Cutover policy
 

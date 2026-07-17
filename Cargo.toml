@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/agent-contracts",
+    "crates/agent-registry",
     "crates/agent-skills",
 ]
 resolver = "2"
