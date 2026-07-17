@@ -15,7 +15,7 @@ AgentDevelopmentSkills is an offline-first, fail-closed workflow core for coding
 
 ## Status
 
-The implementation and validation suite are complete. Public release publication remains gated on repository-level License/NOTICE approval and an external release signature. GitHub Pages has not been deployed yet.
+The implementation and validation suite are complete. The repository now carries an MIT `LICENSE`, a `NOTICE`, and verified migration-audit hashes. Public release publication remains gated on an external release signature and GitHub environment approval. GitHub Pages has not been deployed yet.
 
 ## Requirements
 
@@ -72,8 +72,8 @@ PYTHONPATH=src python3 -m unittest tests.test_pages_distribution tests.test_gith
 
 The `Publish verified release` workflow only accepts a successful qualification run from the protected `main` branch at the current workflow revision. It re-runs the final gate, rejects existing tags and releases, creates tags atomically, verifies Pages and Release assets by hash, and uses pinned GitHub Actions with job-level least privilege.
 
-Before the first public release, repository administrators must configure branch protection, the `release` and `github-pages` environments, required reviewers, the external review trust store, and repository-level License/NOTICE evidence. See [`README.zh-CN.md`](README.zh-CN.md) for the Chinese guide and [`docs/implementation/phase-6-distribution-and-governance.html`](docs/implementation/phase-6-distribution-and-governance.html) for the detailed governance record.
+Before the first public release, repository administrators must configure branch protection, the `release` and `github-pages` environments, required reviewers, and the external review trust store. License/NOTICE evidence is now present and verified. See [`README.zh-CN.md`](README.zh-CN.md) for the Chinese guide and [`docs/implementation/phase-6-distribution-and-governance.html`](docs/implementation/phase-6-distribution-and-governance.html) for the detailed governance record.
 
 ## License
 
-The repository-level License/NOTICE decision is intentionally a release gate. A public release must not be represented as license-verified until the repository owner publishes the applicable license and notice evidence.
+The repository-level License/NOTICE decision is recorded as MIT in the migration audit and the exact `NOTICE` hash is verified during the release gate. Any future change to licensing or attribution must update both files and regenerate the audit before release.
