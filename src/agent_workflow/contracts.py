@@ -38,6 +38,8 @@ LEGAL_NODE_TRANSITIONS = {
     "passed": {"stale"}, "failed": {"stale"}, "blocked": {"ready", "stale"},
     "skipped": {"stale"}, "cancelled": {"stale"}, "stale": {"ready"},
 }
+MAX_RESOLVED_POLICY_FIELDS = 16_384
+MAX_RESOLVED_POLICY_ITEMS = 16_384
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _GIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -588,17 +590,74 @@ def validate_resolved_policy(value: dict[str, Any]) -> None:
     _base(value, {"selected_platforms", "task", "decisions", "constraints", "fingerprint"}, "resolved-policy")
     if not isinstance(value["fingerprint"], str) or not value["fingerprint"]:
         raise ContractError("resolved-policy fingerprint is invalid")
+    if (
+        not isinstance(value["selected_platforms"], list)
+        or any(not isinstance(item, str) for item in value["selected_platforms"])
+        or len(value["selected_platforms"]) != len(set(value["selected_platforms"]))
+        or len(value["selected_platforms"]) > MAX_RESOLVED_POLICY_ITEMS
+    ):
+        raise ContractError("resolved-policy selected platforms must be unique strings")
+    if not isinstance(value["constraints"], dict) or not isinstance(value["decisions"], list):
+        raise ContractError("resolved-policy fields are invalid")
+    if len(value["constraints"]) > MAX_RESOLVED_POLICY_FIELDS:
+        raise ContractError(
+            "resolved-policy constraints exceed maximum of "
+            f"{MAX_RESOLVED_POLICY_FIELDS} fields"
+        )
+    if _json_item_count(value["constraints"]) > MAX_RESOLVED_POLICY_ITEMS:
+        raise ContractError(
+            f"policy exceeds maximum of {MAX_RESOLVED_POLICY_ITEMS} items"
+        )
+    if len(value["decisions"]) > MAX_RESOLVED_POLICY_FIELDS:
+        raise ContractError(
+            f"resolved-policy decisions exceed maximum of {MAX_RESOLVED_POLICY_FIELDS} items"
+        )
     require_fields(value["task"], {"text", "type", "risk", "disciplines"}, "resolved-policy.task")
+    if (
+        any(not isinstance(value["task"][field], str) for field in ("text", "type", "risk"))
+        or not isinstance(value["task"]["disciplines"], list)
+        or any(not isinstance(item, str) for item in value["task"]["disciplines"])
+        or len(value["task"]["disciplines"]) > MAX_RESOLVED_POLICY_ITEMS
+    ):
+        raise ContractError("resolved-policy task is invalid")
     for decision in value["decisions"]:
         require_fields(
             decision,
             {"decision", "reason_code", "source", "confidence", "merge_strategy", "overridden_candidates"},
             "decision",
         )
-        if not isinstance(decision["confidence"], (int, float)) or not 0 <= decision["confidence"] <= 1:
+        if (
+            isinstance(decision["confidence"], bool)
+            or not isinstance(decision["confidence"], (int, float))
+            or not 0 <= decision["confidence"] <= 1
+        ):
             raise ContractError("decision confidence is invalid")
+        if (
+            any(not isinstance(decision[field], str) for field in ("decision", "reason_code", "source"))
+            or not isinstance(decision["overridden_candidates"], list)
+            or any(not isinstance(item, str) for item in decision["overridden_candidates"])
+        ):
+            raise ContractError("decision fields are invalid")
         if decision["merge_strategy"] not in {"replace", "append", "union", "intersect", "deny-wins", "locked"}:
             raise ContractError("decision merge strategy is invalid")
+    expected_fingerprint = sha256({key: item for key, item in value.items() if key != "fingerprint"})
+    if value["fingerprint"] != expected_fingerprint:
+        raise ContractError("resolved-policy fingerprint mismatch")
+
+
+def _json_item_count(value: Any) -> int:
+    count = 0
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        count += 1
+        if count > MAX_RESOLVED_POLICY_ITEMS:
+            return count
+        if isinstance(current, dict):
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    return count
 
 
 def validate_workflow_plan(value: dict[str, Any]) -> None:

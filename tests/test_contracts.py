@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
+import tempfile
 import unittest
 
 from tests.support import ROOT  # noqa: F401
@@ -8,7 +10,9 @@ from tests.support import ROOT  # noqa: F401
 from agent_workflow.canonical_json import (
     MAX_CANONICAL_INTEGER_DIGITS,
     MAX_CANONICAL_JSON_DEPTH,
+    MAX_CONTRACT_JSON_BYTES,
     dumps,
+    load,
     sha256,
 )
 from agent_workflow.contracts import validate
@@ -38,6 +42,14 @@ class CanonicalJSONTests(unittest.TestCase):
         value = [value]
         with self.assertRaisesRegex(ValueError, "nesting depth"):
             dumps(value)
+
+    def test_on_disk_contract_size_is_bounded_before_decoding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oversized.json"
+            with path.open("wb") as stream:
+                stream.truncate(MAX_CONTRACT_JSON_BYTES + 1)
+            with self.assertRaisesRegex(ValueError, "more than"):
+                load(path)
 
 
 class ContractTests(unittest.TestCase):

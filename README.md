@@ -89,11 +89,25 @@ Inspect the current registry through the non-default native CLI:
 cargo run --locked -p agent-skills-rs -- registry-snapshot platforms
 ```
 
+The same compatibility lane can resolve policies, discover repository evidence,
+and compile deterministic plans without executing them:
+
+```bash
+cargo run --locked -p agent-skills-rs -- \
+  repository-discover tests/fixtures/apple-app
+cargo run --locked -p agent-skills-rs -- \
+  policy-resolve /path/to/profile.json "implement the requested feature"
+cargo run --locked -p agent-skills-rs -- \
+  plan-compile /path/to/profile.json /path/to/policy.json \
+  --manifests platforms
+```
+
 The migration sequence and cutover gates are documented in
 [`docs/rust-migration.md`](docs/rust-migration.md). The Python CLI remains the
 production entry point until every relevant differential test and release gate
 passes. The current native lane includes canonical contracts and a read-only
-manifest registry; it does not execute package code or alter installations.
+manifest registry, repository discovery, policy resolution, and plan
+compilation. It does not execute plans, package code, or installation changes.
 
 ## Release governance
 

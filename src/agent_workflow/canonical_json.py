@@ -10,6 +10,7 @@ from typing import Any
 
 MAX_CANONICAL_INTEGER_DIGITS = 4_300
 MAX_CANONICAL_JSON_DEPTH = 512
+MAX_CONTRACT_JSON_BYTES = 64 * 1024 * 1024
 
 
 def _validate_text_limits(text: str) -> None:
@@ -114,7 +115,18 @@ def dump(value: Any, path: str | Path) -> None:
 
 
 def load(path: str | Path) -> Any:
-    text = Path(path).read_text(encoding="utf-8")
+    source = Path(path)
+    if source.stat().st_size > MAX_CONTRACT_JSON_BYTES:
+        raise ValueError(
+            f"contract input has more than {MAX_CONTRACT_JSON_BYTES} bytes"
+        )
+    with source.open("rb") as stream:
+        encoded = stream.read(MAX_CONTRACT_JSON_BYTES + 1)
+    if len(encoded) > MAX_CONTRACT_JSON_BYTES:
+        raise ValueError(
+            f"contract input has more than {MAX_CONTRACT_JSON_BYTES} bytes"
+        )
+    text = encoded.decode("utf-8")
     _validate_text_limits(text)
     value = json.loads(text)
     _validate_value_limits(value)

@@ -1,6 +1,7 @@
 //! Parallel native compatibility entry point.
 
 use agent_contracts::{canonical_json, canonical_sha256, load_json, require_schema_version};
+use agent_engine::{DiscoveryEngine, compile_plan, resolve_policy};
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use clap::{Parser, Subcommand};
 use std::collections::BTreeSet;
@@ -54,8 +55,51 @@ enum Command {
     },
     /// Emit the sorted automatic recipe capability closure for target platforms.
     RecipeCapabilities { targets: Vec<String> },
+    /// Resolve task policy from an existing project-profile artifact.
+    PolicyResolve {
+        profile: PathBuf,
+        task: String,
+        #[arg(long = "explicit-platform")]
+        explicit_platforms: Vec<String>,
+        #[arg(long)]
+        constraints: Option<PathBuf>,
+        #[arg(long = "policy-layers")]
+        policy_layers: Option<PathBuf>,
+    },
+    /// Discover repository platforms through the read-only native engine.
+    RepositoryDiscover {
+        repository: PathBuf,
+        #[arg(long, default_value = "platforms")]
+        manifests: PathBuf,
+        #[arg(long = "target-file")]
+        target_files: Vec<String>,
+        #[arg(long = "changed-file")]
+        changed_files: Vec<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long, default_value = CORE_VERSION)]
+        core_version: String,
+        #[arg(long = "disable-provider")]
+        disabled_providers: Vec<String>,
+        #[arg(long = "provider-root")]
+        provider_roots: Vec<PathBuf>,
+    },
+    /// Compile a deterministic workflow plan through the native engine.
+    PlanCompile {
+        profile: PathBuf,
+        policy: PathBuf,
+        #[arg(long, default_value = "platforms")]
+        manifests: PathBuf,
+        #[arg(long, default_value = CORE_VERSION)]
+        core_version: String,
+        #[arg(long = "disable-provider")]
+        disabled_providers: Vec<String>,
+        #[arg(long = "provider-root")]
+        provider_roots: Vec<PathBuf>,
+    },
 }
 
+#[allow(clippy::too_many_lines)]
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     match Cli::parse().command {
         Command::Canonicalize { artifact } => {
@@ -111,6 +155,76 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Command::RecipeCapabilities { targets } => {
             let targets = targets.into_iter().collect::<BTreeSet<_>>();
             let value = serde_json::to_value(automatic_recipe_capabilities(&targets))?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::PolicyResolve {
+            profile,
+            task,
+            explicit_platforms,
+            constraints,
+            policy_layers,
+        } => {
+            let profile = load_json(profile)?;
+            let constraints = constraints.map(load_json).transpose()?;
+            let policy_layers = policy_layers
+                .map(load_json)
+                .transpose()?
+                .unwrap_or_else(|| serde_json::json!([]));
+            let policy_layers = policy_layers
+                .as_array()
+                .ok_or("policy layers must be an array")?;
+            let value = resolve_policy(
+                &profile,
+                &task,
+                &explicit_platforms,
+                constraints.as_ref(),
+                policy_layers,
+            )?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::RepositoryDiscover {
+            repository,
+            manifests,
+            target_files,
+            changed_files,
+            cwd,
+            core_version,
+            disabled_providers,
+            provider_roots,
+        } => {
+            let disabled = disabled_providers.into_iter().collect::<BTreeSet<_>>();
+            let registry = ManifestRegistry::from_directory_with_provider_roots(
+                manifests,
+                &provider_roots,
+                &disabled,
+                &core_version,
+            )?;
+            let value = DiscoveryEngine::new(&registry).discover(
+                repository,
+                &target_files,
+                &changed_files,
+                cwd.as_deref(),
+            )?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::PlanCompile {
+            profile,
+            policy,
+            manifests,
+            core_version,
+            disabled_providers,
+            provider_roots,
+        } => {
+            let profile = load_json(profile)?;
+            let policy = load_json(policy)?;
+            let disabled = disabled_providers.into_iter().collect::<BTreeSet<_>>();
+            let registry = ManifestRegistry::from_directory_with_provider_roots(
+                manifests,
+                &provider_roots,
+                &disabled,
+                &core_version,
+            )?;
+            let value = compile_plan(&registry, &profile, &policy)?;
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
     }

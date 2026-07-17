@@ -17,7 +17,10 @@ from agent_workflow.canonical_json import (
     MAX_CANONICAL_INTEGER_DIGITS,
     MAX_CANONICAL_JSON_DEPTH,
 )
+from agent_workflow.discovery import DiscoveryEngine
 from agent_workflow.models import ContractError
+from agent_workflow.planning import PlanCompiler
+from agent_workflow.policy import PolicyResolver
 from agent_workflow.recipes import automatic_recipe_capabilities
 from agent_workflow.registry import ManifestRegistry
 
@@ -546,6 +549,566 @@ class RustCompatibilityTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 expected = sorted(automatic_recipe_capabilities(targets))
                 self.assertEqual(result.stdout, dumps(expected))
+
+    def test_policy_resolution_corpus_matches_python_byte_for_byte(self) -> None:
+        cases = (
+            (
+                {"platforms": ["web"]},
+                "修复 iOS 页面",
+                (),
+                None,
+                (),
+            ),
+            (
+                {"platforms": ["apple", "web"]},
+                "修复页面",
+                ("apple",),
+                None,
+                (),
+            ),
+            (
+                {
+                    "platforms": ["apple", "desktop"],
+                    "target_modules": [
+                        {"path": "apps/desktop", "platform": "desktop"}
+                    ],
+                },
+                "实现 Figma 页面并补充 QA 测试",
+                (),
+                {"network": False},
+                (
+                    {
+                        "source": "core",
+                        "strategies": {
+                            "network": "deny-wins",
+                            "tags": "union",
+                        },
+                        "values": {"network": True, "tags": ["core"]},
+                    },
+                    {
+                        "source": "project",
+                        "strategies": {
+                            "network": "deny-wins",
+                            "tags": "union",
+                        },
+                        "values": {"network": False, "tags": ["project"]},
+                    },
+                ),
+            ),
+            (
+                {
+                    "ambiguities": [
+                        {
+                            "candidates": ["backend", "web"],
+                            "path": ".",
+                            "reason": "multiple-platform-signals",
+                        }
+                    ],
+                    "platforms": ["backend", "web"],
+                    "target_modules": [],
+                },
+                "修复功能",
+                (),
+                None,
+                (),
+            ),
+            (
+                {"platforms": []},
+                "只做 QA 回归",
+                (),
+                None,
+                (),
+            ),
+            (
+                {"platforms": ["apple"]},
+                "iOS 单文件 contract 小改动",
+                (),
+                None,
+                (),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile_path = root / "profile.json"
+            constraints_path = root / "constraints.json"
+            layers_path = root / "layers.json"
+            for index, (
+                profile,
+                task,
+                explicit,
+                constraints,
+                layers,
+            ) in enumerate(cases):
+                with self.subTest(case=index):
+                    profile_path.write_text(dumps(profile), encoding="utf-8")
+                    arguments = [
+                        "policy-resolve",
+                        str(profile_path),
+                        task,
+                    ]
+                    for platform in explicit:
+                        arguments.extend(["--explicit-platform", platform])
+                    if constraints is not None:
+                        constraints_path.write_text(
+                            dumps(constraints),
+                            encoding="utf-8",
+                        )
+                        arguments.extend(["--constraints", str(constraints_path)])
+                    if layers:
+                        layers_path.write_text(dumps(list(layers)), encoding="utf-8")
+                        arguments.extend(["--policy-layers", str(layers_path)])
+                    result = self.run_rust(*arguments)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    expected = PolicyResolver().resolve(
+                        profile,
+                        task,
+                        explicit_platforms=explicit,
+                        constraints=constraints,
+                        policy_layers=layers,
+                    )
+                    self.assertEqual(result.stdout, dumps(expected))
+
+    def test_policy_negative_and_numeric_set_cases_match_python(self) -> None:
+        profile = {"platforms": []}
+        cases = (
+            (
+                [{
+                    "source": "project",
+                    "strategies": {"values": "bogus"},
+                    "values": {"values": ["project"]},
+                }],
+                False,
+            ),
+            (
+                [
+                    {
+                        "source": "core",
+                        "strategies": {"values": "union"},
+                        "values": {"values": [2, 1]},
+                    },
+                    {
+                        "source": "project",
+                        "strategies": {"values": "union"},
+                        "values": {"values": [3, 2]},
+                    },
+                ],
+                True,
+            ),
+            ([{"source": "empty"}] * 1_025, False),
+            (
+                [{
+                    "source": "project",
+                    "strategies": {"values": "replace"},
+                    "values": {"values": [0] * 16_385},
+                }],
+                False,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile_path = root / "profile.json"
+            layers_path = root / "layers.json"
+            profile_path.write_text(dumps(profile), encoding="utf-8")
+            for index, (layers, succeeds) in enumerate(cases):
+                with self.subTest(case=index):
+                    layers_path.write_text(dumps(layers), encoding="utf-8")
+                    result = self.run_rust(
+                        "policy-resolve",
+                        str(profile_path),
+                        "实现功能",
+                        "--policy-layers",
+                        str(layers_path),
+                    )
+                    if succeeds:
+                        expected = PolicyResolver().resolve(
+                            profile,
+                            "实现功能",
+                            policy_layers=layers,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stdout, dumps(expected))
+                    else:
+                        with self.assertRaises(ContractError):
+                            PolicyResolver().resolve(
+                                profile,
+                                "实现功能",
+                                policy_layers=layers,
+                            )
+                        self.assertEqual(result.returncode, 2)
+                        self.assertEqual(result.stdout, "")
+
+            layers_path.write_text(
+                '[{"source":"core","strategies":{"values":"union"},'
+                '"values":{"values":[0.1]}},{"source":"project",'
+                '"strategies":{"values":"union"},'
+                '"values":{"values":[0.10000000000000001]}}]\n',
+                encoding="utf-8",
+            )
+            raw_layers = json.loads(layers_path.read_text(encoding="utf-8"))
+            expected = PolicyResolver().resolve(
+                profile,
+                "实现功能",
+                policy_layers=raw_layers,
+            )
+            result = self.run_rust(
+                "policy-resolve",
+                str(profile_path),
+                "实现功能",
+                "--policy-layers",
+                str(layers_path),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, dumps(expected))
+            self.assertEqual(expected["constraints"]["values"], [0.1])
+
+            constraints = {f"field-{index}": index for index in range(16_385)}
+            constraints_path = root / "constraints.json"
+            constraints_path.write_text(dumps(constraints), encoding="utf-8")
+            with self.assertRaises(ContractError):
+                PolicyResolver().resolve(
+                    profile,
+                    "实现功能",
+                    constraints=constraints,
+                )
+            result = self.run_rust(
+                "policy-resolve",
+                str(profile_path),
+                "实现功能",
+                "--constraints",
+                str(constraints_path),
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+
+            large_profile = {
+                "platforms": [f"platform-{index}" for index in range(16_385)]
+            }
+            profile_path.write_text(dumps(large_profile), encoding="utf-8")
+            with self.assertRaises(ContractError):
+                PolicyResolver().resolve(large_profile, "实现功能")
+            result = self.run_rust(
+                "policy-resolve",
+                str(profile_path),
+                "实现功能",
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+
+    def test_repository_discovery_fixture_corpus_matches_python(self) -> None:
+        registry = ManifestRegistry.from_directory(ROOT / "platforms")
+        engine = DiscoveryEngine(registry)
+        fixtures = ROOT / "tests/fixtures"
+        cases = (
+            (fixtures / "apple-app", (), (), None),
+            (fixtures / "swift-cli", (), (), None),
+            (fixtures / "apple-workspace", (), (), None),
+            (fixtures / "apple-swift-package", (), (), None),
+            (fixtures / "android-app", (), (), None),
+            (fixtures / "backend-service", (), (), None),
+            (fixtures / "tauri-app", (), (), None),
+            (fixtures / "web-app", (), (), None),
+            (fixtures / "unknown", (), (), None),
+            (fixtures / "ambiguous", (), (), None),
+            (fixtures / "monorepo", (), (), None),
+            (
+                fixtures / "monorepo/apps/ios",
+                (),
+                (),
+                None,
+            ),
+            (
+                fixtures / "monorepo",
+                ("apps/ios/Sources/Feature.swift",),
+                (),
+                None,
+            ),
+            (
+                fixtures / "monorepo",
+                ("packages/api-schema/openapi.yaml",),
+                (),
+                None,
+            ),
+            (
+                fixtures / "monorepo",
+                (),
+                ("apps/android/app/src/main/AndroidManifest.xml",),
+                fixtures / "monorepo",
+            ),
+        )
+        for index, (repository, target_files, changed_files, cwd) in enumerate(
+            cases
+        ):
+            with self.subTest(case=index, repository=repository.name):
+                arguments = [
+                    "repository-discover",
+                    str(repository),
+                    "--manifests",
+                    str(ROOT / "platforms"),
+                ]
+                for target in target_files:
+                    arguments.extend(["--target-file", target])
+                for changed in changed_files:
+                    arguments.extend(["--changed-file", changed])
+                if cwd is not None:
+                    arguments.extend(["--cwd", str(cwd)])
+                result = self.run_rust(*arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                expected = engine.discover(
+                    repository,
+                    target_files=target_files,
+                    changed_files=changed_files,
+                    cwd=cwd,
+                )
+                self.assertEqual(result.stdout, dumps(expected))
+
+    def test_repository_glob_classes_and_target_path_boundaries_match_python(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(ROOT / "platforms", root / "platforms")
+            shutil.copytree(ROOT / "disciplines", root / "disciplines")
+            shutil.copytree(ROOT / "runtime-configs", root / "runtime-configs")
+            manifest_path = root / "platforms/apple/manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["detection"] = {
+                "strong": ["App[0-9].xcodeproj"],
+                "medium": [],
+                "weak": [],
+            }
+            manifest_path.write_text(dumps(manifest), encoding="utf-8")
+            repository = root / "repository"
+            (repository / "App1.xcodeproj").mkdir(parents=True)
+            registry = ManifestRegistry.from_directory(root / "platforms")
+            expected = DiscoveryEngine(registry).discover(repository)
+            result = self.run_rust(
+                "repository-discover",
+                str(repository),
+                "--manifests",
+                str(root / "platforms"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, dumps(expected))
+            self.assertEqual(expected["platforms"], ["apple"])
+
+            unicode_relative = "é:module/file.swift"
+            expected = DiscoveryEngine(registry).discover(
+                repository,
+                target_files=[unicode_relative],
+            )
+            result = self.run_rust(
+                "repository-discover",
+                str(repository),
+                "--manifests",
+                str(root / "platforms"),
+                "--target-file",
+                unicode_relative,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, dumps(expected))
+
+            for candidate in (
+                "../../apps/ios/Foo.swift",
+                "/apps/ios/Foo.swift",
+                r"C:\apps\ios\Foo.swift",
+            ):
+                with self.subTest(candidate=candidate):
+                    with self.assertRaises(ContractError):
+                        DiscoveryEngine(registry).discover(
+                            repository,
+                            target_files=[candidate],
+                        )
+                    result = self.run_rust(
+                        "repository-discover",
+                        str(repository),
+                        "--manifests",
+                        str(root / "platforms"),
+                        "--target-file",
+                        candidate,
+                    )
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+
+    def test_repository_discovery_edge_cases_match_python(self) -> None:
+        registry = ManifestRegistry.from_directory(ROOT / "platforms")
+        engine = DiscoveryEngine(registry)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            aggregate = root / "aggregate"
+            project = aggregate / "apps/ios/App.xcodeproj"
+            project.mkdir(parents=True)
+            (aggregate / "Podfile").write_text(
+                "platform :ios",
+                encoding="utf-8",
+            )
+            (project / "project.pbxproj").write_text(
+                "// fixture",
+                encoding="utf-8",
+            )
+            ignored = root / "ignored"
+            fixture = ignored / "tests/fixtures/App.xcodeproj"
+            fixture.mkdir(parents=True)
+            (fixture / "project.pbxproj").write_text(
+                "// fixture",
+                encoding="utf-8",
+            )
+            outer = root / "outer"
+            (outer / "apps/other-app").mkdir(parents=True)
+            unrelated = outer / "misc/repo"
+            unrelated.mkdir(parents=True)
+            (unrelated / "README.md").write_text(
+                "fixture",
+                encoding="utf-8",
+            )
+            cases = (
+                (aggregate, ("apps/ios/Foo.swift",)),
+                (ignored, ()),
+                (unrelated, ()),
+            )
+            for index, (repository, target_files) in enumerate(cases):
+                with self.subTest(case=index):
+                    arguments = [
+                        "repository-discover",
+                        str(repository),
+                        "--manifests",
+                        str(ROOT / "platforms"),
+                    ]
+                    for target in target_files:
+                        arguments.extend(["--target-file", target])
+                    result = self.run_rust(*arguments)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    expected = engine.discover(
+                        repository,
+                        target_files=target_files,
+                    )
+                    self.assertEqual(result.stdout, dumps(expected))
+
+    def test_plan_empty_ambiguity_and_policy_tamper_are_fail_closed(self) -> None:
+        registry = ManifestRegistry.from_directory(ROOT / "platforms")
+        profile = DiscoveryEngine(registry).discover(
+            ROOT / "tests/fixtures/apple-app"
+        )
+        policy = PolicyResolver().resolve(
+            profile,
+            "实现 iOS 功能",
+            constraints={"routing_ambiguities": []},
+        )
+        expected = PlanCompiler(registry).compile(profile, policy)
+        self.assertEqual(expected["status"], "ready")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile_path = root / "profile.json"
+            policy_path = root / "policy.json"
+            profile_path.write_text(dumps(profile), encoding="utf-8")
+            policy_path.write_text(dumps(policy), encoding="utf-8")
+            arguments = [
+                "plan-compile",
+                str(profile_path),
+                str(policy_path),
+                "--manifests",
+                str(ROOT / "platforms"),
+            ]
+            result = self.run_rust(*arguments)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, dumps(expected))
+
+            stale = json.loads(dumps(policy))
+            stale["selected_platforms"] = ["desktop"]
+            policy_path.write_text(dumps(stale), encoding="utf-8")
+            with self.assertRaisesRegex(ContractError, "fingerprint mismatch"):
+                PlanCompiler(registry).compile(profile, stale)
+            result = self.run_rust(*arguments)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("fingerprint mismatch", result.stderr)
+
+            duplicate = json.loads(dumps(policy))
+            duplicate["selected_platforms"] = ["apple", "apple"]
+            duplicate["fingerprint"] = sha256(
+                {
+                    key: value
+                    for key, value in duplicate.items()
+                    if key != "fingerprint"
+                }
+            )
+            policy_path.write_text(dumps(duplicate), encoding="utf-8")
+            with self.assertRaisesRegex(ContractError, "must be unique"):
+                PlanCompiler(registry).compile(profile, duplicate)
+            result = self.run_rust(*arguments)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("must be unique", result.stderr)
+
+            boolean_confidence = json.loads(dumps(policy))
+            boolean_confidence["decisions"][0]["confidence"] = True
+            boolean_confidence["fingerprint"] = sha256(
+                {
+                    key: value
+                    for key, value in boolean_confidence.items()
+                    if key != "fingerprint"
+                }
+            )
+            policy_path.write_text(dumps(boolean_confidence), encoding="utf-8")
+            with self.assertRaisesRegex(ContractError, "confidence is invalid"):
+                PlanCompiler(registry).compile(profile, boolean_confidence)
+            result = self.run_rust(*arguments)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("confidence is invalid", result.stderr)
+
+    def test_plan_compiler_fixture_corpus_matches_python_byte_for_byte(
+        self,
+    ) -> None:
+        fixtures = ROOT / "tests/fixtures"
+        cases = (
+            ("apple-app", "实现 iOS 功能", ()),
+            ("apple-app", "实现 Figma 页面并补充 QA 测试", ()),
+            ("apple-app", "审查 iOS 代码", ()),
+            ("apple-app", "只做 iOS QA 回归", ()),
+            ("apple-app", "更新 iOS 文档", ()),
+            ("apple-app", "调查 iOS crash 性能", ()),
+            ("desktop-electron", "实现桌面功能", ()),
+            ("android-app", "实现 Android 功能", ()),
+            ("unknown", "实现功能", ()),
+            ("ambiguous", "修复功能", ()),
+            ("apple-app", "实现 iOS 功能", ("ios-agent-skills",)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile_path = root / "profile.json"
+            policy_path = root / "policy.json"
+            for fixture_name, task, disabled in cases:
+                with self.subTest(
+                    fixture=fixture_name,
+                    task=task,
+                    disabled=disabled,
+                ):
+                    registry = ManifestRegistry.from_directory(
+                        ROOT / "platforms",
+                        disabled_providers=disabled,
+                    )
+                    profile = DiscoveryEngine(registry).discover(
+                        fixtures / fixture_name
+                    )
+                    policy = PolicyResolver().resolve(profile, task)
+                    expected = PlanCompiler(registry).compile(profile, policy)
+                    profile_path.write_text(
+                        dumps(profile),
+                        encoding="utf-8",
+                    )
+                    policy_path.write_text(
+                        dumps(policy),
+                        encoding="utf-8",
+                    )
+                    arguments = [
+                        "plan-compile",
+                        str(profile_path),
+                        str(policy_path),
+                        "--manifests",
+                        str(ROOT / "platforms"),
+                    ]
+                    for provider in disabled:
+                        arguments.extend(["--disable-provider", provider])
+                    result = self.run_rust(*arguments)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, dumps(expected))
 
     def test_registry_provider_mutations_fail_closed_like_python(self) -> None:
         mutations = {

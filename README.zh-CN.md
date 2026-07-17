@@ -95,7 +95,19 @@ AGENT_SKILLS_RUST_COMPATIBILITY=1 \
 cargo run --locked -p agent-skills-rs -- registry-snapshot platforms
 ```
 
-迁移顺序和切换门禁见 [Rust 迁移计划](docs/rust-migration.md)。当前原生路径已覆盖 canonical contracts 和只读 Manifest Registry，但不会执行 package 代码或修改安装；在所有相关差分测试和发布门禁通过前，Python CLI 仍是生产入口。
+同一兼容路径还可以解析策略、只读发现仓库证据并编译确定性计划：
+
+```bash
+cargo run --locked -p agent-skills-rs -- \
+  repository-discover tests/fixtures/apple-app
+cargo run --locked -p agent-skills-rs -- \
+  policy-resolve /path/to/profile.json "implement the requested feature"
+cargo run --locked -p agent-skills-rs -- \
+  plan-compile /path/to/profile.json /path/to/policy.json \
+  --manifests platforms
+```
+
+迁移顺序和切换门禁见 [Rust 迁移计划](docs/rust-migration.md)。当前原生路径已覆盖 canonical contracts、只读 Manifest Registry、仓库发现、策略解析和计划编译，但不会执行计划、package 代码或安装变更；在所有相关差分测试和发布门禁通过前，Python CLI 仍是生产入口。
 
 ## 发布治理
 

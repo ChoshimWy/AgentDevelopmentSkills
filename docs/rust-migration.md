@@ -18,6 +18,10 @@ Every migrated component must preserve:
 - manifest capability, permission, dependency, and provenance checks;
 - bounded native registry discovery (128 directory levels, 100,000 entries,
   4,096 manifests) and bounded capability graphs (16,384 nodes, 65,536 edges);
+- bounded on-disk contract inputs (64 MiB), repository discovery (100,000
+  entries/files, 10,000,000 match work units, 100,000 evidence entries), policy
+  merges (1,024 layers and 16,384 fields/items), and workflow plans (16,384
+  nodes and 65,536 edges);
 - transactional lifecycle safety, including symlink, inode, mode, rollback,
   and concurrent-update behavior;
 - deterministic release artifacts, SBOM, provenance, and qualification gates.
@@ -57,7 +61,7 @@ file layout:
 
 ## Current state
 
-Phase 1 is complete and Phase 2 is active. The repository contains:
+Phases 1 and 2 are complete and Phase 3 is active. The repository contains:
 
 - a Rust workspace pinned to Rust 1.97.1;
 - `agent-contracts` canonical JSON, SHA-256, and schema-version primitives;
@@ -67,12 +71,16 @@ Phase 1 is complete and Phase 2 is active. The repository contains:
   compatibility, permission and side-effect ceilings, binding normalization,
   external provider roots, disabled providers, and deterministic registry
   snapshots;
+- an `agent-engine` crate for bounded, read-only repository discovery,
+  deterministic task classification and policy resolution, and workflow-plan
+  compilation over the native registry;
 - schema-aligned capability-contract type validation shared by the Python
   baseline and native normalization path;
 - Python-to-Rust byte-level differential tests covering malicious provider
   roles, optional Manifest fields, symlinks, normalization mutations,
-  unbounded-size numeric SemVer components, recipe closures, and failure
-  limits;
+  unbounded-size numeric SemVer components, recipe closures, discovery
+  fixtures and edge cases, policy corpora, compiled workflow plans, and
+  failure limits;
 - formatting, unit-test, Clippy, Python 3.11–3.14, Linux, and macOS
   compatibility gates in CI;
 - Rust workspace sources in source releases, Python sdists/wheels, SBOM, and
@@ -81,8 +89,10 @@ Phase 1 is complete and Phase 2 is active. The repository contains:
 The Rust binary is not yet installed by the production bootstrap and is not a
 binary release artifact. The parallel CLI currently covers canonical JSON,
 hashing, the shared schema-version boundary, registry snapshots, targeted
-binding resolution, and an internal recipe-closure compatibility probe.
-Production CLI parity is a later phase gate.
+binding resolution, an internal recipe-closure compatibility probe, repository
+discovery, policy resolution, and plan compilation. Package-lock resolution is
+the next Phase 3 migration boundary; production CLI parity is a later phase
+gate.
 
 ## Cutover policy
 

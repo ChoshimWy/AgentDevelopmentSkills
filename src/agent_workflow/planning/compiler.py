@@ -6,11 +6,15 @@ from collections import defaultdict, deque
 from typing import Any
 
 from ..canonical_json import sha256
-from ..contracts import validate_workflow_plan
+from ..contracts import validate_resolved_policy, validate_workflow_plan
 from ..models import ContractError
 from ..package_lock import validate_package_lock, validate_plan_package_lock
 from ..recipes import required_platform_capabilities
 from ..registry import ManifestRegistry
+
+MAX_PLAN_INPUT_ITEMS = 16_384
+MAX_PLAN_NODES = 16_384
+MAX_PLAN_EDGES = 65_536
 
 
 class PlanCompiler:
@@ -24,6 +28,13 @@ class PlanCompiler:
         *,
         package_lock: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        validate_resolved_policy(policy)
+        if len(policy["selected_platforms"]) > MAX_PLAN_INPUT_ITEMS:
+            raise ContractError(
+                f"plan selected platforms exceed maximum of {MAX_PLAN_INPUT_ITEMS} items"
+            )
+        if len(policy["task"].get("disciplines", [])) > MAX_PLAN_INPUT_ITEMS:
+            raise ContractError(f"plan disciplines exceed maximum of {MAX_PLAN_INPUT_ITEMS} items")
         nodes: list[dict[str, Any]] = []
         edges: list[dict[str, str]] = []
         missing: list[str] = []
@@ -166,6 +177,10 @@ class PlanCompiler:
             nodes.append(_node("report", reporting.capability_id, mandatory=True, resolution=reporting))
             edges.append({"from": "review", "to": "report"})
 
+        if len(nodes) > MAX_PLAN_NODES:
+            raise ContractError(f"workflow plan exceeds maximum of {MAX_PLAN_NODES} nodes")
+        if len(edges) > MAX_PLAN_EDGES:
+            raise ContractError(f"workflow plan exceeds maximum of {MAX_PLAN_EDGES} edges")
         _topological_order(nodes, edges)
         provider_blocked = any(node["mandatory"] and node["capability"] in missing for node in nodes)
         status = "blocked" if routing_blocked or provider_blocked or bootstrap_required else "degraded" if missing else "ready"

@@ -17,6 +17,9 @@ PLATFORM_TERMS = {
     "desktop": ("desktop", "windows", "linux", "electron", "tauri", "桌面"),
     "web": ("web", "frontend", "react", "vue", "网页", "前端"),
 }
+MAX_POLICY_LAYERS = 1_024
+MAX_POLICY_FIELDS = 16_384
+MAX_POLICY_ITEMS = 16_384
 
 
 def classify_task(task: str) -> dict[str, Any]:
@@ -156,13 +159,25 @@ def merge_policy_layers(layers: Iterable[dict[str, Any]]) -> tuple[dict[str, Any
     result: dict[str, Any] = {}
     locked: set[str] = set()
     decisions: list[dict[str, Any]] = []
-    for layer in layers:
+    field_count = 0
+    item_count = 0
+    for layer_index, layer in enumerate(layers, start=1):
+        if layer_index > MAX_POLICY_LAYERS:
+            raise ContractError(f"policy merge exceeds maximum of {MAX_POLICY_LAYERS} layers")
         source = layer.get("source", "unknown")
         values = layer.get("values", {})
         strategies = layer.get("strategies", {})
         for field in sorted(values):
+            field_count += 1
+            if field_count > MAX_POLICY_FIELDS:
+                raise ContractError(f"policy merge exceeds maximum of {MAX_POLICY_FIELDS} fields")
             incoming = deepcopy(values[field])
+            item_count += _policy_value_items(incoming)
+            if item_count > MAX_POLICY_ITEMS:
+                raise ContractError(f"policy merge exceeds maximum of {MAX_POLICY_ITEMS} items")
             strategy = strategies.get(field, "replace")
+            if strategy not in {"replace", "append", "union", "intersect", "deny-wins", "locked"}:
+                raise ContractError(f"unknown merge strategy: {strategy}")
             if field in locked and field in result and incoming != result[field]:
                 raise ContractError(f"locked policy field cannot be overridden: {field}")
             current = result.get(field)
@@ -186,13 +201,35 @@ def _merge_value(current: Any, incoming: Any, strategy: str) -> Any:
     if current is None or strategy in {"replace", "locked"}:
         return incoming
     if strategy == "append":
-        return list(current) + list(incoming)
+        merged = list(current) + list(incoming)
+        if len(merged) > MAX_POLICY_ITEMS:
+            raise ContractError(f"policy append exceeds maximum of {MAX_POLICY_ITEMS} items")
+        return merged
     if strategy == "union":
+        if len(current) > MAX_POLICY_ITEMS or len(incoming) > MAX_POLICY_ITEMS:
+            raise ContractError(f"policy set merge exceeds maximum of {MAX_POLICY_ITEMS} items")
         return sorted(set(current) | set(incoming))
     if strategy == "intersect":
+        if len(current) > MAX_POLICY_ITEMS or len(incoming) > MAX_POLICY_ITEMS:
+            raise ContractError(f"policy set merge exceeds maximum of {MAX_POLICY_ITEMS} items")
         return sorted(set(current) & set(incoming))
     if strategy == "deny-wins":
         if not isinstance(current, bool) or not isinstance(incoming, bool):
             raise ContractError("deny-wins requires boolean values")
         return current and incoming
     raise ContractError(f"unknown merge strategy: {strategy}")
+
+
+def _policy_value_items(value: Any) -> int:
+    count = 0
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        count += 1
+        if count > MAX_POLICY_ITEMS:
+            raise ContractError(f"policy merge exceeds maximum of {MAX_POLICY_ITEMS} items")
+        if isinstance(current, dict):
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    return count

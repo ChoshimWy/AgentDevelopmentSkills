@@ -1379,7 +1379,9 @@ pub fn automatic_recipe_capabilities(targets: &BTreeSet<String>) -> BTreeSet<Str
     result
 }
 
-fn required_platform_capabilities(
+/// Return the ordered capability recipe for one platform task.
+#[must_use]
+pub fn required_platform_capabilities(
     platform: &str,
     task_type: &str,
     disciplines: &BTreeSet<&str>,

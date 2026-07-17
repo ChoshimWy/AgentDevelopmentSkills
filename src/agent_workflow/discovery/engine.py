@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 from pathlib import Path
 from typing import Any, Iterable
 
 from ..contracts import validate_project_profile
+from ..models import ContractError
 from ..registry import ManifestRegistry
 
 
@@ -17,6 +19,11 @@ IGNORED_DIRECTORIES = {
 WEIGHTS = {"strong": 0.65, "medium": 0.25, "weak": 0.10}
 ORTHOGONAL_PLATFORM_SETS = {frozenset({"desktop", "web"})}
 MODULE_GROUP_DIRECTORIES = {"apps", "packages", "services"}
+MAX_REPOSITORY_ENTRIES = 100_000
+MAX_DISCOVERY_FILES = 100_000
+MAX_DISCOVERY_MATCH_WORK_UNITS = 10_000_000
+MAX_DISCOVERY_EVIDENCE = 100_000
+MAX_DISCOVERY_PATH_BYTES = 4_096
 
 
 class DiscoveryEngine:
@@ -37,6 +44,7 @@ class DiscoveryEngine:
         files = self._files(root)
         evidence: list[dict[str, Any]] = []
         modules: list[dict[str, Any]] = []
+        match_work_units = 0
 
         for registered in self.registry.manifests:
             manifest = registered.value
@@ -44,8 +52,25 @@ class DiscoveryEngine:
             matches: list[dict[str, str]] = []
             for level in ("strong", "medium", "weak"):
                 for pattern in manifest["detection"][level]:
+                    if len(pattern.encode("utf-8")) > MAX_DISCOVERY_PATH_BYTES:
+                        raise ContractError(
+                            f"manifest detection pattern exceeds maximum of {MAX_DISCOVERY_PATH_BYTES} bytes"
+                        )
                     for relative in files:
+                        match_work_units += len(pattern) * (
+                            len(relative) + len(Path(relative).name)
+                        )
+                        if match_work_units > MAX_DISCOVERY_MATCH_WORK_UNITS:
+                            raise ContractError(
+                                "repository discovery exceeds maximum of "
+                                f"{MAX_DISCOVERY_MATCH_WORK_UNITS} match work units"
+                            )
                         if _matches(relative, pattern):
+                            if len(evidence) >= MAX_DISCOVERY_EVIDENCE:
+                                raise ContractError(
+                                    "repository discovery exceeds maximum of "
+                                    f"{MAX_DISCOVERY_EVIDENCE} evidence entries"
+                                )
                             match = {"level": level, "path": relative, "pattern": pattern}
                             matches.append(match)
                             evidence.append({"kind": "manifest-signal", "manifest": platform_id, **match})
@@ -120,17 +145,56 @@ class DiscoveryEngine:
 
     def _files(self, root: Path) -> list[str]:
         found: list[str] = []
-        for path in root.rglob("*"):
+        entry_count = 0
+        stack = [root]
+        while stack:
+            directory = stack.pop()
             try:
-                relative = path.relative_to(root)
-            except ValueError:
-                continue
-            if len(relative.parts) > self.max_depth:
-                continue
-            if any(part in IGNORED_DIRECTORIES for part in relative.parts):
-                continue
-            if path.is_file() or path.suffix in {".xcodeproj", ".xcworkspace"}:
-                found.append(relative.as_posix())
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        entry_count += 1
+                        if entry_count > MAX_REPOSITORY_ENTRIES:
+                            raise ContractError(
+                                "repository discovery exceeds maximum of "
+                                f"{MAX_REPOSITORY_ENTRIES} directory entries"
+                            )
+                        path = Path(entry.path)
+                        try:
+                            relative = path.relative_to(root)
+                        except ValueError:
+                            continue
+                        if len(relative.parts) > self.max_depth:
+                            continue
+                        if any(part in IGNORED_DIRECTORIES for part in relative.parts):
+                            continue
+                        relative_text = relative.as_posix()
+                        if len(relative_text.encode("utf-8")) > MAX_DISCOVERY_PATH_BYTES:
+                            raise ContractError(
+                                f"repository path exceeds maximum of {MAX_DISCOVERY_PATH_BYTES} bytes"
+                            )
+                        is_container = path.suffix in {".xcodeproj", ".xcworkspace"}
+                        if entry.is_symlink():
+                            if path.is_file() or is_container:
+                                found.append(relative_text)
+                                if len(found) > MAX_DISCOVERY_FILES:
+                                    raise ContractError(
+                                        "repository discovery exceeds maximum of "
+                                        f"{MAX_DISCOVERY_FILES} files"
+                                    )
+                            continue
+                        if entry.is_file(follow_symlinks=False) or is_container:
+                            found.append(relative_text)
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(path)
+                        if len(found) > MAX_DISCOVERY_FILES:
+                            raise ContractError(
+                                "repository discovery exceeds maximum of "
+                                f"{MAX_DISCOVERY_FILES} files"
+                            )
+            except OSError as error:
+                raise ContractError(
+                    f"repository directory cannot be read: {directory}: {error}"
+                ) from error
         return sorted(found)
 
 
@@ -222,7 +286,7 @@ def _target_modules(
 ) -> list[dict[str, Any]]:
     candidates = explicit["target_files"] or explicit["changed_files"]
     contract_paths = {item["path"] for item in shared_contracts}
-    normalized_candidates = {item.replace("\\", "/").lstrip("./") for item in candidates}
+    normalized_candidates = {_normalize_candidate(item) for item in candidates}
     if normalized_candidates & contract_paths:
         return sorted(modules, key=lambda item: (item["path"], item["platform"]))
     if not candidates:
@@ -233,13 +297,34 @@ def _target_modules(
         candidates = [] if cwd_relative == "." else [cwd_relative]
     selected: list[dict[str, Any]] = []
     for candidate in candidates:
-        normalized = candidate.replace("\\", "/").lstrip("./")
+        normalized = _normalize_candidate(candidate)
         matches = [module for module in modules if _path_contains(module["path"], normalized)]
         if matches:
             longest = max(len(Path(module["path"]).parts) for module in matches)
             selected.extend(module for module in matches if len(Path(module["path"]).parts) == longest)
     unique = {(module["path"], module["platform"]): module for module in selected}
     return sorted(unique.values(), key=lambda item: (item["path"], item["platform"]))
+
+
+def _normalize_candidate(value: str) -> str:
+    if len(value.encode("utf-8")) > MAX_DISCOVERY_PATH_BYTES:
+        raise ContractError(f"target path exceeds maximum of {MAX_DISCOVERY_PATH_BYTES} bytes")
+    normalized = value.replace("\\", "/")
+    if (
+        normalized.startswith("/")
+        or normalized.startswith("//")
+        or (
+            len(normalized) >= 2
+            and normalized[0].isascii()
+            and normalized[0].isalpha()
+            and normalized[1] == ":"
+        )
+    ):
+        raise ContractError(f"target path must be repository-relative: {value}")
+    components = [item for item in normalized.split("/") if item not in {"", "."}]
+    if ".." in components:
+        raise ContractError(f"target path cannot escape repository root: {value}")
+    return "/".join(components)
 
 
 def _shared_contracts(files: list[str]) -> list[dict[str, Any]]:

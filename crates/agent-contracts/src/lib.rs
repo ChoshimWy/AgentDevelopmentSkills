@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::path::Path;
 use thiserror::Error;
 
@@ -11,6 +12,8 @@ use thiserror::Error;
 pub const MAX_CANONICAL_INTEGER_DIGITS: usize = 4_300;
 /// Cross-implementation maximum for nested JSON arrays and objects.
 pub const MAX_CANONICAL_JSON_DEPTH: usize = 512;
+/// Maximum encoded size accepted from one on-disk contract.
+pub const MAX_CONTRACT_JSON_BYTES: usize = 64 * 1024 * 1024;
 
 /// Errors produced while reading or encoding a versioned contract.
 #[derive(Debug, Error)]
@@ -27,6 +30,8 @@ pub enum ContractError {
     IntegerTooLong { digits: usize, maximum: usize },
     #[error("contract JSON nesting depth {depth} exceeds maximum {maximum}")]
     NestingTooDeep { depth: usize, maximum: usize },
+    #[error("contract input has more than {maximum} bytes")]
+    InputTooLarge { maximum: usize },
     #[error("unsupported schema_version: {actual:?}; expected {expected:?}")]
     UnsupportedSchemaVersion {
         actual: Option<String>,
@@ -52,7 +57,27 @@ pub fn parse_json(bytes: &[u8]) -> Result<Value, ContractError> {
 /// # Errors
 /// Returns an I/O or JSON parsing error when the artifact cannot be loaded.
 pub fn load_json(path: impl AsRef<Path>) -> Result<Value, ContractError> {
-    parse_json(&std::fs::read(path)?)
+    let mut file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.len() > MAX_CONTRACT_JSON_BYTES as u64 {
+        return Err(ContractError::InputTooLarge {
+            maximum: MAX_CONTRACT_JSON_BYTES,
+        });
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .unwrap_or(MAX_CONTRACT_JSON_BYTES)
+            .min(MAX_CONTRACT_JSON_BYTES),
+    );
+    file.by_ref()
+        .take((MAX_CONTRACT_JSON_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CONTRACT_JSON_BYTES {
+        return Err(ContractError::InputTooLarge {
+            maximum: MAX_CONTRACT_JSON_BYTES,
+        });
+    }
+    parse_json(&bytes)
 }
 
 /// Encode compact UTF-8 JSON with sorted object keys and one trailing newline.
@@ -318,8 +343,9 @@ pub fn require_schema_version(value: &Value, expected: &str) -> Result<(), Contr
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_CANONICAL_INTEGER_DIGITS, MAX_CANONICAL_JSON_DEPTH, canonical_json, canonical_sha256,
-        parse_json, python_float_from_shortest, require_schema_version,
+        MAX_CANONICAL_INTEGER_DIGITS, MAX_CANONICAL_JSON_DEPTH, MAX_CONTRACT_JSON_BYTES,
+        canonical_json, canonical_sha256, load_json, parse_json, python_float_from_shortest,
+        require_schema_version,
     };
     use serde_json::json;
 
@@ -426,5 +452,22 @@ mod tests {
         require_schema_version(&json!({"schema_version": "1.0"}), "1.0").unwrap();
         assert!(require_schema_version(&json!({"schema_version": "2.0"}), "1.0").is_err());
         assert!(require_schema_version(&json!([]), "1.0").is_err());
+    }
+
+    #[test]
+    fn on_disk_contract_size_is_bounded_before_reading() {
+        let path = std::env::temp_dir().join(format!(
+            "agent-contract-size-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len((MAX_CONTRACT_JSON_BYTES + 1) as u64).unwrap();
+        drop(file);
+        assert!(matches!(
+            load_json(&path),
+            Err(super::ContractError::InputTooLarge { .. })
+        ));
+        std::fs::remove_file(path).unwrap();
     }
 }
