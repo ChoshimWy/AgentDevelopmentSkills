@@ -23,6 +23,53 @@ from agent_workflow.models import ContractError
 
 
 class InstallationTests(unittest.TestCase):
+    def test_package_tree_uses_canonical_posix_order_on_windows_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary) / "fixture"
+            package.mkdir()
+            package = package.resolve()
+            (package / "manifest.json").write_text("{}\n", encoding="utf-8")
+            assets = package / "assets"
+            assets.mkdir()
+            (assets / "a.txt").write_text("a\n", encoding="utf-8")
+            (assets / "B.txt").write_text("B\n", encoding="utf-8")
+            (assets / "a-dir").mkdir()
+            (assets / "a-dir" / "child.txt").write_text("a child\n", encoding="utf-8")
+            (assets / "B-dir").mkdir()
+            (assets / "B-dir" / "child.txt").write_text("B child\n", encoding="utf-8")
+            native_sorted = sorted
+
+            def windows_path_sorted(values, *args, **kwargs):
+                items = list(values)
+                if not args and not kwargs and items and all(isinstance(item, Path) for item in items):
+                    return native_sorted(items, key=lambda item: str(item).casefold())
+                return native_sorted(items, *args, **kwargs)
+
+            with mock.patch.object(installation_module, "sorted", windows_path_sorted, create=True):
+                files = installation_module._collect_files(package, ["assets"])
+                directories = installation_module._directories_for_files(package, files)
+                snapshot_files, snapshot_directories = installation_module._snapshot_tree(
+                    package,
+                    ignore_source_cache=True,
+                )
+
+            paths = [entry["path"] for entry in files]
+            expected_files = [
+                "assets/B-dir/child.txt",
+                "assets/B.txt",
+                "assets/a-dir/child.txt",
+                "assets/a.txt",
+                "manifest.json",
+            ]
+            expected_directories = ["assets", "assets/B-dir", "assets/a-dir"]
+            self.assertEqual(paths, expected_files)
+            self.assertEqual(
+                [entry["path"] for entry in directories],
+                expected_directories,
+            )
+            self.assertEqual([entry["path"] for entry in snapshot_files], expected_files)
+            self.assertEqual([entry["path"] for entry in snapshot_directories], expected_directories)
+
     def write_installable_package(
         self,
         root: Path,

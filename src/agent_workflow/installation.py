@@ -293,22 +293,23 @@ def _collect_files(package_root: Path, roots: Iterable[str]) -> tuple[dict[str, 
             if path.is_file():
                 paths.add(path)
     entries = []
-    for path in sorted(paths):
+    for path in paths:
         relative = path.relative_to(package_root).as_posix()
         entries.append({"path": relative, "sha256": _file_digest(path), "mode": _canonical_source_file_mode(path)})
+    entries.sort(key=lambda entry: entry["path"])
     return tuple(entries)
 
 
 def _directories_for_files(root: Path, files: Iterable[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
-    relative_paths: set[Path] = set()
+    relative_paths: set[str] = set()
     for entry in files:
-        parent = Path(entry["path"]).parent
+        parent = PurePosixPath(entry["path"]).parent
         while parent.parts:
-            relative_paths.add(parent)
+            relative_paths.add(parent.as_posix())
             parent = parent.parent
     return tuple(
         {
-            "path": relative.as_posix(),
+            "path": relative,
             "mode": 0o755,
         }
         for relative in sorted(relative_paths)
@@ -329,7 +330,7 @@ def _snapshot_tree(
         raise ContractError(f"install tree is missing or unsafe: {root}")
     files: list[dict[str, Any]] = []
     directories: list[dict[str, Any]] = []
-    for path in sorted(root.rglob("*")):
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
         relative = path.relative_to(root)
         if ignore_os_metadata and _is_ignored_os_metadata(path):
             continue
