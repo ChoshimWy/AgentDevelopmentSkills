@@ -7,8 +7,15 @@ backend-path = ["."]
 name = "agent-development-skills"
 version = "0.2.0"
 description = "Cross-platform agent workflow core"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ChoshimWy/AgentDevelopmentSkills"
+Documentation = "https://github.com/ChoshimWy/AgentDevelopmentSkills/tree/main/docs"
+Issues = "https://github.com/ChoshimWy/AgentDevelopmentSkills/issues"
 
 [project.scripts]
 agent-skills = "agent_workflow.cli:main"

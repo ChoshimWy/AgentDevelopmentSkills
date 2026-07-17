@@ -56,6 +56,9 @@ The Pages site is currently a prepared, not-yet-deployed release surface. Do not
 
 ## Development
 
+- [Contributing guide](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+
 Run the complete conformance suite:
 
 ```bash
