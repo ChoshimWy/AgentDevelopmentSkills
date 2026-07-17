@@ -10,3 +10,7 @@ build/
 .agent-workflow/
 agent-skills.lock
 run-ledger.jsonl
+
+# Local/internal development documentation
+AGENTS.md
+docs/implementation/

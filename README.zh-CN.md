@@ -64,7 +64,7 @@ PYTHONPATH=src python3 -m unittest tests.test_pages_distribution tests.test_gith
 4. License/NOTICE 证据已提交并验证；若内容变更，必须重新生成 migration audit。
 5. 首次发布后保存 Release、Pages manifest 和线上 smoke 输出。
 
-详见英文主 README、[`docs/implementation/phase-6-distribution-and-governance.html`](docs/implementation/phase-6-distribution-and-governance.html) 以及架构文档。
+详见英文主 README 与 [`docs/cross-platform-agent-workflow-architecture.html`](docs/cross-platform-agent-workflow-architecture.html) 架构文档。
 
 ## License
 

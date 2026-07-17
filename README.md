@@ -72,7 +72,7 @@ PYTHONPATH=src python3 -m unittest tests.test_pages_distribution tests.test_gith
 
 The `Publish verified release` workflow only accepts a successful qualification run from the protected `main` branch at the current workflow revision. It re-runs the final gate, rejects existing tags and releases, creates tags atomically, verifies Pages and Release assets by hash, and uses pinned GitHub Actions with job-level least privilege.
 
-Before the first public release, repository administrators must configure branch protection, the `release` and `github-pages` environments, required reviewers, and the external review trust store. License/NOTICE evidence is now present and verified. See [`README.zh-CN.md`](README.zh-CN.md) for the Chinese guide and [`docs/implementation/phase-6-distribution-and-governance.html`](docs/implementation/phase-6-distribution-and-governance.html) for the detailed governance record.
+Before the first public release, repository administrators must configure branch protection, the `release` and `github-pages` environments, required reviewers, and the external review trust store. License/NOTICE evidence is now present and verified. See [`README.zh-CN.md`](README.zh-CN.md) for the Chinese guide and [`docs/cross-platform-agent-workflow-architecture.html`](docs/cross-platform-agent-workflow-architecture.html) for the public architecture overview.
 
 ## License
 
