@@ -88,7 +88,7 @@ impl SourceInstallSelection {
     pub fn compatibility_projection(&self) -> Value {
         json!({
             "package_roots": self.package_roots.iter().map(|(identifier, root)| {
-                json!({"id": identifier, "path": root})
+                json!({"id": identifier, "path": compatibility_path(root)})
             }).collect::<Vec<_>>(),
             "resolved_dependencies": self.dependencies.iter()
                 .map(PackageDependency::compatibility_projection)
@@ -99,6 +99,39 @@ impl SourceInstallSelection {
             "selection_reasons": self.selection_reasons,
         })
     }
+}
+
+#[cfg(not(windows))]
+fn compatibility_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+#[cfg(windows)]
+fn compatibility_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+
+    const VERBATIM: &[u16] = &[92, 92, 63, 92];
+    const VERBATIM_UNC: &[u16] = &[92, 92, 63, 92, 85, 78, 67, 92];
+    let encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let normalized = if encoded.starts_with(VERBATIM_UNC) {
+        let mut result = vec![92_u16, 92];
+        result.extend_from_slice(&encoded[VERBATIM_UNC.len()..]);
+        Some(result)
+    } else if encoded.starts_with(VERBATIM)
+        && encoded
+            .get(VERBATIM.len())
+            .is_some_and(|unit| u8::try_from(*unit).is_ok_and(|byte| byte.is_ascii_alphabetic()))
+        && encoded.get(VERBATIM.len() + 1) == Some(&58)
+    {
+        Some(encoded[VERBATIM.len()..].to_vec())
+    } else {
+        None
+    };
+    normalized.map_or_else(
+        || path.to_path_buf(),
+        |units| PathBuf::from(OsString::from_wide(&units)),
+    )
 }
 
 /// Resolve source package selection, required/optional dependency closure, and
@@ -947,6 +980,19 @@ mod tests {
         let selection = resolve_source_install_selection(fixture.platforms(), &[], &[], &[], true)
             .expect("nested manifest is outside package catalog");
         assert_eq!(selection.package_roots()[0].0, "core");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn compatibility_projection_removes_windows_verbatim_prefixes() {
+        assert_eq!(
+            compatibility_path(Path::new(r"\\?\C:\repo\platforms\core")),
+            PathBuf::from(r"C:\repo\platforms\core")
+        );
+        assert_eq!(
+            compatibility_path(Path::new(r"\\?\UNC\server\share\core")),
+            PathBuf::from(r"\\server\share\core")
+        );
     }
 
     #[cfg(unix)]
