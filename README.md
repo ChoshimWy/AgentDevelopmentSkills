@@ -204,10 +204,16 @@ Report v1 through `doctor-report`. Because v1 freezes the hosting Python
 runtime, this compatibility command requires the host to attest
 `--python-version`; it never discovers or executes an interpreter and does not
 claim a no-Python production cutover. Mutating lifecycle transactions remain
-on the Python path.
-It holds directory capabilities and opens contract files without following
-symlinks; it does not repair, install, upgrade, roll back, uninstall, or
-otherwise write the target. Failed projected checks keep canonical JSON on
+on the Python path. As their first native prerequisite, `agent-lifecycle` now
+exposes an identity-bound RAII directory lock with atomic exclusion, safe
+missing-target creation, crash-residue visibility, and identity-checked
+cleanup; it is not yet wired into production install or upgrade commands.
+The target parent namespace must remain trusted while portable name-based
+release runs. Callers must
+expand `~` before using its API. The Doctor path holds directory capabilities
+and opens contract files without following symlinks; unlike the explicit lock
+API, it does not repair, install, upgrade, roll back, uninstall, or otherwise
+write the target. Failed projected checks keep canonical JSON on
 stdout and return exit status 2. Core also does not create commits, change
 staging, switch the production CLI, or make installation changes.
 Activation and installed-package tree mode parity are currently POSIX

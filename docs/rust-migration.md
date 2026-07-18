@@ -106,9 +106,14 @@ contains:
   agree. It can now wrap the projection in a validated Doctor Report v1. Since
   v1 records its Python host, `doctor-report` requires an explicit
   `--python-version` host attestation and never discovers or executes an
-  interpreter. It holds directory capabilities and opens contract files
-  without following symlinks, and it never repairs or writes the inspected
-  installation. Activation and installed-package tree mode parity are
+  interpreter. The crate also exposes the first mutating-lifecycle prerequisite:
+  an identity-bound RAII directory lock with atomic exclusion, capability-safe
+  missing-target creation, visible crash residue, and identity-checked cleanup.
+  Portable name-based release assumes a trusted target parent, and callers must
+  expand `~` before acquisition. The Doctor path holds directory capabilities
+  and opens contract files without following symlinks; unlike the explicit
+  lock API, it never repairs or writes the inspected installation. Activation
+  and installed-package tree mode parity are
   POSIX-only for now; Windows-native Doctor verifies the Lock contract,
   no-follow paths, and content hashes without treating POSIX mode bits as an
   ACL guarantee;

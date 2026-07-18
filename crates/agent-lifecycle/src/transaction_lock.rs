@@ -1,0 +1,460 @@
+use super::{
+    LIFECYCLE_LOCK_DIRECTORY, LifecycleError, MANAGED_DIRECTORY_MODE, absolute_path,
+    open_absolute_directory_nofollow, open_child_directory, same_object_cap,
+};
+use cap_std::fs::Dir;
+use std::path::{Path, PathBuf};
+
+/// Exclusive directory lock for one installation lifecycle transaction.
+///
+/// The lock directory lives outside all swapped managed roots. Its creation is
+/// atomic across processes, and a crashed process intentionally leaves the
+/// directory behind so Doctor reports recovery attention instead of guessing
+/// that the transaction is stale.
+///
+/// The target parent namespace must be trusted against concurrent adversarial
+/// replacement while a portable name-based release is in progress.
+#[must_use = "the lifecycle lock guard must be held for the full transaction"]
+pub struct LifecycleLock {
+    active: bool,
+    identity: cap_std::fs::Metadata,
+    target: PathBuf,
+    target_directory: Dir,
+}
+
+impl LifecycleLock {
+    /// Acquire the lifecycle lock, securely creating missing target directories.
+    ///
+    /// # Errors
+    /// Fails when the target traverses a symlink or non-directory, when another
+    /// lifecycle operation owns the lock, or when the lock cannot be opened as
+    /// the same directory that was atomically created.
+    pub fn acquire(target_root: impl AsRef<Path>) -> Result<Self, LifecycleError> {
+        reject_unexpanded_home(target_root.as_ref())?;
+        let requested_target = absolute_path(target_root.as_ref())?;
+        let target_directory = open_or_create_directory(&requested_target)?;
+        let target = canonical_path_for_directory(&requested_target, &target_directory)?;
+        match target_directory.create_dir(LIFECYCLE_LOCK_DIRECTORY) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return invalid(format!(
+                    "lifecycle operation is already active or recovery is required: {}",
+                    target.join(LIFECYCLE_LOCK_DIRECTORY).display()
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let lock = open_child_directory(
+            &target_directory,
+            LIFECYCLE_LOCK_DIRECTORY,
+            None,
+            "lifecycle lock",
+        )?;
+        let identity = lock.dir_metadata()?;
+        let prepared = (|| {
+            #[cfg(unix)]
+            {
+                use cap_std::fs::{Permissions, PermissionsExt as _};
+                lock.set_permissions(".", Permissions::from_mode(MANAGED_DIRECTORY_MODE))?;
+            }
+            Ok::<_, LifecycleError>(
+                open_child_directory(
+                    &target_directory,
+                    LIFECYCLE_LOCK_DIRECTORY,
+                    Some(MANAGED_DIRECTORY_MODE),
+                    "lifecycle lock",
+                )?
+                .dir_metadata()?,
+            )
+        })();
+        let current = match prepared {
+            Ok(current) => current,
+            Err(error) => {
+                remove_owned_lock(&target_directory, &identity);
+                return Err(error);
+            }
+        };
+        if !same_object_cap(&identity, &current) {
+            return invalid("lifecycle lock changed while acquiring");
+        }
+        canonical_path_for_directory(&target, &target_directory)?;
+        Ok(Self {
+            active: true,
+            identity: current,
+            target,
+            target_directory,
+        })
+    }
+
+    /// Return the absolute target identity frozen by this lock.
+    #[must_use]
+    pub fn target(&self) -> &Path {
+        &self.target
+    }
+
+    /// Prove that the lock directory still denotes the acquired object.
+    ///
+    /// # Errors
+    /// Fails if the lock was released, removed, replaced, or changed mode.
+    pub fn validate(&self) -> Result<(), LifecycleError> {
+        if !self.active {
+            return invalid("lifecycle lock token is no longer active");
+        }
+        canonical_path_for_directory(&self.target, &self.target_directory)?;
+        let current = open_child_directory(
+            &self.target_directory,
+            LIFECYCLE_LOCK_DIRECTORY,
+            Some(MANAGED_DIRECTORY_MODE),
+            "lifecycle lock token",
+        )?
+        .dir_metadata()?;
+        if !same_object_cap(&self.identity, &current) {
+            return invalid("lifecycle lock token is no longer active");
+        }
+        Ok(())
+    }
+
+    /// Validate both the live lock object and its binding to an operation target.
+    ///
+    /// # Errors
+    /// Fails if the supplied target differs from the one used for acquisition or
+    /// if the directory token is no longer active.
+    pub fn validate_for(&self, target_root: impl AsRef<Path>) -> Result<(), LifecycleError> {
+        let requested = absolute_path(target_root.as_ref())?;
+        let canonical =
+            canonical_path_for_directory(&requested, &self.target_directory).map_err(|_| {
+                LifecycleError::Invalid("lifecycle lock token does not match target".into())
+            })?;
+        if canonical != self.target {
+            return invalid("lifecycle lock token does not match target");
+        }
+        self.validate()
+    }
+
+    /// Release the lock only if it is still the acquired empty directory.
+    ///
+    /// Portable removal is name-based after immediate identity revalidation and
+    /// therefore relies on the trusted-parent requirement documented on the guard.
+    ///
+    /// # Errors
+    /// Fails closed when the lock was replaced or contains unexpected residue.
+    pub fn release(mut self) -> Result<(), LifecycleError> {
+        self.validate()?;
+        self.target_directory.remove_dir(LIFECYCLE_LOCK_DIRECTORY)?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for LifecycleLock {
+    fn drop(&mut self) {
+        if self.active
+            && self.validate().is_ok()
+            && self
+                .target_directory
+                .remove_dir(LIFECYCLE_LOCK_DIRECTORY)
+                .is_ok()
+        {
+            self.active = false;
+        }
+    }
+}
+
+fn open_or_create_directory(path: &Path) -> Result<Dir, LifecycleError> {
+    let target = absolute_path(path)?;
+    let mut existing = target.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return invalid(format!(
+                    "lifecycle target must not traverse a symlink or non-directory: {}",
+                    target.display()
+                ));
+            }
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = existing.file_name().ok_or_else(|| {
+                    LifecycleError::Invalid("lifecycle target is invalid".to_owned())
+                })?;
+                missing.push(name.to_owned());
+                existing = existing.parent().ok_or_else(|| {
+                    LifecycleError::Invalid("lifecycle target is invalid".to_owned())
+                })?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    let mut directory = open_absolute_directory_nofollow(existing)?;
+    for name in missing.iter().rev() {
+        let name = name
+            .to_str()
+            .ok_or_else(|| LifecycleError::Invalid("lifecycle target is not UTF-8".to_owned()))?;
+        match directory.create_dir(name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        directory = open_child_directory(&directory, name, None, "lifecycle target directory")?;
+    }
+    Ok(directory)
+}
+
+fn canonical_path_for_directory(path: &Path, expected: &Dir) -> Result<PathBuf, LifecycleError> {
+    let expected_identity = expected.dir_metadata()?;
+    let before = open_absolute_directory_nofollow(path)?;
+    if !same_object_cap(&expected_identity, &before.dir_metadata()?) {
+        return invalid("lifecycle target changed while resolving");
+    }
+    let canonical = std::fs::canonicalize(path)?;
+    let canonical_directory = open_absolute_directory_nofollow(&canonical)?;
+    if !same_object_cap(&expected_identity, &canonical_directory.dir_metadata()?) {
+        return invalid("lifecycle target changed while resolving");
+    }
+    let after = open_absolute_directory_nofollow(path)?;
+    if !same_object_cap(&expected_identity, &after.dir_metadata()?) {
+        return invalid("lifecycle target changed while resolving");
+    }
+    Ok(canonical)
+}
+
+fn reject_unexpanded_home(path: &Path) -> Result<(), LifecycleError> {
+    if path
+        .components()
+        .next()
+        .and_then(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .is_some_and(|value| value.starts_with('~'))
+    {
+        return invalid("lifecycle target home shorthand must be expanded by the caller");
+    }
+    Ok(())
+}
+
+fn remove_owned_lock(target: &Dir, identity: &cap_std::fs::Metadata) {
+    let owned = open_child_directory(
+        target,
+        LIFECYCLE_LOCK_DIRECTORY,
+        None,
+        "lifecycle lock cleanup",
+    )
+    .and_then(|lock| Ok(same_object_cap(identity, &lock.dir_metadata()?)))
+    .unwrap_or(false);
+    if owned {
+        let _ = target.remove_dir(LIFECYCLE_LOCK_DIRECTORY);
+    }
+}
+
+fn invalid<T>(message: impl Into<String>) -> Result<T, LifecycleError> {
+    Err(LifecycleError::Invalid(message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inspect_doctor_baseline;
+    use serde_json::Value;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn temporary_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "agent-lifecycle-lock-{label}-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn check_status<'a>(value: &'a Value, check_id: &str) -> Option<&'a str> {
+        value
+            .get("checks")?
+            .as_array()?
+            .iter()
+            .find(|check| check.get("id").and_then(Value::as_str) == Some(check_id))?
+            .get("status")?
+            .as_str()
+    }
+
+    #[test]
+    fn lock_is_exclusive_visible_to_doctor_and_released_by_identity() {
+        let root = temporary_path("exclusive").join("nested/target");
+        let lock = LifecycleLock::acquire(&root).expect("acquire lifecycle lock");
+        assert_eq!(
+            lock.target(),
+            std::fs::canonicalize(&root).expect("canonical lifecycle target")
+        );
+        lock.validate().expect("validate lifecycle lock");
+        let other = root.parent().unwrap_or(&root).join("other");
+        assert!(lock.validate_for(&other).is_err());
+        lock.validate_for(&root)
+            .expect("validate lifecycle lock target binding");
+        let error = LifecycleLock::acquire(&root)
+            .err()
+            .expect("second lifecycle lock must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("already active or recovery is required")
+        );
+
+        let report = inspect_doctor_baseline(&root, root.join("schemas"))
+            .expect("inspect active lifecycle lock");
+        assert_eq!(check_status(&report, "recovery.residue"), Some("failed"));
+        assert_eq!(
+            report.pointer("/recovery/candidates"),
+            Some(&serde_json::json!([{
+                "kind": "lifecycle-lock",
+                "path": LIFECYCLE_LOCK_DIRECTORY,
+            }]))
+        );
+
+        lock.release().expect("release lifecycle lock");
+        assert!(!root.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        let report =
+            inspect_doctor_baseline(&root, root.join("schemas")).expect("inspect released lock");
+        assert_eq!(check_status(&report, "recovery.residue"), Some("passed"));
+        std::fs::remove_dir_all(root.parent().and_then(Path::parent).unwrap_or(&root))
+            .expect("remove lifecycle lock root");
+    }
+
+    #[test]
+    fn lock_exclusion_and_crash_residue_cross_process_boundaries() {
+        const CHILD_MODE: &str = "AGENT_LIFECYCLE_LOCK_CHILD_MODE";
+        const CHILD_TARGET: &str = "AGENT_LIFECYCLE_LOCK_CHILD_TARGET";
+
+        if let Some(mode) = std::env::var_os(CHILD_MODE) {
+            let target = PathBuf::from(
+                std::env::var_os(CHILD_TARGET).expect("child lifecycle target must be provided"),
+            );
+            match mode.to_str().expect("child mode must be UTF-8") {
+                "contend" => {
+                    assert!(LifecycleLock::acquire(target).is_err());
+                }
+                "leak" => {
+                    let lock =
+                        LifecycleLock::acquire(target).expect("child acquires lifecycle lock");
+                    std::mem::forget(lock);
+                }
+                other => panic!("unexpected child mode: {other}"),
+            }
+            return;
+        }
+
+        let root = temporary_path("process-boundary");
+        std::fs::create_dir(&root).expect("create lifecycle target");
+        let lock = LifecycleLock::acquire(&root).expect("parent acquires lifecycle lock");
+        run_lock_child("contend", &root);
+        lock.release().expect("parent releases lifecycle lock");
+
+        run_lock_child("leak", &root);
+        let report =
+            inspect_doctor_baseline(&root, root.join("schemas")).expect("inspect leaked lock");
+        assert_eq!(check_status(&report, "recovery.residue"), Some("failed"));
+        assert!(LifecycleLock::acquire(&root).is_err());
+
+        std::fs::remove_dir(root.join(LIFECYCLE_LOCK_DIRECTORY))
+            .expect("remove simulated crash residue");
+        std::fs::remove_dir(&root).expect("remove lifecycle target");
+    }
+
+    fn run_lock_child(mode: &str, target: &Path) {
+        let test_name =
+            "transaction_lock::tests::lock_exclusion_and_crash_residue_cross_process_boundaries";
+        let output = Command::new(std::env::current_exe().expect("resolve test executable"))
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env("AGENT_LIFECYCLE_LOCK_CHILD_MODE", mode)
+            .env("AGENT_LIFECYCLE_LOCK_CHILD_TARGET", target)
+            .output()
+            .expect("run lifecycle lock child");
+        assert!(
+            output.status.success(),
+            "lifecycle child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[test]
+    fn replaced_lock_is_not_accepted_or_removed_by_drop() {
+        let root = temporary_path("replacement");
+        std::fs::create_dir(&root).expect("create lifecycle target");
+        let lock = LifecycleLock::acquire(&root).expect("acquire lifecycle lock");
+        let path = root.join(LIFECYCLE_LOCK_DIRECTORY);
+        std::fs::remove_dir(&path).expect("remove acquired lock directory");
+        std::fs::create_dir(&path).expect("create replacement lock directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("set replacement mode");
+        }
+        assert!(lock.validate().is_err());
+        drop(lock);
+        assert!(path.is_dir(), "drop must preserve a replacement lock");
+        std::fs::remove_dir_all(&root).expect("remove replacement test root");
+    }
+
+    #[test]
+    fn replaced_target_path_invalidates_old_lock_and_preserves_new_lock() {
+        let root = temporary_path("target-replacement");
+        let moved = root.with_extension("moved");
+        std::fs::create_dir(&root).expect("create lifecycle target");
+        let old_lock = LifecycleLock::acquire(&root).expect("acquire old lifecycle lock");
+        std::fs::rename(&root, &moved).expect("move locked lifecycle target");
+        std::fs::create_dir(&root).expect("replace lifecycle target path");
+        let new_lock = LifecycleLock::acquire(&root).expect("acquire replacement lifecycle lock");
+
+        assert!(old_lock.validate().is_err());
+        assert!(old_lock.release().is_err());
+        new_lock
+            .validate()
+            .expect("replacement lifecycle lock remains active");
+        new_lock
+            .release()
+            .expect("release replacement lifecycle lock");
+
+        assert!(
+            moved.join(LIFECYCLE_LOCK_DIRECTORY).is_dir(),
+            "invalidated old lock must remain visible as recovery residue"
+        );
+        std::fs::remove_dir(moved.join(LIFECYCLE_LOCK_DIRECTORY))
+            .expect("remove old lifecycle lock residue");
+        std::fs::remove_dir(&moved).expect("remove moved lifecycle target");
+        std::fs::remove_dir(&root).expect("remove replacement lifecycle target");
+    }
+
+    #[test]
+    fn unexpanded_home_shorthand_is_rejected_without_writes() {
+        let shorthand = PathBuf::from(format!(
+            "~agent-lifecycle-home-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = LifecycleLock::acquire(shorthand.join("target"));
+        assert!(result.is_err());
+        assert!(!shorthand.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_target_creation_rejects_intermediate_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_path("symlink");
+        let outside = temporary_path("outside");
+        std::fs::create_dir(&root).expect("create symlink test root");
+        std::fs::create_dir(&outside).expect("create outside root");
+        symlink(&outside, root.join("linked")).expect("create intermediate symlink");
+        assert!(LifecycleLock::acquire(root.join("linked/target")).is_err());
+        assert!(!outside.join("target").exists());
+        std::fs::remove_dir_all(&root).expect("remove symlink test root");
+        std::fs::remove_dir_all(&outside).expect("remove outside root");
+    }
+}

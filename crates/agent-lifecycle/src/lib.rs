@@ -1,11 +1,16 @@
-//! Read-only lifecycle diagnostics for the native migration path.
+//! Lifecycle diagnostics and transaction foundations for the native migration.
 //!
-//! This crate deliberately starts with the non-mutating Doctor boundary. It
-//! does not install, upgrade, roll back, or remove managed content.
+//! Doctor inspection is non-mutating. The explicit [`LifecycleLock`] API only
+//! creates missing target directories and its lock directory; it does not
+//! install, upgrade, roll back, or remove managed content and is not yet wired
+//! into production commands.
 
 mod packages;
 mod post_install;
 mod rollback;
+mod transaction_lock;
+
+pub use transaction_lock::LifecycleLock;
 
 use agent_contracts::{
     ContractError, MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256, parse_json,
