@@ -397,6 +397,22 @@ class ReleaseGateTests(unittest.TestCase):
                     (release / "native-artifacts.json").read_bytes()
                 ).hexdigest(),
             )
+            rendered_shell = (release / "install.sh").read_text(encoding="utf-8")
+            self.assertNotEqual(
+                rendered_shell,
+                (ROOT / "install.sh").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                f"AGENT_SKILLS_EMBEDDED_ASSET_BASE_URL={manifest['asset_base_url']}",
+                rendered_shell,
+            )
+            self.assertIn(
+                f"AGENT_SKILLS_EMBEDDED_SOURCE_SHA256={manifest['artifacts'][0]['sha256']}",
+                rendered_shell,
+            )
+            for native_record in manifest["native_artifacts"]:
+                self.assertIn(native_record["target"], rendered_shell)
+                self.assertIn(native_record["sha256"], rendered_shell)
 
             manifest["native_artifacts"][0]["sha256"] = "9" * 64
             (release / "release-manifest.json").write_bytes(
@@ -844,6 +860,73 @@ class ReleaseGateTests(unittest.TestCase):
             self.assertEqual(checks["release.supply-chain"]["status"], "blocked")
             self.assertIn("standalone bootstrap differs", checks["release.supply-chain"]["details"]["error"])
             self.assertEqual(checks["release.python-distribution"]["status"], "blocked")
+
+    def test_resigned_native_bootstrap_must_match_deterministic_render(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            native = build_native_fixture(root, FIXTURE_SOURCE_REVISION)
+            release = root / "release"
+            with mock.patch.object(
+                builder,
+                "_source_identity",
+                return_value=(FIXTURE_SOURCE_REVISION, False),
+            ), mock.patch.object(
+                builder,
+                "_git_file_modes",
+                return_value={},
+            ), mock.patch.object(
+                builder,
+                "_git_blob",
+                side_effect=lambda source, relative: (source / relative).read_bytes(),
+            ):
+                builder.build_release_bundle(
+                    ROOT,
+                    release,
+                    channel="beta",
+                    native_artifacts_dir=native,
+                )
+            bootstrap_path = release / "install.sh"
+            bootstrap_path.write_bytes(
+                bootstrap_path.read_bytes() + b"\n# unbound native metadata\n"
+            )
+            value = bootstrap_path.read_bytes()
+            digest = hashlib.sha256(value).hexdigest()
+            manifest_path = release / "release-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            record = next(
+                item
+                for item in manifest["bootstrap_assets"]
+                if item["filename"] == "install.sh"
+            )
+            record.update({"sha256": digest, "size": len(value)})
+            dump(manifest, manifest_path)
+            provenance_path = release / "provenance.json"
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            provenance_record = next(
+                item
+                for item in provenance["artifacts"]
+                if item["filename"] == "install.sh"
+            )
+            provenance_record.update({"sha256": digest, "size": len(value)})
+            provenance["fingerprint"] = sha256({
+                key: item for key, item in provenance.items() if key != "fingerprint"
+            })
+            dump(provenance, provenance_path)
+            report = gate.evaluate_release_gate(
+                release,
+                conformance_evidence=None,
+                review_evidence=None,
+            )
+            supply = next(
+                item
+                for item in report["checks"]
+                if item["id"] == "release.supply-chain"
+            )
+            self.assertEqual(supply["status"], "blocked")
+            self.assertIn(
+                "standalone bootstrap differs",
+                supply["details"]["error"],
+            )
 
     def test_active_release_mutation_is_detected_after_snapshot_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

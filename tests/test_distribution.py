@@ -639,6 +639,184 @@ class DistributionTests(unittest.TestCase):
         self.assertNotIn("build_install_bundle", shell)
         self.assertNotIn("build_install_bundle", powershell)
 
+    @unittest.skipIf(os.name == "nt", "POSIX native bootstrap is covered on macOS/Linux")
+    def test_rendered_posix_bootstrap_installs_without_python(self) -> None:
+        release = self.root / "rendered-native-release"
+        release.mkdir()
+        bundle_root = "agent-development-skills-1.0.0"
+        source_filename = f"{bundle_root}.zip"
+        source_path = release / source_filename
+        with zipfile.ZipFile(source_path, "w", compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr(f"{bundle_root}/README.md", b"fixture\n")
+        source_data = source_path.read_bytes()
+
+        target_triple = bootstrap._NATIVE_TARGETS[
+            (bootstrap._host_os(), bootstrap._host_arch())
+        ]
+        native_filename = f"agent-skills-1.0.0-{target_triple}"
+        native_path = release / native_filename
+        native_path.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$@\" > \"$AGENT_SKILLS_TEST_NATIVE_ARGS\"\n"
+            "printf '%s\\n' '{\"engine\":\"rust-shell\",\"status\":\"installed\"}'\n",
+            encoding="utf-8",
+        )
+        native_data = native_path.read_bytes()
+        native_records = [{
+            "filename": native_filename,
+            "sha256": hashlib.sha256(native_data).hexdigest(),
+            "size": len(native_data),
+            "target": target_triple,
+        }]
+        if target_triple != "x86_64-unknown-linux-gnu":
+            native_records.append({
+                **native_records[0],
+                "target": "x86_64-unknown-linux-gnu",
+            })
+        rendered = builder._render_posix_bootstrap(
+            (ROOT / "install.sh").read_bytes(),
+            asset_base_url=release.as_uri() + "/",
+            source_artifact={
+                "filename": source_filename,
+                "root": bundle_root,
+                "sha256": hashlib.sha256(source_data).hexdigest(),
+                "size": len(source_data),
+            },
+            native_records=native_records,
+            version="1.0.0",
+        )
+        script = self.root / "rendered-install.sh"
+        script.write_bytes(rendered)
+        arguments_path = self.root / "rendered-native-arguments.txt"
+        target = self.root / "rendered-native-target"
+        command = [
+            "/bin/bash",
+            str(script),
+            "--target-root",
+            str(target),
+            "--platform",
+            "apple",
+            "--json",
+        ]
+        environment = {
+            **os.environ,
+            "AGENT_SKILLS_ALLOW_FILE_URL": "1",
+            "AGENT_SKILLS_PYTHON": str(self.root / "missing-python"),
+            "AGENT_SKILLS_TEST_NATIVE_ARGS": str(arguments_path),
+            "PATH": "/usr/bin:/bin",
+        }
+        completed = subprocess.run(
+            command,
+            cwd=self.root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {"engine": "rust-shell", "status": "installed"},
+        )
+        native_arguments = arguments_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(native_arguments[0], "install")
+        self.assertIn("--source-root", native_arguments)
+        self.assertIn("--target-root", native_arguments)
+        self.assertIn("--platform", native_arguments)
+        self.assertIn("--session-launcher", native_arguments)
+        self.assertEqual(native_arguments[-1], "--json")
+
+        arguments_path.unlink()
+        native_path.write_bytes(native_data + b"tampered")
+        tampered = subprocess.run(
+            command,
+            cwd=self.root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(tampered.returncode, 0)
+        self.assertTrue(
+            "maximum allowed file size" in tampered.stderr
+            or "downloaded asset size does not match" in tampered.stderr,
+            tampered.stderr,
+        )
+        self.assertFalse(arguments_path.exists())
+
+        fake_bin = self.root / "musl-host-bin"
+        fake_bin.mkdir()
+        (fake_bin / "uname").write_text(
+            "#!/bin/sh\n"
+            "case \"$1\" in\n"
+            "  -s) printf '%s\\n' Linux ;;\n"
+            "  -m) printf '%s\\n' x86_64 ;;\n"
+            "  *) exit 2 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "getconf").write_text(
+            "#!/bin/sh\nprintf '%s\\n' 'musl 1.2.5'\n",
+            encoding="utf-8",
+        )
+        for fixture in fake_bin.iterdir():
+            fixture.chmod(0o755)
+        musl_environment = {
+            **environment,
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+        }
+        musl_auto = subprocess.run(
+            command,
+            cwd=self.root,
+            env=musl_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(musl_auto.returncode, 0)
+        self.assertIn(
+            "AGENT_SKILLS_PYTHON must point to an executable Python",
+            musl_auto.stderr,
+        )
+        self.assertFalse(arguments_path.exists())
+
+        musl_forced = subprocess.run(
+            command,
+            cwd=self.root,
+            env={
+                **musl_environment,
+                "AGENT_SKILLS_INSTALL_ENGINE": "rust",
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(musl_forced.returncode, 2)
+        self.assertIn("forced Rust install requires", musl_forced.stderr)
+        self.assertNotIn("AGENT_SKILLS_PYTHON", musl_forced.stderr)
+        self.assertFalse(arguments_path.exists())
+
+        native_path.write_bytes(native_data)
+        (fake_bin / "getconf").write_text(
+            "#!/bin/sh\nprintf '%s\\n' 'glibc 2.39'\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "getconf").chmod(0o755)
+        supported_glibc = subprocess.run(
+            command,
+            cwd=self.root,
+            env=musl_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(supported_glibc.returncode, 0, supported_glibc.stderr)
+        self.assertEqual(
+            json.loads(supported_glibc.stdout)["engine"],
+            "rust-shell",
+        )
+        self.assertTrue(arguments_path.is_file())
+
     @unittest.skipIf(os.name == "nt", "POSIX pipe bootstrap is covered on macOS/Linux")
     def test_piped_posix_bootstrap_downloads_shared_core_and_forwards_arguments(self) -> None:
         fake_bin = self.root / "fake-bin"

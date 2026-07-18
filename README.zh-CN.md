@@ -69,12 +69,17 @@ iwr -useb https://choshimwy.github.io/AgentDevelopmentSkills/install.ps1 | iex
 签名 Release 尚未发布时，请使用源码安装，不要执行上述远程命令。
 
 v2 Release 发布后，显式的首次 `--platform apple` 或
-`--platform desktop` 请求默认选择 Rust。可设置
+`--platform desktop` 请求在 macOS 或受支持的 glibc 2.39+ Linux 主机上
+默认选择 Rust；musl 与旧版 glibc 主机继续走 Python 兼容路径。发布门禁会把
+源包与对应主机二进制的精确大小、SHA-256 身份确定性写入 POSIX bootstrap，
+因此该首次安装路径只需要 `curl`、`unzip` 和系统 SHA-256 命令，不再要求
+Python。可设置
 `AGENT_SKILLS_INSTALL_ENGINE=python` 强制使用过渡期兼容路径；
 `AGENT_SKILLS_INSTALL_ENGINE=rust` 在条件不满足时会 fail-closed。Rust
-一旦被选中，执行失败不会静默降级到 Python。本阶段薄 shell/PowerShell
-bootstrap 仍要求兼容的 Python 解释器。Windows 原生二进制已经进入发布矩阵，
-但完整 Windows 安装合同启用前，仍不是 production source-install target。
+一旦被选中，执行失败不会静默降级到 Python。源码 checkout、dry-run、
+已有安装、upgrade 及其他兼容参数仍要求 Python 3.11+；PowerShell 也暂时保留
+该兼容路径。Windows 原生二进制已经进入发布矩阵，但完整 Windows 安装合同
+启用前，仍不是 production source-install target。
 
 ## 开发与验证
 

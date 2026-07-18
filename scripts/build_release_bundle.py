@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import os
 from pathlib import Path
+import shlex
 import stat
 import subprocess
 import sys
@@ -58,6 +59,8 @@ IGNORED_NAMES = {".DS_Store", "__pycache__"}
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 DEFAULT_HOST_OS = ("darwin", "linux")
 WINDOWS_RELEASE_ENABLED = False
+POSIX_METADATA_BEGIN = "# BEGIN agent-skills embedded release metadata"
+POSIX_METADATA_END = "# END agent-skills embedded release metadata"
 
 
 class ReleaseBuildError(RuntimeError):
@@ -101,6 +104,62 @@ def _canonical_json(value: Any) -> bytes:
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _render_posix_bootstrap(
+    source: bytes,
+    *,
+    asset_base_url: str,
+    source_artifact: dict[str, Any],
+    native_records: list[dict[str, Any]],
+    version: str,
+) -> bytes:
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ReleaseBuildError("install.sh must be valid UTF-8") from error
+    begin = text.find(POSIX_METADATA_BEGIN)
+    end = text.find(POSIX_METADATA_END)
+    if (
+        begin < 0
+        or end < begin
+        or text.find(POSIX_METADATA_BEGIN, begin + 1) >= 0
+        or text.find(POSIX_METADATA_END, end + 1) >= 0
+    ):
+        raise ReleaseBuildError("install.sh embedded release metadata block is invalid")
+    end += len(POSIX_METADATA_END)
+    assignments = [
+        POSIX_METADATA_BEGIN,
+        f"AGENT_SKILLS_EMBEDDED_VERSION={shlex.quote(version)}",
+        f"AGENT_SKILLS_EMBEDDED_ASSET_BASE_URL={shlex.quote(asset_base_url)}",
+        "AGENT_SKILLS_EMBEDDED_SOURCE_FILENAME="
+        + shlex.quote(source_artifact["filename"]),
+        "AGENT_SKILLS_EMBEDDED_SOURCE_SHA256="
+        + shlex.quote(source_artifact["sha256"]),
+        "AGENT_SKILLS_EMBEDDED_SOURCE_SIZE="
+        + shlex.quote(str(source_artifact["size"])),
+        "AGENT_SKILLS_EMBEDDED_SOURCE_ROOT="
+        + shlex.quote(source_artifact["root"]),
+        "agent_skills_select_native_record() {",
+        '    case "$1" in',
+    ]
+    for record in sorted(native_records, key=lambda item: item["target"]):
+        assignments.extend([
+            f"        {shlex.quote(record['target'])})",
+            f"            native_filename={shlex.quote(record['filename'])}",
+            f"            native_sha256={shlex.quote(record['sha256'])}",
+            f"            native_size={shlex.quote(str(record['size']))}",
+            "            return 0",
+            "            ;;",
+        ])
+    assignments.extend([
+        "    esac",
+        "    return 1",
+        "}",
+        POSIX_METADATA_END,
+    ])
+    rendered = text[:begin] + "\n".join(assignments) + text[end:]
+    return rendered.encode("utf-8")
 
 
 def _version(root: Path) -> str:
@@ -318,6 +377,17 @@ def build_release_bundle(
                     "sha256": record["sha256"],
                     "size": record["size"],
                 })
+        artifact_data = artifact_path.read_bytes()
+        source_artifact = {
+            "entrypoint": "scripts/install_local.py",
+            "filename": artifact_name,
+            "format": "zip",
+            "host_os": list(selected_hosts),
+            "id": "universal-source-bundle",
+            "root": bundle_root,
+            "sha256": _sha256(artifact_data),
+            "size": len(artifact_data),
+        }
         bootstrap_assets = []
         for relative in BOOTSTRAP_FILES:
             source = root / relative
@@ -326,9 +396,16 @@ def build_release_bundle(
             filename = "bootstrap_install.py" if relative == "scripts/bootstrap_install.py" else source.name
             destination = stage / filename
             data = _git_blob(root, relative) if not dirty else source.read_bytes()
+            if relative == "install.sh" and native_index is not None:
+                data = _render_posix_bootstrap(
+                    data,
+                    asset_base_url=asset_base_url,
+                    source_artifact=source_artifact,
+                    native_records=native_index["artifacts"],
+                    version=version,
+                )
             destination.write_bytes(data)
             bootstrap_assets.append({"filename": filename, "sha256": _sha256(data), "size": len(data)})
-        artifact_data = artifact_path.read_bytes()
         python_index = {
             "artifacts": python_artifacts,
             "product": "agent-development-skills",
@@ -396,16 +473,7 @@ def build_release_bundle(
         (stage / "provenance.json").write_bytes(_canonical_json(provenance))
         manifest = {
             "asset_base_url": asset_base_url,
-            "artifacts": [{
-                "entrypoint": "scripts/install_local.py",
-                "filename": artifact_name,
-                "format": "zip",
-                "host_os": list(selected_hosts),
-                "id": "universal-source-bundle",
-                "root": bundle_root,
-                "sha256": _sha256(artifact_data),
-                "size": len(artifact_data),
-            }],
+            "artifacts": [source_artifact],
             "bootstrap_assets": sorted(bootstrap_assets, key=lambda item: item["filename"]),
             "channel": channel,
             "minimum_python": "3.11",

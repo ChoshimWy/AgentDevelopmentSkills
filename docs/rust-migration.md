@@ -239,13 +239,21 @@ The repository contains:
 
 Release Manifest v2 freezes the complete native index and defaults eligible
 hosted fresh Apple/Desktop requests to the matching verified Rust executable.
-The thin bootstrap still runs on Python to acquire and verify the manifest,
-source bundle, and binary. Source-checkout, dry-run, interactive,
-compatibility-only, existing-install, upgrade, and legacy-adoption requests
-use the Python compatibility path. Operators may explicitly select that path
-with `AGENT_SKILLS_INSTALL_ENGINE=python`; forced Rust fails closed when the
-request is ineligible, and a selected native execution failure never silently
-downgrades. The parallel CLI currently covers canonical JSON,
+For macOS and supported glibc 2.39+ Linux hosts, the gated release now renders
+the exact immutable asset base, source archive identity, and six-target native
+matrix into the POSIX bootstrap. Musl and older glibc hosts are deliberately
+ineligible and remain on the Python compatibility route. An eligible explicit
+fresh Apple/Desktop request downloads both bounded assets with HTTPS-only
+redirects, verifies their exact size and SHA-256, extracts the frozen source
+archive, and invokes the verified native installer without requiring Python.
+The Final Gate independently recomputes the rendered bootstrap from source
+SBOM materials and the verified native index. Source-checkout, dry-run,
+interactive, compatibility-only,
+existing-install, upgrade, legacy-adoption, and PowerShell requests still use
+the Python compatibility path. Operators may explicitly select that path with
+`AGENT_SKILLS_INSTALL_ENGINE=python`; forced Rust fails closed when the request
+is ineligible, and a selected native acquisition or execution failure never
+silently downgrades. The parallel CLI currently covers canonical JSON,
 hashing, the shared schema-version boundary, registry snapshots, targeted
 binding resolution, source package-selection, package-snapshot, and complete
 Install Bundle/Plan/Lock compatibility, fresh-only guarded source install, an
@@ -293,6 +301,7 @@ discovers or reads Provider credentials, accesses the network, or executes
 package code. It reads only a caller-supplied, owner-private, high-entropy
 transport claim token. After a crash around atomic publication, the host must
 inspect the request before retrying claim or submit. Production CLI cutover
+for the eligible fresh-install route is complete; full command-surface parity
 and host-specific live Provider execution remain later phase gates.
 
 The native lifecycle lane is also deliberately incomplete. Its current
@@ -309,10 +318,10 @@ assembles the complete v1 artifact, recomputes summary/status/fingerprint, and
 validates its cross-field invariants. Its required `--python-version` is
 supplied by the compatibility host rather than inferred or executed by Rust,
 so this closes report-emission parity without claiming the production CLI is
-Python-free. Mutating lifecycle routes remain on the Python compatibility path
-until their own differential, tamper, concurrency, rollback, and
-independent-review gates pass; the eligible fresh-install transaction is the
-first exception.
+Python-free. Doctor, upgrade, rollback, uninstall, and source activation now
+have native compatibility commands with differential, tamper, concurrency,
+rollback, and independent-review evidence. Their hosted public CLI cutover
+remains separate from the now Python-free eligible fresh-install route.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -58,6 +59,63 @@ _MAX_SDIST_ENTRIES = 10000
 _MAX_SDIST_EXPANDED_BYTES = 512 * 1024 * 1024
 _MAX_CANDIDATE_OUTPUT_BYTES = 8 * 1024 * 1024
 _RSA_SHA256_DIGEST_INFO_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
+_POSIX_METADATA_BEGIN = "# BEGIN agent-skills embedded release metadata"
+_POSIX_METADATA_END = "# END agent-skills embedded release metadata"
+
+
+def _expected_posix_bootstrap(
+    source: bytes,
+    *,
+    manifest: dict[str, Any],
+    native_index: dict[str, Any],
+) -> bytes:
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ContractError("source install.sh must be valid UTF-8") from error
+    begin = text.find(_POSIX_METADATA_BEGIN)
+    end = text.find(_POSIX_METADATA_END)
+    if (
+        begin < 0
+        or end < begin
+        or text.find(_POSIX_METADATA_BEGIN, begin + 1) >= 0
+        or text.find(_POSIX_METADATA_END, end + 1) >= 0
+    ):
+        raise ContractError("source install.sh embedded metadata block is invalid")
+    end += len(_POSIX_METADATA_END)
+    source_artifact = manifest["artifacts"][0]
+    expected = [
+        _POSIX_METADATA_BEGIN,
+        f"AGENT_SKILLS_EMBEDDED_VERSION={shlex.quote(manifest['version'])}",
+        "AGENT_SKILLS_EMBEDDED_ASSET_BASE_URL="
+        + shlex.quote(manifest["asset_base_url"]),
+        "AGENT_SKILLS_EMBEDDED_SOURCE_FILENAME="
+        + shlex.quote(source_artifact["filename"]),
+        "AGENT_SKILLS_EMBEDDED_SOURCE_SHA256="
+        + shlex.quote(source_artifact["sha256"]),
+        "AGENT_SKILLS_EMBEDDED_SOURCE_SIZE="
+        + shlex.quote(str(source_artifact["size"])),
+        "AGENT_SKILLS_EMBEDDED_SOURCE_ROOT="
+        + shlex.quote(source_artifact["root"]),
+        "agent_skills_select_native_record() {",
+        '    case "$1" in',
+    ]
+    for record in sorted(native_index["artifacts"], key=lambda item: item["target"]):
+        expected.extend([
+            f"        {shlex.quote(record['target'])})",
+            f"            native_filename={shlex.quote(record['filename'])}",
+            f"            native_sha256={shlex.quote(record['sha256'])}",
+            f"            native_size={shlex.quote(str(record['size']))}",
+            "            return 0",
+            "            ;;",
+        ])
+    expected.extend([
+        "    esac",
+        "    return 1",
+        "}",
+        _POSIX_METADATA_END,
+    ])
+    return (text[:begin] + "\n".join(expected) + text[end:]).encode("utf-8")
 
 
 def _terminate_candidate_process(process: subprocess.Popen[bytes]) -> None:
@@ -1030,7 +1088,14 @@ def _evaluate_release_gate_snapshot(
             for standalone, source_path in bootstrap_sources.items():
                 if source_path.is_symlink() or not source_path.is_file():
                     raise ContractError(f"source bundle bootstrap is missing or unsafe: {standalone}")
-                if (release / standalone).read_bytes() != source_path.read_bytes():
+                expected = source_path.read_bytes()
+                if standalone == "install.sh" and native_index is not None:
+                    expected = _expected_posix_bootstrap(
+                        expected,
+                        manifest=manifest,
+                        native_index=native_index,
+                    )
+                if (release / standalone).read_bytes() != expected:
                     raise ContractError(f"standalone bootstrap differs from source SBOM materials: {standalone}")
         if sorted(observed, key=lambda item: item["path"]) != sbom["files"]:
             raise ContractError("source bundle contents differ from SBOM")
