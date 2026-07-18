@@ -29,7 +29,7 @@ serde_json = { version = "1.0.149", features = ["arbitrary_precision", "unbounde
 serde_stacker = "0.1.14"
 sha2 = "0.10.9"
 thiserror = "2.0.17"
-toml = "=0.8.23"
+toml = { version = "=0.8.23", features = ["preserve_order"] }
 winx = "0.36.4"
 
 [workspace.lints.rust]

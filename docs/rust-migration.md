@@ -158,8 +158,10 @@ contains:
   equality with the frozen rollback scope, validates all preimages, performs a
   byte-preserving TOML 1.0 removal of only the managed root assignment, removes
   the Activation Lock last, and supports both guarded commit and full external
-  rollback. Source activation, uninstall, and production command routing are
-  not implemented yet.
+  rollback. The Codex shared-config overlay needed by source activation is now
+  a native TOML renderer with source-script differential parity and does not
+  execute installed package code. Source-activation asset publication,
+  uninstall, and production command routing are not implemented yet.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit

@@ -159,6 +159,15 @@ class RustCompatibilityTests(unittest.TestCase):
             check=False,
         )
 
+    def run_rust_bytes(self, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [str(self.rust_cli), *arguments],
+            cwd=ROOT,
+            env={**os.environ, "CARGO_TERM_COLOR": "never"},
+            capture_output=True,
+            check=False,
+        )
+
     def test_canonical_json_and_hash_match_python(self) -> None:
         value = {
             "z": [3, 2, 1],
@@ -195,6 +204,107 @@ class RustCompatibilityTests(unittest.TestCase):
             result = self.run_rust("validate-version", str(artifact))
             self.assertEqual(result.returncode, 2)
             self.assertIn("unsupported schema_version", result.stderr)
+
+    def test_codex_config_renderer_matches_installed_source_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            existing = root / "existing.toml"
+            shared = root / "shared.toml"
+            agents = root / "代理" / "AGENTS.md"
+            existing.write_text(
+                """
+service_tier = "fast"
+model = "local"
+unicode = "中文"
+memories.enabled = true
+
+[features]
+legacy = true
+
+[plugins.local]
+enabled = true
+path = "/tmp/local"
+
+[mcp_servers.codegraph]
+command = "codegraph"
+args = ["serve", "--mcp"]
+""",
+                encoding="utf-8",
+            )
+            shared.write_text(
+                """
+model = "shared"
+service_tier = "flex"
+date = 2026-07-18
+float = 1.0
+stamp = 2026-07-18T12:00:00+00:00
+fractional = 2026-07-18T12:00:00.1-07:30
+local_time = 12:00:00.123
+
+[features]
+shared = true
+
+[plugins.managed]
+enabled = true
+
+[mcp_servers.shared]
+url = "https://example.com"
+
+[[agents.entries]]
+name = "one"
+""",
+                encoding="utf-8",
+            )
+            source = subprocess.run(
+                [
+                    sys.executable,
+                    str(
+                        ROOT
+                        / "runtime-configs/codex/assets/scripts/"
+                        "sync_codex_shared_config.py"
+                    ),
+                    "--shared-config",
+                    str(shared),
+                    "--existing-config",
+                    str(existing),
+                    "--agents-path",
+                    str(agents),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(
+                source.returncode,
+                0,
+                source.stderr.decode("utf-8", errors="replace"),
+            )
+            native = self.run_rust_bytes(
+                "codex-config-render",
+                str(shared),
+                str(agents),
+                "--existing-config",
+                str(existing),
+            )
+            self.assertEqual(
+                native.returncode,
+                0,
+                native.stderr.decode("utf-8", errors="replace"),
+            )
+            self.assertEqual(native.stdout, source.stdout)
+
+    def test_codex_config_renderer_rejects_oversized_cli_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory) / "shared.toml"
+            with shared.open("wb") as stream:
+                stream.truncate(64 * 1024 * 1024 + 1)
+            result = self.run_rust(
+                "codex-config-render",
+                str(shared),
+                str(Path(directory) / "AGENTS.md"),
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("shared Codex config has more than", result.stderr)
 
     def test_tracked_json_corpus_matches_python(self) -> None:
         tracked = subprocess.run(

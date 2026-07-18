@@ -263,8 +263,11 @@ rollback scope, validates every owned preimage, removes only owned files and
 the managed root-level `model_instructions_file`, and permits commit only after
 the Activation Lock is absent and the remaining installation is revalidated.
 Its config rewrite uses TOML 1.0 parsing while preserving every unrelated byte
-and the original POSIX mode. Source activation, uninstall, and production
-command routing remain later lifecycle slices.
+and the original POSIX mode. The source-activation prerequisite that overlays
+the Codex shared config is also available as a native, non-executing TOML
+renderer with differential parity against the installed source script; asset
+publication, uninstall, and production command routing remain later lifecycle
+slices.
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
 holds directory capabilities and opens contract files without following

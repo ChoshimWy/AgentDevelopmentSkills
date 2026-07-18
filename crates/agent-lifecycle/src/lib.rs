@@ -16,6 +16,7 @@
 //! Activation ownership checks. Source activation, uninstall, and production
 //! command routing remain outside this slice.
 
+mod codex_config;
 mod doctor_report;
 mod external_stage;
 mod managed_swap;
@@ -29,6 +30,7 @@ mod staged_tree;
 mod transaction_lock;
 mod transaction_workspace;
 
+pub use codex_config::render_codex_config;
 pub use doctor_report::inspect_doctor_report_v1;
 #[cfg(test)]
 use doctor_report::validate_doctor_report_v1;

@@ -1,12 +1,14 @@
 //! Parallel native compatibility entry point.
 
-use agent_contracts::{canonical_json, canonical_sha256, load_json, require_schema_version};
+use agent_contracts::{
+    MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256, load_json, require_schema_version,
+};
 use agent_engine::{
     DiscoveryEngine, compile_plan_with_package_lock, diff_package_locks, explain_package_lock,
     resolve_package_lock, resolve_policy, validate_compiled_plan, validate_package_lock,
     validate_plan_package_lock,
 };
-use agent_lifecycle::{inspect_doctor_baseline, inspect_doctor_report_v1};
+use agent_lifecycle::{inspect_doctor_baseline, inspect_doctor_report_v1, render_codex_config};
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
     attach_adapter_result, build_adapter_request, claim_provider_invocation,
@@ -23,7 +25,8 @@ use agent_runtime::{
 use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 const CLI_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
@@ -154,6 +157,13 @@ enum Command {
         schemas: PathBuf,
         #[arg(long)]
         python_version: String,
+    },
+    /// Render the native Codex shared-config compatibility projection.
+    CodexConfigRender {
+        shared_config: PathBuf,
+        agents_path: PathBuf,
+        #[arg(long)]
+        existing_config: Option<PathBuf>,
     },
     /// Execute a deterministic native fake-adapter workflow runtime.
     RuntimeExecute {
@@ -598,6 +608,22 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             if value.get("status").and_then(Value::as_str) == Some("blocked") {
                 return Ok(2);
             }
+        }
+        Command::CodexConfigRender {
+            shared_config,
+            agents_path,
+            existing_config,
+        } => {
+            let shared = read_bounded_codex_config(&shared_config, "shared Codex config")?;
+            let existing = existing_config
+                .as_deref()
+                .map(|path| read_bounded_codex_config(path, "existing Codex config"))
+                .transpose()?;
+            let agents_path = agents_path.to_str().ok_or(
+                "Codex config agents path must be valid UTF-8 for compatibility rendering",
+            )?;
+            let rendered = render_codex_config(existing.as_deref(), &shared, agents_path)?;
+            std::io::stdout().write_all(&rendered)?;
         }
         Command::RuntimeExecute {
             plan,
@@ -1057,6 +1083,27 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         }
     }
     Ok(0)
+}
+
+fn read_bounded_codex_config(
+    path: &Path,
+    label: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let file = std::fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    if length > MAX_CONTRACT_JSON_BYTES as u64 {
+        return Err(format!("{label} has more than {MAX_CONTRACT_JSON_BYTES} bytes").into());
+    }
+    let capacity = usize::try_from(length)
+        .unwrap_or(MAX_CONTRACT_JSON_BYTES)
+        .min(MAX_CONTRACT_JSON_BYTES);
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take((MAX_CONTRACT_JSON_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CONTRACT_JSON_BYTES {
+        return Err(format!("{label} has more than {MAX_CONTRACT_JSON_BYTES} bytes").into());
+    }
+    Ok(bytes)
 }
 
 fn parse_lock_sources(values: &[String]) -> Result<Map<String, Value>, Box<dyn std::error::Error>> {
