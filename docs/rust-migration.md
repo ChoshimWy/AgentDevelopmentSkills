@@ -141,9 +141,19 @@ contains:
   restored old installation is then revalidated before cleanup; recovery-time
   drift after a complete publication reinstates the new roots and preserves the
   backup. Partial failures reverse completed moves without overwriting unknown
-  targets, and dropping an uncommitted guard attempts the same recovery.
-  External post-install mutation, uninstall, and production command routing
-  are not implemented yet.
+  targets, and dropping an uncommitted guard attempts the same recovery. The
+  guard now records when transaction-bound external mutation starts. It
+  preflights the published rollback snapshot and backup, finishes managed-root
+  recovery first, then revalidates the frozen rollback point from the private
+  stage before touching external paths. Existing external entries are moved
+  into a private quarantine with atomic no-replace renames, and snapshot files
+  are published with the same rule. Hard-link aliases, replaced parent
+  symlinks, and drift preserve both stage and backup. Windows derives rename
+  paths from held directory handles so junction-ancestor replacement cannot
+  redirect nested operations. The lifecycle lock coordinates lifecycle
+  commands only; the approved external scope must remain quiescent with no
+  concurrently writable handles. Trusted source activation/deactivation
+  execution, uninstall, and production command routing are not implemented yet.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit

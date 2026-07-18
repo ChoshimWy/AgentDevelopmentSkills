@@ -244,8 +244,21 @@ publication, the new roots are reinstated and the backup is preserved for
 diagnosis. Partial failures reverse completed moves, while identity or content
 drift never overwrites an unknown target. Dropping an uncommitted guard
 attempts the same safe rollback.
-External post-install mutation, uninstall, and production command routing
-remain later lifecycle slices.
+The guard now also tracks the start of a transaction-bound external mutation.
+It first validates the published rollback snapshot and recovery backup, then
+restores or safely reinstates the managed roots. Only after the old roots are
+complete does it revalidate the frozen rollback point from the private stage
+and restore external file, absent-file, mode, and ancestor-directory
+preimages. Existing external entries move through atomic no-replace renames
+into a private quarantine before snapshot files are published with the same
+no-replace rule. Aliased destinations, replaced parent symlinks, or drift
+preserve both stage and backup. On Windows, rename paths are resolved from the
+held directory handles, so replaced junction ancestors cannot redirect nested
+external operations. The lifecycle lock coordinates lifecycle commands, not
+arbitrary same-user file handles: callers must keep the approved external
+scope quiescent and must not retain writable handles to those entries during a
+transaction. Trusted source-activation/deactivation handlers, uninstall, and
+production command routing remain later lifecycle slices.
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
 holds directory capabilities and opens contract files without following

@@ -1947,6 +1947,455 @@ mod tests {
     }
 
     #[test]
+    fn published_external_mutation_is_restored_before_managed_rollback() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        std::fs::create_dir_all(target.join("config")).expect("create external config directory");
+        std::fs::write(target.join("config/state"), b"before\n").expect("write external preimage");
+        set_mode(&target.join("config"), MANAGED_DIRECTORY_MODE);
+        set_mode(&target.join("config/state"), MANAGED_FILE_MODE);
+        let paths = vec!["config/state".to_owned(), "generated/new".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage external rollback point");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        published
+            .run_external_mutation_with(|published_target| {
+                std::fs::write(published_target.join("config/state"), b"after\n")?;
+                std::fs::create_dir_all(published_target.join("generated"))?;
+                std::fs::write(published_target.join("generated/new"), b"new\n")?;
+                Ok(())
+            })
+            .expect("run external mutation");
+        published.rollback().expect("rollback external mutation");
+        assert_eq!(
+            std::fs::read(target.join("config/state")).expect("read restored external preimage"),
+            b"before\n"
+        );
+        assert!(!target.join("generated").exists());
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn dropping_failed_external_mutation_restores_its_preimage() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        std::fs::write(target.join("external-state"), b"before\n")
+            .expect("write external preimage");
+        set_mode(&target.join("external-state"), MANAGED_FILE_MODE);
+        let paths = vec!["external-state".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage external rollback point");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let error = published
+            .run_external_mutation_with(|published_target| {
+                std::fs::write(published_target.join("external-state"), b"after\n")?;
+                Err::<(), _>(LifecycleError::Invalid(
+                    "injected external mutation failure".to_owned(),
+                ))
+            })
+            .expect_err("external mutation must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("injected external mutation failure"),
+            "{error}"
+        );
+        drop(published);
+        assert_eq!(
+            std::fs::read(target.join("external-state")).expect("read restored external preimage"),
+            b"before\n"
+        );
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn external_restore_rejects_a_hard_link_alias_and_preserves_recovery_backup() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        std::fs::write(target.join("external-state"), b"before\n")
+            .expect("write external preimage");
+        set_mode(&target.join("external-state"), MANAGED_FILE_MODE);
+        let paths = vec!["external-state".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage external rollback point");
+        let stage = workspace.stage_path();
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let backup = published.backup_path().expect("recovery backup path");
+        published
+            .run_external_mutation_with(|published_target| {
+                std::fs::write(published_target.join("external-state"), b"after\n")?;
+                std::fs::hard_link(
+                    published_target.join("external-state"),
+                    published_target.join("external-alias"),
+                )?;
+                Ok(())
+            })
+            .expect("run external mutation");
+        let error = published
+            .rollback()
+            .expect_err("aliased external destination must block recovery");
+        assert!(error.to_string().contains("hard-link"), "{error}");
+        assert!(error.to_string().contains("backup preserved"), "{error}");
+        assert!(backup.is_dir());
+        assert!(
+            stage
+                .join(".agent-skills/rollback-point/external-state.json")
+                .is_file()
+        );
+        drop(source);
+    }
+
+    #[test]
+    fn external_recovery_preflights_the_complete_backup_before_restoring_files() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        std::fs::write(target.join("external-state"), b"before\n")
+            .expect("write external preimage");
+        set_mode(&target.join("external-state"), MANAGED_FILE_MODE);
+        let paths = vec!["external-state".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage external rollback point");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let backup = published.backup_path().expect("recovery backup path");
+        published
+            .run_external_mutation_with(|published_target| {
+                std::fs::write(published_target.join("external-state"), b"after\n")?;
+                Ok(())
+            })
+            .expect("run external mutation");
+        std::fs::write(
+            backup.join(".agent-skills/packages/core/manifest.json"),
+            b"tampered backup\n",
+        )
+        .expect("tamper recovery backup");
+        let error = published
+            .rollback()
+            .expect_err("tampered backup must block all recovery writes");
+        assert!(
+            error
+                .to_string()
+                .contains("verify transaction before external lifecycle recovery"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(target.join("external-state"))
+                .expect("read untouched mutated external file"),
+            b"after\n"
+        );
+        assert!(backup.is_dir());
+        drop(source);
+    }
+
+    #[test]
+    fn external_recovery_requires_the_frozen_complete_rollback_point() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        std::fs::write(target.join("external-state"), b"before\n")
+            .expect("write external preimage");
+        set_mode(&target.join("external-state"), MANAGED_FILE_MODE);
+        let paths = vec!["external-state".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage external rollback point");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let backup = published.backup_path().expect("recovery backup path");
+        published
+            .run_external_mutation_with(|published_target| {
+                std::fs::write(published_target.join("external-state"), b"after\n")?;
+                Ok(())
+            })
+            .expect("run external mutation");
+        std::fs::write(
+            target.join(".agent-skills/rollback-point/external-state.json"),
+            b"{}\n",
+        )
+        .expect("tamper published rollback point");
+        let error = published
+            .rollback()
+            .expect_err("tampered rollback point must block external recovery");
+        assert!(
+            error
+                .to_string()
+                .contains("verify transaction before external lifecycle recovery"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(target.join("external-state"))
+                .expect("read untouched mutated external file"),
+            b"after\n"
+        );
+        assert!(backup.is_dir());
+        drop(source);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_restore_does_not_follow_a_replaced_parent_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        let outside = fixture.root.join("outside");
+        std::fs::create_dir_all(target.join("config")).expect("create external parent");
+        std::fs::create_dir_all(&outside).expect("create outside directory");
+        std::fs::write(target.join("config/state"), b"before\n").expect("write external preimage");
+        std::fs::write(outside.join("state"), b"outside\n").expect("write outside file");
+        set_mode(&target.join("config"), MANAGED_DIRECTORY_MODE);
+        set_mode(&target.join("config/state"), MANAGED_FILE_MODE);
+        let paths = vec!["config/state".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage external rollback point");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let backup = published.backup_path().expect("recovery backup path");
+        published
+            .run_external_mutation_with(|published_target| {
+                std::fs::remove_file(published_target.join("config/state"))?;
+                std::fs::remove_dir(published_target.join("config"))?;
+                symlink(&outside, published_target.join("config"))?;
+                Ok(())
+            })
+            .expect("replace external parent");
+        let error = published
+            .rollback()
+            .expect_err("symlinked external parent must block recovery");
+        assert!(error.to_string().contains("unsafe"), "{error}");
+        assert!(backup.is_dir());
+        assert_eq!(
+            std::fs::read(outside.join("state")).expect("read outside file"),
+            b"outside\n"
+        );
+        drop(source);
+    }
+
+    #[test]
+    fn fresh_publication_refuses_external_mutation_without_rollback_evidence() {
+        let fixture = Fixture::new();
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish fresh managed roots");
+        let error = published
+            .run_external_mutation_with(|_| -> Result<(), LifecycleError> {
+                panic!("external mutation must not run without rollback evidence");
+            })
+            .expect_err("fresh external mutation must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("requires a verified rollback point"),
+            "{error}"
+        );
+        published.rollback().expect("rollback fresh publication");
+        drop(source);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_restore_temporarily_opens_and_then_restores_a_readonly_parent() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        std::fs::create_dir_all(target.join("readonly")).expect("create readonly parent");
+        std::fs::write(target.join("readonly/state"), b"before\n")
+            .expect("write external preimage");
+        set_mode(&target.join("readonly/state"), MANAGED_FILE_MODE);
+        set_mode(&target.join("readonly"), 0o555);
+        let paths = vec!["readonly/state".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage readonly-parent rollback point");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        published
+            .run_external_mutation_with(|published_target| {
+                std::fs::write(published_target.join("readonly/state"), b"after\n")?;
+                Ok(())
+            })
+            .expect("mutate readonly-parent file");
+        published
+            .rollback()
+            .expect("restore readonly-parent external state");
+        assert_eq!(
+            std::fs::read(target.join("readonly/state")).expect("read restored external file"),
+            b"before\n"
+        );
+        assert_eq!(
+            std::fs::metadata(target.join("readonly"))
+                .expect("inspect restored readonly parent")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o555
+        );
+        drop(source);
+    }
+
+    #[test]
+    fn managed_recovery_failure_reinstates_new_roots_before_external_recovery_starts() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        std::fs::write(target.join("external-state"), b"before\n")
+            .expect("write external preimage");
+        set_mode(&target.join("external-state"), MANAGED_FILE_MODE);
+        let paths = vec!["external-state".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage external rollback point");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let backup = published.backup_path().expect("recovery backup path");
+        published
+            .run_external_mutation_with(|published_target| {
+                std::fs::write(published_target.join("external-state"), b"after\n")?;
+                Ok(())
+            })
+            .expect("run external mutation");
+        let error = published
+            .rollback_with_hook(|name, phase| {
+                if name == "AGENTS.md" && phase == "restore" {
+                    return Err(LifecycleError::Invalid(
+                        "injected managed restore failure".to_owned(),
+                    ));
+                }
+                Ok(())
+            })
+            .expect_err("managed restore failure must preserve recovery evidence");
+        assert!(
+            error
+                .to_string()
+                .contains("original publication was reinstated"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(target.join("external-state"))
+                .expect("read still-mutated external state"),
+            b"after\n"
+        );
+        assert!(
+            target
+                .join(".agent-skills/rollback-point/rollback-point.json")
+                .is_file()
+        );
+        assert!(backup.join("AGENTS.md").is_file());
+        drop(source);
+    }
+
+    #[test]
+    fn staged_rollback_tamper_after_root_restore_blocks_all_external_writes() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        std::fs::write(target.join("external-state"), b"before\n")
+            .expect("write external preimage");
+        set_mode(&target.join("external-state"), MANAGED_FILE_MODE);
+        let paths = vec!["external-state".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage external rollback point");
+        let stage = workspace.stage_path();
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        published
+            .run_external_mutation_with(|published_target| {
+                std::fs::write(published_target.join("external-state"), b"after\n")?;
+                Ok(())
+            })
+            .expect("run external mutation");
+        let tampered = stage.join(".agent-skills/rollback-point/external-state.json");
+        let error = published
+            .rollback_with_hook(|name, phase| {
+                if name == "AGENTS.md" && phase == "restore-after-rename" {
+                    std::fs::write(&tampered, b"{}\n")?;
+                }
+                Ok(())
+            })
+            .expect_err("staged rollback tamper must block external recovery");
+        assert!(
+            error
+                .to_string()
+                .contains("restore external lifecycle state"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(target.join("external-state"))
+                .expect("read untouched mutated external state"),
+            b"after\n"
+        );
+        assert!(stage.is_dir());
+        drop(source);
+    }
+
+    #[test]
     fn published_content_tamper_makes_commit_roll_back() {
         let fixture = Fixture::new();
         materialize_current_install(&fixture);

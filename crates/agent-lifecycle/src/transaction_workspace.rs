@@ -23,8 +23,9 @@ static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// one [`ValidatedInstallPlan`], including a frozen external `.system` and
 /// Activation snapshot plus a persistent rollback point for an intact current
 /// installation. Managed roots can then be published through an identity-bound
-/// [`super::PublishedInstall`] guard; external post-install mutation and
-/// production install/rollback commands are not routed through it.
+/// [`super::PublishedInstall`] guard. That guard owns external rollback
+/// restoration once its internal mutation boundary starts; trusted handler
+/// execution and production install/rollback commands are not routed through it.
 #[must_use = "the lifecycle workspace must be held for the full transaction"]
 pub struct LifecycleWorkspace {
     backup: WorkspaceEntry,
@@ -376,6 +377,15 @@ impl LifecycleWorkspace {
         self.validate()
     }
 
+    pub(super) fn verify_staged_rollback_point(&self) -> Result<(), LifecycleError> {
+        self.validate()?;
+        let rollback = self.staged_rollback_point.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid("lifecycle workspace has no frozen rollback point".to_owned())
+        })?;
+        rollback_stage::verify_staged(self.stage.directory()?, rollback)?;
+        self.validate()
+    }
+
     /// Copy and verify one caller-supplied package tree record.
     ///
     /// The destination is derived from `record.id` under
@@ -493,6 +503,30 @@ impl LifecycleWorkspace {
         }
         finish_cleanup("lifecycle workspace backup preservation", errors)?;
         Ok(path)
+    }
+
+    /// Preserve both stage and backup as recovery evidence, then release the
+    /// lifecycle lock.
+    ///
+    /// This is used when recovery may have quarantined an external namespace
+    /// entry in the private stage. Deleting either workspace could otherwise
+    /// destroy the only retained copy of that entry.
+    ///
+    /// # Errors
+    /// Fails closed when either workspace identity changed or lock release is
+    /// incomplete.
+    pub(super) fn preserve_recovery_workspace(
+        mut self,
+    ) -> Result<(PathBuf, PathBuf), LifecycleError> {
+        self.lock()?.validate()?;
+        self.stage.validate(&self.target_directory)?;
+        self.backup.validate(&self.target_directory)?;
+        let stage = self.stage_path();
+        let backup = self.backup_path();
+        self.stage.preserve();
+        self.backup.preserve();
+        self.release_lock()?;
+        Ok((stage, backup))
     }
 
     fn lock(&self) -> Result<&LifecycleLock, LifecycleError> {

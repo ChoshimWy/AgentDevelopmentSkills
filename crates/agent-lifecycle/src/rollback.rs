@@ -1,15 +1,20 @@
 use super::{
     LifecycleError, MANAGED_DIRECTORY_MODE, MANAGED_FILE_MODE, PERSISTENT_PACKAGE_LOCK,
-    load_json_file, open_child_directory, open_child_file, packages, post_install,
-    same_content_state_cap, same_object_cap, valid_sha256, validate_activation_lock_contract,
+    configure_nofollow, external_stage, load_json_file, open_child_directory, open_child_file,
+    packages, post_install, same_content_state_cap, same_object_cap, valid_sha256,
+    validate_activation_lock_contract,
 };
 use agent_contracts::canonical_sha256;
 use agent_engine::{install_plan_identity_hash, validate_install_plan, validate_package_lock};
-use cap_fs_ext::MetadataExt as _;
-use cap_std::fs::Dir;
+use cap_fs_ext::{FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt as _};
+use cap_std::fs::{Dir, Metadata, OpenOptions};
 use serde_json::{Map, Value, json};
+use sha2::Digest as _;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path};
+use std::ffi::OsStr;
+use std::io::{Read as _, Write as _};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const ROLLBACK_POINT_DIRECTORY: &str = "rollback-point";
 const EXTERNAL_ACTIVATION_LOCK: &str = "activation-lock.json";
@@ -23,9 +28,12 @@ const MANAGED_ROOTS: [&str; 4] = [
 ];
 
 struct ExternalState {
+    directories: Vec<Value>,
     entries: Vec<Value>,
     fingerprint: String,
 }
+
+static RESTORE_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
 #[allow(clippy::too_many_lines)]
 pub(super) fn check_rollback_point(target: &Dir) -> Result<Value, LifecycleError> {
@@ -356,9 +364,783 @@ fn validate_external_state(root: &Dir) -> Result<ExternalState, LifecycleError> 
         return invalid("rollback point external state fingerprint mismatch");
     }
     Ok(ExternalState {
+        directories: directories.clone(),
         entries: entries.clone(),
         fingerprint: fingerprint.to_owned(),
     })
+}
+
+/// Restore the external file and ancestor-directory preimages frozen in one
+/// validated rollback point.
+///
+/// The rollback point is reopened through directory capabilities, every
+/// destination path is traversed without following symlinks, and replacement
+/// files are written to single-link temporary files before an atomic rename.
+/// Existing hard-linked files are rejected so rollback cannot modify an
+/// unscoped alias. The final target state is revalidated against the snapshot.
+pub(super) fn restore_external_state(
+    root: &Dir,
+    target: &Dir,
+    target_path: &Path,
+    quarantine: &Dir,
+    quarantine_path: &Path,
+) -> Result<(), LifecycleError> {
+    let state = validate_external_state(root)?;
+    let files_root = open_child_directory(
+        root,
+        EXTERNAL_FILES_DIRECTORY,
+        Some(MANAGED_DIRECTORY_MODE),
+        "rollback point external files",
+    )?;
+
+    for entry in &state.directories {
+        if entry.get("state").and_then(Value::as_str) != Some("directory") {
+            continue;
+        }
+        let relative = value_path(entry, "external lifecycle directory")?;
+        let expected_mode = mode(entry.get("mode"))
+            .ok_or_else(|| invalid_error("rollback point external directory mode is invalid"))?;
+        ensure_target_directory(target, relative, expected_mode, true)?;
+    }
+
+    for entry in &state.entries {
+        let relative = value_path(entry, "external lifecycle file")?;
+        let (destination_parent, destination_parent_path, destination_name) =
+            open_target_parent(target, target_path, relative, "external lifecycle file")?;
+        match entry.get("state").and_then(Value::as_str) {
+            Some("absent") => {
+                quarantine_optional_regular_file(
+                    &destination_parent,
+                    &destination_parent_path,
+                    &destination_name,
+                    relative,
+                    quarantine,
+                    quarantine_path,
+                )?;
+            }
+            Some("file") => {
+                let expected_mode = mode(entry.get("mode")).ok_or_else(|| {
+                    invalid_error(format!(
+                        "external snapshot file differs from state: {relative}"
+                    ))
+                })?;
+                let expected_hash =
+                    entry.get("sha256").and_then(Value::as_str).ok_or_else(|| {
+                        invalid_error(format!(
+                            "external snapshot file differs from state: {relative}"
+                        ))
+                    })?;
+                replace_from_snapshot(
+                    &files_root,
+                    &destination_parent,
+                    &destination_parent_path,
+                    &destination_name,
+                    relative,
+                    expected_mode,
+                    expected_hash,
+                    quarantine,
+                    quarantine_path,
+                )?;
+            }
+            _ => return invalid("rollback point external state entry is invalid"),
+        }
+    }
+
+    for entry in state.directories.iter().rev() {
+        let relative = value_path(entry, "external lifecycle directory")?;
+        match entry.get("state").and_then(Value::as_str) {
+            Some("directory") => {
+                let expected_mode = mode(entry.get("mode")).ok_or_else(|| {
+                    invalid_error("rollback point external directory mode is invalid")
+                })?;
+                let directory =
+                    open_target_directory(target, relative, "external lifecycle directory")?;
+                set_directory_mode(&directory, expected_mode)?;
+            }
+            Some("absent") => quarantine_absent_directory(
+                target,
+                target_path,
+                relative,
+                quarantine,
+                quarantine_path,
+            )?,
+            _ => return invalid("rollback point external directory entry is invalid"),
+        }
+    }
+
+    validate_external_target_state(target, &state)
+}
+
+fn value_path<'a>(entry: &'a Value, label: &str) -> Result<&'a str, LifecycleError> {
+    entry
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_error(format!("{label} path is invalid")))
+}
+
+fn ensure_target_directory(
+    target: &Dir,
+    relative: &str,
+    expected_mode: u32,
+    writable: bool,
+) -> Result<(), LifecycleError> {
+    let components = relative_components(relative)?;
+    let mut directory = target.try_clone()?;
+    for (index, component) in components.iter().enumerate() {
+        let is_leaf = index + 1 == components.len();
+        directory = match directory.symlink_metadata(component) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return invalid(format!(
+                    "external lifecycle directory is unsafe: {}",
+                    components[..=index].join("/")
+                ));
+            }
+            Ok(_) => {
+                let child = external_stage::open_directory(
+                    &directory,
+                    OsStr::new(component),
+                    None,
+                    "external lifecycle directory",
+                )?;
+                if writable {
+                    set_directory_mode(&child, temporary_directory_mode(expected_mode))?;
+                }
+                child
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                external_stage::create_directory(
+                    &directory,
+                    OsStr::new(component),
+                    Some(if writable {
+                        temporary_directory_mode(expected_mode)
+                    } else if is_leaf {
+                        expected_mode
+                    } else {
+                        MANAGED_DIRECTORY_MODE
+                    }),
+                    "external lifecycle directory",
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
+    }
+    set_directory_mode(
+        &directory,
+        if writable {
+            temporary_directory_mode(expected_mode)
+        } else {
+            expected_mode
+        },
+    )
+}
+
+fn open_target_parent(
+    target: &Dir,
+    target_path: &Path,
+    relative: &str,
+    label: &str,
+) -> Result<(Dir, PathBuf, String), LifecycleError> {
+    let components = relative_components(relative)?;
+    let (name, parents) = components
+        .split_last()
+        .ok_or_else(|| invalid_error(format!("{label} path is invalid")))?;
+    let mut directory = target.try_clone()?;
+    let mut directory_path = target_path.to_path_buf();
+    for parent in parents {
+        directory = match directory.symlink_metadata(parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return invalid(format!("{label} parent is unsafe: {relative}"));
+            }
+            Ok(_) => {
+                let child =
+                    external_stage::open_directory(&directory, OsStr::new(parent), None, label)?;
+                make_directory_writable(&child)?;
+                child
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                external_stage::create_directory(
+                    &directory,
+                    OsStr::new(parent),
+                    Some(temporary_directory_mode(MANAGED_DIRECTORY_MODE)),
+                    "external lifecycle directory",
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        directory_path.push(parent);
+    }
+    Ok((directory, directory_path, (*name).clone()))
+}
+
+fn open_target_directory(target: &Dir, relative: &str, label: &str) -> Result<Dir, LifecycleError> {
+    let mut directory = target.try_clone()?;
+    for component in relative_components(relative)? {
+        directory =
+            external_stage::open_directory(&directory, OsStr::new(&component), None, label)?;
+    }
+    Ok(directory)
+}
+
+fn quarantine_optional_regular_file(
+    parent: &Dir,
+    parent_path: &Path,
+    name: &str,
+    relative: &str,
+    quarantine: &Dir,
+    quarantine_path: &Path,
+) -> Result<(), LifecycleError> {
+    let Some(captured) = capture_optional_regular_file(parent, name, relative)? else {
+        return Ok(());
+    };
+    quarantine_bound_entry(
+        parent,
+        parent_path,
+        name,
+        captured,
+        quarantine,
+        quarantine_path,
+        relative,
+    )
+    .map(|_| ())
+}
+
+fn capture_optional_regular_file(
+    parent: &Dir,
+    name: &str,
+    relative: &str,
+) -> Result<Option<CapturedEntry>, LifecycleError> {
+    match parent.symlink_metadata(name) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => invalid(
+            format!("external lifecycle destination is unsafe: {relative}"),
+        ),
+        Ok(metadata) if metadata.nlink() != 1 => invalid(format!(
+            "external lifecycle destination has an unsafe hard-link alias: {relative}"
+        )),
+        Ok(metadata) => {
+            let file = external_stage::open_regular_file(
+                parent,
+                OsStr::new(name),
+                None,
+                "external lifecycle destination",
+            )?;
+            let opened = file.metadata()?;
+            if !same_object_cap(&metadata, &opened)
+                || !same_content_state_cap(&metadata, &opened)
+                || opened.nlink() != 1
+            {
+                return invalid(format!(
+                    "external lifecycle destination changed while opening: {relative}"
+                ));
+            }
+            let mode = snapshot_mode(&opened);
+            let sha256 =
+                packages::hash_child_file(parent, name, mode, "external lifecycle destination")?;
+            let current = parent.symlink_metadata(name)?;
+            if !same_object_cap(&opened, &current)
+                || !same_content_state_cap(&opened, &current)
+                || current.nlink() != 1
+            {
+                return invalid(format!(
+                    "external lifecycle destination changed while hashing: {relative}"
+                ));
+            }
+            Ok(Some(CapturedEntry {
+                identity: current,
+                mode,
+                sha256: Some(sha256),
+            }))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn replace_from_snapshot(
+    files_root: &Dir,
+    destination_parent: &Dir,
+    destination_parent_path: &Path,
+    destination_name: &str,
+    relative: &str,
+    expected_mode: u32,
+    expected_hash: &str,
+    quarantine: &Dir,
+    quarantine_path: &Path,
+) -> Result<(), LifecycleError> {
+    let (source_parent, source_name) =
+        open_relative_parent(files_root, relative, "external snapshot file")?;
+    let mut source = external_stage::open_regular_file(
+        &source_parent,
+        OsStr::new(&source_name),
+        Some(expected_mode),
+        "external snapshot file",
+    )?;
+    let opened_source = source.metadata()?;
+    let temporary_name = unique_temporary_name(quarantine, destination_name)?;
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    configure_nofollow(&mut options);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt as _;
+        options.mode(expected_mode);
+    }
+    let mut temporary = quarantine.open_with(&temporary_name, &options)?;
+    let opened_temporary = temporary.metadata()?;
+    let mut digest = sha2::Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024].into_boxed_slice();
+    loop {
+        let count = source.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+        temporary.write_all(&buffer[..count])?;
+    }
+    temporary.flush()?;
+    set_file_mode(&temporary, expected_mode)?;
+    if format!("{:x}", digest.finalize()) != expected_hash {
+        return invalid(format!(
+            "external snapshot file changed while restoring: {relative}"
+        ));
+    }
+    let completed = temporary.metadata()?;
+    if !same_object_cap(&opened_temporary, &completed)
+        || completed.nlink() != 1
+        || snapshot_mode(&completed) != expected_mode
+    {
+        return invalid(format!(
+            "external restore temporary file changed: {relative}"
+        ));
+    }
+    drop(temporary);
+
+    let quarantined =
+        capture_optional_regular_file(destination_parent, destination_name, relative)?
+            .map(|captured| {
+                quarantine_bound_entry(
+                    destination_parent,
+                    destination_parent_path,
+                    destination_name,
+                    captured,
+                    quarantine,
+                    quarantine_path,
+                    relative,
+                )
+            })
+            .transpose()?;
+    if let Err(error) = super::managed_swap::rename_no_replace(
+        quarantine,
+        quarantine_path,
+        &temporary_name,
+        destination_parent,
+        destination_parent_path,
+        destination_name,
+    ) {
+        let recovery = quarantined
+            .as_ref()
+            .map(|entry| {
+                restore_quarantined_entry(
+                    quarantine,
+                    quarantine_path,
+                    entry,
+                    destination_parent,
+                    destination_parent_path,
+                    destination_name,
+                )
+            })
+            .transpose();
+        return match recovery {
+            Ok(_) => invalid(format!(
+                "external lifecycle destination changed before restore: {relative}: {error}"
+            )),
+            Err(recovery) => invalid(format!(
+                "external lifecycle destination changed before restore: {relative}: {error}; quarantined preimage could not be restored: {recovery}"
+            )),
+        };
+    }
+    let published = destination_parent.symlink_metadata(destination_name)?;
+    if !same_object_cap(&opened_temporary, &published)
+        || published.nlink() != 1
+        || snapshot_mode(&published) != expected_mode
+    {
+        return invalid(format!(
+            "restored external lifecycle file identity changed: {relative}"
+        ));
+    }
+    let actual_hash = packages::hash_child_file(
+        destination_parent,
+        destination_name,
+        expected_mode,
+        "restored external lifecycle file",
+    )?;
+    if actual_hash != expected_hash {
+        return invalid(format!(
+            "external lifecycle file was not restored: {relative}"
+        ));
+    }
+    let after_source = source.metadata()?;
+    if !same_object_cap(&opened_source, &after_source)
+        || !same_content_state_cap(&opened_source, &after_source)
+    {
+        return invalid(format!(
+            "external snapshot file changed while restoring: {relative}"
+        ));
+    }
+    Ok(())
+}
+
+fn unique_temporary_name(parent: &Dir, destination: &str) -> Result<String, LifecycleError> {
+    for _ in 0..1_024 {
+        let id = RESTORE_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
+        let candidate = format!(".{destination}.restore-{}-{id}", std::process::id());
+        match parent.symlink_metadata(&candidate) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+    }
+    invalid("could not allocate an external restore temporary file")
+}
+
+struct CapturedEntry {
+    identity: Metadata,
+    mode: u32,
+    sha256: Option<String>,
+}
+
+struct QuarantinedEntry {
+    captured: CapturedEntry,
+    name: String,
+}
+
+fn quarantine_bound_entry(
+    source: &Dir,
+    source_path: &Path,
+    source_name: &str,
+    captured: CapturedEntry,
+    quarantine: &Dir,
+    quarantine_path: &Path,
+    relative: &str,
+) -> Result<QuarantinedEntry, LifecycleError> {
+    let quarantine_name = unique_temporary_name(quarantine, source_name)?;
+    super::managed_swap::rename_no_replace(
+        source,
+        source_path,
+        source_name,
+        quarantine,
+        quarantine_path,
+        &quarantine_name,
+    )
+    .map_err(|error| {
+        LifecycleError::Invalid(format!(
+            "could not quarantine external lifecycle destination {relative}: {error}"
+        ))
+    })?;
+    let moved = quarantine.symlink_metadata(&quarantine_name)?;
+    let source_absent = matches!(
+        source.symlink_metadata(source_name),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    );
+    if !source_absent
+        || !same_object_cap(&captured.identity, &moved)
+        || !captured_entry_matches(quarantine, &quarantine_name, &captured)?
+    {
+        let entry = QuarantinedEntry {
+            captured,
+            name: quarantine_name,
+        };
+        let recovery = restore_quarantined_entry(
+            quarantine,
+            quarantine_path,
+            &entry,
+            source,
+            source_path,
+            source_name,
+        );
+        return match recovery {
+            Ok(()) => invalid(format!(
+                "external lifecycle destination changed while quarantining: {relative}"
+            )),
+            Err(error) => invalid(format!(
+                "external lifecycle destination changed while quarantining: {relative}; moved entry could not be restored: {error}"
+            )),
+        };
+    }
+    Ok(QuarantinedEntry {
+        captured,
+        name: quarantine_name,
+    })
+}
+
+fn restore_quarantined_entry(
+    quarantine: &Dir,
+    quarantine_path: &Path,
+    entry: &QuarantinedEntry,
+    destination: &Dir,
+    destination_path: &Path,
+    destination_name: &str,
+) -> Result<(), LifecycleError> {
+    let current = quarantine.symlink_metadata(&entry.name)?;
+    if !same_object_cap(&entry.captured.identity, &current)
+        || !captured_entry_matches(quarantine, &entry.name, &entry.captured)?
+    {
+        return invalid("quarantined external lifecycle entry changed");
+    }
+    super::managed_swap::rename_no_replace(
+        quarantine,
+        quarantine_path,
+        &entry.name,
+        destination,
+        destination_path,
+        destination_name,
+    )?;
+    let restored = destination.symlink_metadata(destination_name)?;
+    if !same_object_cap(&entry.captured.identity, &restored)
+        || !captured_entry_matches(destination, destination_name, &entry.captured)?
+    {
+        return invalid("quarantined external lifecycle entry was not restored");
+    }
+    Ok(())
+}
+
+fn captured_entry_matches(
+    parent: &Dir,
+    name: &str,
+    captured: &CapturedEntry,
+) -> Result<bool, LifecycleError> {
+    let metadata = parent.symlink_metadata(name)?;
+    if metadata.file_type().is_symlink()
+        || !same_object_cap(&captured.identity, &metadata)
+        || snapshot_mode(&metadata) != captured.mode
+    {
+        return Ok(false);
+    }
+    if let Some(expected_hash) = captured.sha256.as_deref() {
+        if !metadata.is_file() || metadata.nlink() != 1 {
+            return Ok(false);
+        }
+        return Ok(packages::hash_child_file(
+            parent,
+            name,
+            captured.mode,
+            "quarantined external lifecycle file",
+        )? == expected_hash);
+    }
+    if !metadata.is_dir() {
+        return Ok(false);
+    }
+    let directory = external_stage::open_directory(
+        parent,
+        OsStr::new(name),
+        Some(captured.mode),
+        "quarantined external lifecycle directory",
+    )?;
+    Ok(directory.entries()?.next().transpose()?.is_none())
+}
+
+fn quarantine_absent_directory(
+    target: &Dir,
+    target_path: &Path,
+    relative: &str,
+    quarantine: &Dir,
+    quarantine_path: &Path,
+) -> Result<(), LifecycleError> {
+    let components = relative_components(relative)?;
+    let (name, parents) = components
+        .split_last()
+        .ok_or_else(|| invalid_error("external lifecycle directory path is invalid"))?;
+    let mut parent = target.try_clone()?;
+    let mut parent_path = target_path.to_path_buf();
+    for component in parents {
+        match parent.symlink_metadata(component) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return invalid(format!(
+                    "external lifecycle directory is unsafe: {relative}"
+                ));
+            }
+            Ok(_) => {
+                parent = external_stage::open_directory(
+                    &parent,
+                    OsStr::new(component),
+                    None,
+                    "external lifecycle directory",
+                )?;
+                make_directory_writable(&parent)?;
+                parent_path.push(component);
+            }
+        }
+    }
+    match parent.symlink_metadata(name) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => invalid(
+            format!("external lifecycle directory is unsafe: {relative}"),
+        ),
+        Ok(metadata) => {
+            let directory = external_stage::open_directory(
+                &parent,
+                OsStr::new(name),
+                None,
+                "external lifecycle directory",
+            )?;
+            if directory.entries()?.next().transpose()?.is_some() {
+                return invalid(format!(
+                    "new external lifecycle directory is not empty: {relative}"
+                ));
+            }
+            let identity = directory.dir_metadata()?;
+            if !same_object_cap(&metadata, &identity) {
+                return invalid(format!(
+                    "external lifecycle directory changed while opening: {relative}"
+                ));
+            }
+            // Windows directory capabilities intentionally omit
+            // FILE_SHARE_DELETE; release the leaf handle before its
+            // identity-bound no-replace move into quarantine.
+            drop(directory);
+            quarantine_bound_entry(
+                &parent,
+                &parent_path,
+                name,
+                CapturedEntry {
+                    mode: snapshot_mode(&identity),
+                    identity,
+                    sha256: None,
+                },
+                quarantine,
+                quarantine_path,
+                relative,
+            )
+            .map(|_| ())
+        }
+    }
+}
+
+fn validate_external_target_state(
+    target: &Dir,
+    state: &ExternalState,
+) -> Result<(), LifecycleError> {
+    for entry in &state.directories {
+        let relative = value_path(entry, "external lifecycle directory")?;
+        match entry.get("state").and_then(Value::as_str) {
+            Some("absent") if relative_exists(target, relative)? => {
+                return invalid(format!(
+                    "external lifecycle directory was not restored: {relative}"
+                ));
+            }
+            Some("directory") => {
+                let expected_mode = mode(entry.get("mode")).ok_or_else(|| {
+                    invalid_error("rollback point external directory mode is invalid")
+                })?;
+                let directory =
+                    open_target_directory(target, relative, "external lifecycle directory")?;
+                if snapshot_mode(&directory.dir_metadata()?) != expected_mode {
+                    return invalid(format!(
+                        "external lifecycle directory was not restored: {relative}"
+                    ));
+                }
+            }
+            Some("absent") => {}
+            _ => return invalid("rollback point external directory entry is invalid"),
+        }
+    }
+    for entry in &state.entries {
+        let relative = value_path(entry, "external lifecycle file")?;
+        match entry.get("state").and_then(Value::as_str) {
+            Some("absent") if relative_exists(target, relative)? => {
+                return invalid(format!(
+                    "external lifecycle file was not restored: {relative}"
+                ));
+            }
+            Some("file") => {
+                let expected_mode = mode(entry.get("mode")).ok_or_else(|| {
+                    invalid_error("rollback point external state entry is invalid")
+                })?;
+                let expected_hash =
+                    entry.get("sha256").and_then(Value::as_str).ok_or_else(|| {
+                        invalid_error("rollback point external state entry is invalid")
+                    })?;
+                let (parent, name) =
+                    open_relative_parent(target, relative, "external lifecycle file")?;
+                let actual_hash = packages::hash_child_file(
+                    &parent,
+                    &name,
+                    expected_mode,
+                    "external lifecycle file",
+                )?;
+                if actual_hash != expected_hash {
+                    return invalid(format!(
+                        "external lifecycle file was not restored: {relative}"
+                    ));
+                }
+            }
+            Some("absent") => {}
+            _ => return invalid("rollback point external state entry is invalid"),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_file_mode(file: &cap_std::fs::File, mode: u32) -> Result<(), LifecycleError> {
+    use cap_std::fs::{Permissions, PermissionsExt as _};
+    file.set_permissions(Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_file_mode(file: &cap_std::fs::File, mode: u32) -> Result<(), LifecycleError> {
+    let mut permissions = file.metadata()?.permissions();
+    permissions.set_readonly(mode & 0o222 == 0);
+    file.set_permissions(permissions)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn set_file_mode(_file: &cap_std::fs::File, _mode: u32) -> Result<(), LifecycleError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_directory_mode(directory: &Dir, mode: u32) -> Result<(), LifecycleError> {
+    use cap_std::fs::{Permissions, PermissionsExt as _};
+    directory.set_permissions(".", Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_directory_mode(_directory: &Dir, _mode: u32) -> Result<(), LifecycleError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn temporary_directory_mode(mode: u32) -> u32 {
+    mode | 0o700
+}
+
+#[cfg(not(unix))]
+fn temporary_directory_mode(mode: u32) -> u32 {
+    mode
+}
+
+#[cfg(unix)]
+fn make_directory_writable(directory: &Dir) -> Result<(), LifecycleError> {
+    set_directory_mode(
+        directory,
+        temporary_directory_mode(snapshot_mode(&directory.dir_metadata()?)),
+    )
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn make_directory_writable(_directory: &Dir) -> Result<(), LifecycleError> {
+    Ok(())
 }
 
 fn validate_activation_snapshot(

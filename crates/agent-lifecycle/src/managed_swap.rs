@@ -60,6 +60,7 @@ struct RootMove {
 /// rollback and preserves the backup when recovery cannot complete.
 #[must_use = "a published install must be committed or rolled back"]
 pub struct PublishedInstall {
+    external_mutation_started: bool,
     plan: ValidatedInstallPlan,
     roots: Vec<RootMove>,
     workspace: Option<LifecycleWorkspace>,
@@ -142,11 +143,12 @@ impl LifecycleWorkspace {
 
         match result {
             Ok(()) => Ok(PublishedInstall {
+                external_mutation_started: false,
                 plan: plan.clone(),
                 roots,
                 workspace: Some(self),
             }),
-            Err(error) => Err(abort_workspace(self, &mut roots, plan, error)),
+            Err(error) => Err(abort_workspace(self, &mut roots, plan, false, error)),
         }
     }
 }
@@ -307,6 +309,7 @@ impl PublishedInstall {
                 workspace,
                 &mut self.roots,
                 &self.plan,
+                self.external_mutation_started,
                 error,
             ));
         }
@@ -321,7 +324,12 @@ impl PublishedInstall {
     /// complete. Recovery failures preserve the backup.
     pub fn rollback(mut self) -> Result<(), LifecycleError> {
         let workspace = self.take_workspace()?;
-        let recovery_errors = recover_roots(&workspace, &mut self.roots, &self.plan);
+        let recovery_errors = recover_transaction(
+            &workspace,
+            &mut self.roots,
+            &self.plan,
+            self.external_mutation_started,
+        );
         if recovery_errors.is_empty() {
             workspace.cleanup()
         } else {
@@ -339,8 +347,13 @@ impl PublishedInstall {
         hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
     ) -> Result<(), LifecycleError> {
         let workspace = self.take_workspace()?;
-        let recovery_errors =
-            recover_roots_with_hook(&workspace, &mut self.roots, &self.plan, hook);
+        let recovery_errors = recover_transaction_with_hook(
+            &workspace,
+            &mut self.roots,
+            &self.plan,
+            self.external_mutation_started,
+            hook,
+        );
         if recovery_errors.is_empty() {
             workspace.cleanup()
         } else {
@@ -358,6 +371,26 @@ impl PublishedInstall {
             .ok_or_else(|| LifecycleError::Invalid("published install is inactive".to_owned()))
     }
 
+    #[cfg(test)]
+    pub(crate) fn run_external_mutation_with<T>(
+        &mut self,
+        mutation: impl FnOnce(&Path) -> Result<T, LifecycleError>,
+    ) -> Result<T, LifecycleError> {
+        let target = {
+            let workspace = self.workspace()?;
+            workspace.verify_published_install(&self.plan)?;
+            if !workspace.has_staged_rollback_point() {
+                return invalid("external mutation requires a verified rollback point");
+            }
+            workspace.target().to_path_buf()
+        };
+        if self.external_mutation_started {
+            return invalid("external mutation has already started");
+        }
+        self.external_mutation_started = true;
+        mutation(&target)
+    }
+
     fn take_workspace(&mut self) -> Result<LifecycleWorkspace, LifecycleError> {
         self.workspace
             .take()
@@ -370,7 +403,12 @@ impl Drop for PublishedInstall {
         let Some(workspace) = self.workspace.take() else {
             return;
         };
-        let recovery_errors = recover_roots(&workspace, &mut self.roots, &self.plan);
+        let recovery_errors = recover_transaction(
+            &workspace,
+            &mut self.roots,
+            &self.plan,
+            self.external_mutation_started,
+        );
         if recovery_errors.is_empty() {
             let _ = workspace.cleanup();
         } else {
@@ -383,9 +421,10 @@ fn abort_workspace(
     workspace: LifecycleWorkspace,
     roots: &mut [RootMove],
     plan: &ValidatedInstallPlan,
+    external_mutation_started: bool,
     primary: LifecycleError,
 ) -> LifecycleError {
-    let recovery_errors = recover_roots(&workspace, roots, plan);
+    let recovery_errors = recover_transaction(&workspace, roots, plan, external_mutation_started);
     if recovery_errors.is_empty() {
         return match workspace.cleanup() {
             Ok(()) => primary,
@@ -406,15 +445,18 @@ fn preserve_incomplete_recovery(
     operation: &str,
     recovery_errors: &[String],
 ) -> LifecycleError {
+    let stage = workspace.stage_path();
     let backup = workspace.backup_path();
-    match workspace.preserve_backup() {
-        Ok(path) => LifecycleError::Invalid(format!(
-            "{operation}; recovery incomplete; backup preserved at {}: {}",
-            path.display(),
+    match workspace.preserve_recovery_workspace() {
+        Ok((stage, backup)) => LifecycleError::Invalid(format!(
+            "{operation}; recovery incomplete; backup preserved at {}; stage preserved at {}: {}",
+            backup.display(),
+            stage.display(),
             recovery_errors.join("; ")
         )),
         Err(error) => LifecycleError::Invalid(format!(
-            "{operation}; recovery incomplete; backup preservation at {} is also incomplete: {}; {}",
+            "{operation}; recovery incomplete; workspace preservation at stage {} and backup {} is also incomplete: {}; {}",
+            stage.display(),
             backup.display(),
             recovery_errors.join("; "),
             error
@@ -422,18 +464,72 @@ fn preserve_incomplete_recovery(
     }
 }
 
-fn recover_roots(
+fn recover_transaction(
     workspace: &LifecycleWorkspace,
     roots: &mut [RootMove],
     plan: &ValidatedInstallPlan,
+    external_mutation_started: bool,
 ) -> Vec<String> {
-    recover_roots_with_hook(workspace, roots, plan, |_, _| Ok(()))
+    recover_transaction_with_hook(workspace, roots, plan, external_mutation_started, |_, _| {
+        Ok(())
+    })
+}
+
+fn recover_transaction_with_hook(
+    workspace: &LifecycleWorkspace,
+    roots: &mut [RootMove],
+    plan: &ValidatedInstallPlan,
+    external_mutation_started: bool,
+    hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+) -> Vec<String> {
+    if external_mutation_started
+        && let Err(error) = verify_published_roots(workspace, roots)
+            .and_then(|()| workspace.verify_published_install(plan))
+            .and_then(|()| verify_published_roots(workspace, roots))
+    {
+        return vec![format!(
+            "verify transaction before external lifecycle recovery: {error}"
+        )];
+    }
+    recover_roots_with_hook(workspace, roots, plan, external_mutation_started, hook)
+}
+
+fn restore_staged_external_state(workspace: &LifecycleWorkspace) -> Result<(), LifecycleError> {
+    use std::ffi::OsStr;
+
+    workspace.verify_staged_rollback_point()?;
+    let managed = open_child_directory(
+        workspace.stage_directory()?,
+        ".agent-skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "restored staged managed metadata",
+    )?;
+    let rollback = open_child_directory(
+        &managed,
+        super::ROLLBACK_POINT_DIRECTORY,
+        Some(MANAGED_DIRECTORY_MODE),
+        "restored staged rollback point",
+    )?;
+    let quarantine = super::external_stage::create_directory(
+        workspace.stage_directory()?,
+        OsStr::new("external-recovery"),
+        Some(0o700),
+        "external recovery quarantine",
+    )?;
+    super::rollback::restore_external_state(
+        &rollback,
+        workspace.target_directory_cap(),
+        workspace.target(),
+        &quarantine,
+        &workspace.stage_path().join("external-recovery"),
+    )
 }
 
 fn recover_roots_with_hook(
     workspace: &LifecycleWorkspace,
     roots: &mut [RootMove],
     plan: &ValidatedInstallPlan,
+    restore_external: bool,
     mut hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
 ) -> Vec<String> {
     let mut errors = Vec::new();
@@ -461,12 +557,19 @@ fn recover_roots_with_hook(
         return errors;
     }
     errors.extend(restore_previous_roots(workspace, roots, &mut hook));
+    let mut external_recovery_started = false;
+    if errors.is_empty() && restore_external {
+        external_recovery_started = true;
+        if let Err(error) = restore_staged_external_state(workspace) {
+            errors.push(format!("restore external lifecycle state: {error}"));
+        }
+    }
     if errors.is_empty()
         && let Err(error) = workspace.verify_restored_install()
     {
         errors.push(format!("verify restored managed installation: {error}"));
     }
-    if errors.is_empty() || !fully_published || !complete_backup {
+    if errors.is_empty() || !fully_published || !complete_backup || external_recovery_started {
         return errors;
     }
 
@@ -1009,7 +1112,7 @@ fn verify_cleanup_ready(_parent: &Dir, _root: ManagedRoot) -> Result<(), Lifecyc
 }
 
 #[cfg(any(target_vendor = "apple", target_os = "linux"))]
-fn rename_no_replace(
+pub(super) fn rename_no_replace(
     source: &Dir,
     _source_path: &Path,
     source_name: &str,
@@ -1030,22 +1133,63 @@ fn rename_no_replace(
 }
 
 #[cfg(windows)]
-fn rename_no_replace(
-    _source: &Dir,
-    source_path: &Path,
+pub(super) fn rename_no_replace(
+    source: &Dir,
+    _source_path: &Path,
     source_name: &str,
-    _destination: &Dir,
-    destination_path: &Path,
+    destination: &Dir,
+    _destination_path: &Path,
     destination_name: &str,
 ) -> std::io::Result<()> {
     renamore::rename_exclusive(
-        source_path.join(source_name),
-        destination_path.join(destination_name),
+        windows_directory_handle_path(source)?.join(source_name),
+        windows_directory_handle_path(destination)?.join(destination_name),
     )
 }
 
+#[cfg(windows)]
+fn windows_directory_handle_path(directory: &Dir) -> std::io::Result<PathBuf> {
+    use std::ffi::{OsString, c_void};
+    use std::os::windows::ffi::OsStringExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFinalPathNameByHandleW(
+            file: *mut c_void,
+            path: *mut u16,
+            path_length: u32,
+            flags: u32,
+        ) -> u32;
+    }
+
+    let handle = directory.as_raw_handle();
+    // FILE_NAME_NORMALIZED | VOLUME_NAME_DOS. The returned path is resolved
+    // from the held directory handle, so junction ancestors cannot redirect a
+    // later Windows rename.
+    let required = unsafe { GetFinalPathNameByHandleW(handle.cast(), std::ptr::null_mut(), 0, 0) };
+    if required == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut buffer = vec![0_u16; required as usize];
+    let written =
+        unsafe { GetFinalPathNameByHandleW(handle.cast(), buffer.as_mut_ptr(), required, 0) };
+    if written == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let written = usize::try_from(written)
+        .map_err(|_| std::io::Error::other("Windows directory path length overflow"))?;
+    if written >= buffer.len() {
+        return Err(std::io::Error::other(
+            "Windows directory path changed while resolving its handle",
+        ));
+    }
+    buffer.truncate(written);
+    Ok(PathBuf::from(OsString::from_wide(&buffer)))
+}
+
 #[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))]
-fn rename_no_replace(
+pub(super) fn rename_no_replace(
     _source: &Dir,
     _source_path: &Path,
     _source_name: &str,

@@ -8,9 +8,12 @@
 //! verify the complete staged topology before a swap, including a rollback
 //! point for an intact current installation. [`PublishedInstall`] then performs
 //! identity-bound, no-replace managed-root publication and keeps the previous
-//! roots recoverable until explicit commit or rollback. External post-install
-//! mutation, uninstall, and production command routing remain outside this
-//! slice.
+//! roots recoverable until explicit commit or rollback. After managed-root
+//! recovery, its internal mutation boundary restores validated external
+//! rollback preimages through a private quarantine. The approved external scope
+//! must remain quiescent without concurrently writable handles. Trusted
+//! post-install handler execution, uninstall, and production command routing
+//! remain outside this slice.
 
 mod doctor_report;
 mod external_stage;
