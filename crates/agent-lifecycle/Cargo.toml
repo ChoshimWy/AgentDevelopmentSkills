@@ -20,6 +20,7 @@ thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 renamore.workspace = true
+winx.workspace = true
 
 [lints]
 workspace = true

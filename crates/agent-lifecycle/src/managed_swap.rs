@@ -1149,43 +1149,11 @@ pub(super) fn rename_no_replace(
 
 #[cfg(windows)]
 fn windows_directory_handle_path(directory: &Dir) -> std::io::Result<PathBuf> {
-    use std::ffi::{OsString, c_void};
-    use std::os::windows::ffi::OsStringExt as _;
-    use std::os::windows::io::AsRawHandle as _;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetFinalPathNameByHandleW(
-            file: *mut c_void,
-            path: *mut u16,
-            path_length: u32,
-            flags: u32,
-        ) -> u32;
-    }
-
-    let handle = directory.as_raw_handle();
-    // FILE_NAME_NORMALIZED | VOLUME_NAME_DOS. The returned path is resolved
-    // from the held directory handle, so junction ancestors cannot redirect a
-    // later Windows rename.
-    let required = unsafe { GetFinalPathNameByHandleW(handle.cast(), std::ptr::null_mut(), 0, 0) };
-    if required == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let mut buffer = vec![0_u16; required as usize];
-    let written =
-        unsafe { GetFinalPathNameByHandleW(handle.cast(), buffer.as_mut_ptr(), required, 0) };
-    if written == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let written = usize::try_from(written)
-        .map_err(|_| std::io::Error::other("Windows directory path length overflow"))?;
-    if written >= buffer.len() {
-        return Err(std::io::Error::other(
-            "Windows directory path changed while resolving its handle",
-        ));
-    }
-    buffer.truncate(written);
-    Ok(PathBuf::from(OsString::from_wide(&buffer)))
+    // Resolve from a cloned view of the held directory handle. `cap-std`
+    // opens directories without FILE_SHARE_DELETE, so junction ancestors
+    // cannot be replaced before the subsequent no-replace rename.
+    let file = directory.try_clone()?.into_std_file();
+    winx::file::get_file_path(&file)
 }
 
 #[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))]

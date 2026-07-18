@@ -29,6 +29,7 @@ serde_json = { version = "1.0.149", features = ["arbitrary_precision", "unbounde
 serde_stacker = "0.1.14"
 sha2 = "0.10.9"
 thiserror = "2.0.17"
+winx = "0.36.4"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
