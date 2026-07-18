@@ -693,12 +693,10 @@ mod tests {
         let requested = root.join("missing/nested");
         let normalized =
             normalize_lifecycle_target(&requested).expect("normalize missing lifecycle target");
-        assert_eq!(
-            normalized,
-            std::fs::canonicalize(&root)
-                .expect("canonical target parent")
-                .join("missing/nested")
-        );
+        let expected = std::fs::canonicalize(&root).expect("canonical target parent");
+        #[cfg(windows)]
+        let expected = strip_verbatim_prefix(&expected);
+        assert_eq!(normalized, expected.join("missing/nested"));
         assert!(!requested.exists());
         std::fs::remove_dir_all(&root).expect("remove normalized target parent");
     }
