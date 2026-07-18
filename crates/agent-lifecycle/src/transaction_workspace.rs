@@ -1,6 +1,7 @@
 use super::{
     INSTALL_BACKUP_PREFIX, INSTALL_STAGE_PREFIX, LifecycleError, LifecycleLock,
-    ValidatedInstallPlan, open_child_directory, same_object_cap, staged_install, staged_tree,
+    ValidatedInstallPlan, external_stage, open_child_directory, same_object_cap, staged_install,
+    staged_tree,
 };
 use cap_std::fs::Dir;
 use serde_json::Value;
@@ -19,14 +20,15 @@ static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// This is a transaction foundation rather than an install implementation. It
 /// creates two recovery-visible workspace directories, keeps their identities
 /// bound to the locked target, and can assemble a complete managed stage from
-/// one [`ValidatedInstallPlan`]. External preservation and managed-root swaps
-/// are not yet implemented, and production install/rollback commands are not
-/// routed through it.
+/// one [`ValidatedInstallPlan`], including a frozen external `.system` and
+/// Activation snapshot. Managed-root swaps are not yet implemented, and
+/// production install/rollback commands are not routed through it.
 #[must_use = "the lifecycle workspace must be held for the full transaction"]
 pub struct LifecycleWorkspace {
     backup: WorkspaceEntry,
     lock: Option<LifecycleLock>,
     stage: WorkspaceEntry,
+    staged_external_state: Option<external_stage::ExternalStageSnapshot>,
     staged_install_identity: Option<StagedInstallIdentity>,
     target: PathBuf,
     target_directory: Dir,
@@ -82,6 +84,7 @@ impl LifecycleWorkspace {
                 backup,
                 lock: Some(lock),
                 stage,
+                staged_external_state: None,
                 staged_install_identity: None,
                 target,
                 target_directory,
@@ -173,6 +176,7 @@ impl LifecycleWorkspace {
     ) -> Result<(), LifecycleError> {
         self.validate()?;
         self.validate_staged_install_identity(plan)?;
+        self.require_external_state_not_staged()?;
         staged_install::validate_layout(self.stage.directory()?, plan)?;
         staged_install::stage_package(self.stage.directory()?, plan, package_id, source)?;
         staged_install::validate_layout(self.stage.directory()?, plan)?;
@@ -192,18 +196,48 @@ impl LifecycleWorkspace {
     ) -> Result<(), LifecycleError> {
         self.validate()?;
         self.validate_staged_install_identity(plan)?;
+        self.require_external_state_not_staged()?;
         staged_install::validate_layout(self.stage.directory()?, plan)?;
         staged_install::stage_skill(self.stage.directory()?, plan, skill_name, source)?;
         staged_install::validate_layout(self.stage.directory()?, plan)?;
         self.validate()
     }
 
-    /// Verify the complete managed stage against one validated plan token.
+    /// Preserve the target's external `.system` Skills and Activation Lock.
     ///
-    /// This is the native pre-swap gate for the managed roots only. It checks
-    /// exact root topology, canonical Lockfile bytes, all package/Skill trees,
-    /// Manifest-derived semantics, AGENTS composition, Bindings, permissions,
-    /// and plan/Lockfile identity.
+    /// All plan-owned package and Skill trees must already form a complete,
+    /// verified managed stage. The external snapshot is copied without
+    /// following symlinks, frozen in memory, and revalidated against both the
+    /// locked target and stage before a later swap.
+    ///
+    /// # Errors
+    /// Fails closed for incomplete plan staging, unsafe external roots,
+    /// Activation drift, excessive trees, unsupported filesystem objects, or a
+    /// second preservation attempt.
+    pub fn stage_external_state(
+        &mut self,
+        plan: &ValidatedInstallPlan,
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        self.validate_staged_install_identity(plan)?;
+        self.require_external_state_not_staged()?;
+        staged_install::verify(
+            self.stage.directory()?,
+            plan,
+            staged_install::ExternalLayout::default(),
+        )?;
+        let snapshot = external_stage::stage(&self.target_directory, self.stage.directory()?)?;
+        external_stage::verify(&self.target_directory, self.stage.directory()?, &snapshot)?;
+        self.staged_external_state = Some(snapshot);
+        self.validate()
+    }
+
+    /// Verify the complete staged install against one validated plan token.
+    ///
+    /// This native pre-swap gate checks exact root topology, canonical Lockfile
+    /// bytes, all package/Skill trees, preserved `.system` and Activation
+    /// state, Manifest-derived semantics, AGENTS composition, Bindings,
+    /// permissions, and plan/Lockfile identity.
     ///
     /// # Errors
     /// Fails closed for missing, extra, replaced, or semantically inconsistent
@@ -211,7 +245,14 @@ impl LifecycleWorkspace {
     pub fn verify_staged_install(&self, plan: &ValidatedInstallPlan) -> Result<(), LifecycleError> {
         self.validate()?;
         self.validate_staged_install_identity(plan)?;
-        staged_install::verify(self.stage.directory()?, plan)?;
+        let external = self.staged_external_state.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid(
+                "lifecycle workspace external state has not been staged".to_owned(),
+            )
+        })?;
+        external_stage::verify(&self.target_directory, self.stage.directory()?, external)?;
+        staged_install::verify(self.stage.directory()?, plan, external.layout())?;
+        external_stage::verify(&self.target_directory, self.stage.directory()?, external)?;
         self.validate()
     }
 
@@ -361,6 +402,13 @@ impl LifecycleWorkspace {
         }
         Ok(())
     }
+
+    fn require_external_state_not_staged(&self) -> Result<(), LifecycleError> {
+        if self.staged_external_state.is_some() {
+            return invalid("lifecycle workspace external state is already staged");
+        }
+        Ok(())
+    }
 }
 
 impl Drop for LifecycleWorkspace {
@@ -453,6 +501,8 @@ impl WorkspaceEntry {
             return Ok(());
         }
         self.validate(target)?;
+        make_owned_tree_removable(self.directory()?)?;
+        self.validate(target)?;
         #[cfg(windows)]
         drop(self.handle.take());
         target.remove_dir_all(&self.name)?;
@@ -465,6 +515,40 @@ impl WorkspaceEntry {
         self.active = false;
         drop(self.handle.take());
     }
+}
+
+#[cfg(unix)]
+fn make_owned_tree_removable(directory: &Dir) -> Result<(), LifecycleError> {
+    use cap_fs_ext::DirExt as _;
+    use cap_std::fs::{Permissions, PermissionsExt as _};
+
+    directory.set_permissions(".", Permissions::from_mode(WORKSPACE_DIRECTORY_MODE))?;
+    let names = directory
+        .entries()?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    for name in names {
+        let before = directory.symlink_metadata(&name)?;
+        if before.file_type().is_symlink() || !before.is_dir() {
+            continue;
+        }
+        let child = directory.open_dir_nofollow(&name)?;
+        let opened = child.dir_metadata()?;
+        if !same_object_cap(&before, &opened) {
+            return invalid("lifecycle workspace tree changed while preparing cleanup");
+        }
+        make_owned_tree_removable(&child)?;
+        let current = directory.open_dir_nofollow(&name)?.dir_metadata()?;
+        if !same_object_cap(&opened, &current) {
+            return invalid("lifecycle workspace tree changed while preparing cleanup");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_owned_tree_removable(_directory: &Dir) -> Result<(), LifecycleError> {
+    Ok(())
 }
 
 fn create_workspace_directory(target: &Dir, name: &str) -> std::io::Result<()> {

@@ -4,11 +4,13 @@
 //! [`LifecycleWorkspace`] APIs create the target/lock and temporary stage/backup
 //! foundations. [`ValidatedInstallPlan`] binds a complete Install Plan to its
 //! persistent Lockfile; the workspace can then assemble and semantically verify
-//! all three managed roots before a swap. External `.system`/Activation state,
-//! rollback-point assembly, root swaps, upgrade/rollback, and removal remain
-//! outside this slice, which is not yet wired into production commands.
+//! all three managed roots, preserve external `.system`/Activation state, and
+//! verify the complete staged topology before a swap. Rollback-point assembly,
+//! root swaps, upgrade/rollback, and removal remain outside this slice, which
+//! is not yet wired into production commands.
 
 mod doctor_report;
+mod external_stage;
 mod packages;
 mod post_install;
 mod rollback;

@@ -120,7 +120,9 @@ contains:
   managed pre-swap gate then rejects missing or extra roots, noncanonical
   Lockfile bytes, unselected records, tree or Manifest drift, rebuilt semantic
   drift, Binding/permission drift, and plan/Lock identity drift. External
-  `skills/.system` and Activation preservation, rollback-point assembly,
+  staging now freezes and copies `skills/.system` without following symlinks,
+  preserves exact validated Activation Lock bytes, and revalidates target and
+  staged snapshots around the complete gate. Rollback-point assembly,
   managed-root swaps, and production command routing are not implemented yet.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities

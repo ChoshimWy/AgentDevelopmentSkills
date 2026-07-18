@@ -15,6 +15,12 @@ use std::io::Write as _;
 const INSTALL_LOCK: &str = "install-lock.json";
 const PACKAGE_LOCK: &str = "agent-skills.lock";
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct ExternalLayout {
+    pub(super) activation: bool,
+    pub(super) system_skills: bool,
+}
+
 /// An immutable Install Plan and persistent Lockfile pair accepted for staging.
 ///
 /// Construction validates both complete contracts, normalizes the lifecycle
@@ -273,8 +279,16 @@ pub(super) fn validate_layout(
 }
 
 #[allow(clippy::too_many_lines)]
-pub(super) fn verify(stage: &Dir, plan: &ValidatedInstallPlan) -> Result<(), LifecycleError> {
-    validate_layout(stage, plan)?;
+pub(super) fn verify(
+    stage: &Dir,
+    plan: &ValidatedInstallPlan,
+    external: ExternalLayout,
+) -> Result<(), LifecycleError> {
+    if external == ExternalLayout::default() {
+        validate_layout(stage, plan)?;
+    } else {
+        validate_external_layout(stage, plan, external)?;
+    }
     let managed = open_child_directory(
         stage,
         ".agent-skills",
@@ -282,9 +296,10 @@ pub(super) fn verify(stage: &Dir, plan: &ValidatedInstallPlan) -> Result<(), Lif
         "staged managed metadata",
     )?;
     let managed_identity = managed.dir_metadata()?;
+    let managed_names = managed_names(external);
     require_names(
         &managed,
-        &set([INSTALL_LOCK, PACKAGE_LOCK, "packages"]),
+        &managed_names,
         "staged managed metadata contains unverified entries",
     )?;
     let packages_root = open_child_directory(
@@ -306,9 +321,10 @@ pub(super) fn verify(stage: &Dir, plan: &ValidatedInstallPlan) -> Result<(), Lif
         "staged Skills root",
     )?;
     let skills_identity = skills_root.dir_metadata()?;
+    let skill_names = skill_names(plan, external)?;
     require_names(
         &skills_root,
-        &plan.skill_names()?,
+        &skill_names,
         "staged Skill set differs from Install Plan",
     )?;
     if load_json_file(
@@ -407,7 +423,7 @@ pub(super) fn verify(stage: &Dir, plan: &ValidatedInstallPlan) -> Result<(), Lif
     )?;
     require_names(
         &final_managed,
-        &set([INSTALL_LOCK, PACKAGE_LOCK, "packages"]),
+        &managed_names,
         "staged managed metadata changed while verifying",
     )?;
     let final_packages = revalidate_directory(
@@ -431,7 +447,7 @@ pub(super) fn verify(stage: &Dir, plan: &ValidatedInstallPlan) -> Result<(), Lif
     )?;
     require_names(
         &final_skills,
-        &plan.skill_names()?,
+        &skill_names,
         "staged Skill set changed while verifying",
     )?;
     if !strict_child_bytes_equal(
@@ -456,6 +472,109 @@ pub(super) fn verify(stage: &Dir, plan: &ValidatedInstallPlan) -> Result<(), Lif
         return invalid("staged managed metadata changed while verifying");
     }
     Ok(())
+}
+
+fn validate_external_layout(
+    stage: &Dir,
+    plan: &ValidatedInstallPlan,
+    external: ExternalLayout,
+) -> Result<(), LifecycleError> {
+    require_names(
+        stage,
+        &set([".agent-skills", "AGENTS.md", "skills"]),
+        "staged managed roots differ from Install Plan",
+    )?;
+    let managed = open_child_directory(
+        stage,
+        ".agent-skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "staged managed metadata",
+    )?;
+    require_names(
+        &managed,
+        &managed_names(external),
+        "staged managed metadata contains unverified entries",
+    )?;
+    open_child_directory(
+        &managed,
+        "packages",
+        Some(MANAGED_DIRECTORY_MODE),
+        "staged packages root",
+    )?;
+    let skills = open_child_directory(
+        stage,
+        "skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "staged Skills root",
+    )?;
+    require_names(
+        &skills,
+        &skill_names(plan, external)?,
+        "staged Skill set differs from Install Plan",
+    )?;
+    if strict_file_hash(stage, "AGENTS.md", MANAGED_FILE_MODE, "staged AGENTS.md")?
+        != plan
+            .install_plan
+            .pointer("/instructions/sha256")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                LifecycleError::Invalid("Install Plan instructions are invalid".to_owned())
+            })?
+    {
+        return invalid("staged AGENTS.md differs from Install Plan");
+    }
+    if load_json_file(
+        &managed,
+        INSTALL_LOCK,
+        MANAGED_FILE_MODE,
+        "staged Install Lock",
+    )? != plan.install_plan
+        || !strict_child_bytes_equal(
+            &managed,
+            INSTALL_LOCK,
+            MANAGED_FILE_MODE,
+            "staged Install Lock",
+            &canonical_json(&plan.install_plan)?,
+        )?
+    {
+        return invalid("staged Install Lock differs from validated Install Plan");
+    }
+    if load_json_file(
+        &managed,
+        PACKAGE_LOCK,
+        MANAGED_FILE_MODE,
+        "staged persistent package Lockfile",
+    )? != plan.package_lock
+        || !strict_child_bytes_equal(
+            &managed,
+            PACKAGE_LOCK,
+            MANAGED_FILE_MODE,
+            "staged persistent package Lockfile",
+            &canonical_json(&plan.package_lock)?,
+        )?
+    {
+        return invalid("staged persistent Lockfile differs from validated package Lockfile");
+    }
+    Ok(())
+}
+
+fn managed_names(external: ExternalLayout) -> BTreeSet<String> {
+    let mut names = set([INSTALL_LOCK, PACKAGE_LOCK, "packages"]);
+    if external.activation {
+        names.insert("activation-lock.json".to_owned());
+    }
+    names
+}
+
+fn skill_names(
+    plan: &ValidatedInstallPlan,
+    external: ExternalLayout,
+) -> Result<BTreeSet<String>, LifecycleError> {
+    let mut names = plan.skill_names()?;
+    if external.system_skills {
+        names.insert(".system".to_owned());
+    }
+    Ok(names)
 }
 
 fn find_record<'a>(
@@ -834,6 +953,54 @@ mod tests {
         }
     }
 
+    fn stage_complete_managed_layout(fixture: &Fixture) -> (Dir, LifecycleWorkspace) {
+        let source = fixture.source_directory();
+        let mut workspace =
+            LifecycleWorkspace::begin(fixture.target()).expect("begin lifecycle workspace");
+        workspace
+            .stage_install_layout(&fixture.token, INSTRUCTIONS.as_bytes())
+            .expect("stage managed layout");
+        workspace
+            .stage_plan_package(&fixture.token, "core", &source)
+            .expect("stage plan package");
+        (source, workspace)
+    }
+
+    fn write_activation_fixture(fixture: &Fixture, expected_hash: &str) -> Vec<u8> {
+        let target = fixture.target();
+        std::fs::create_dir_all(target.join(".agent-skills"))
+            .expect("create target managed metadata");
+        std::fs::create_dir_all(target.join("bin")).expect("create activation parent");
+        std::fs::write(target.join("bin/tool"), b"external tool\n").expect("write activated file");
+        set_mode(&target.join(".agent-skills"), 0o755);
+        set_mode(&target.join("bin/tool"), 0o755);
+        let lock = json!({
+            "schema_version": "2.0",
+            "manager": "agent-development-skills",
+            "handler": "core.source-activation.apple-codex-v1",
+            "files": [{
+                "path": "bin/tool",
+                "mode": 0o755,
+                "sha256": expected_hash,
+            }],
+        });
+        let bytes = serde_json::to_vec_pretty(&lock).expect("encode Activation Lock");
+        let path = target.join(".agent-skills/activation-lock.json");
+        std::fs::write(&path, &bytes).expect("write Activation Lock");
+        set_mode(&path, 0o644);
+        bytes
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .expect("set test mode");
+    }
+
+    #[cfg(not(unix))]
+    fn set_mode(_path: &Path, _mode: u32) {}
+
     #[test]
     fn validated_plan_stages_and_verifies_complete_managed_layout() {
         let fixture = Fixture::new();
@@ -845,6 +1012,9 @@ mod tests {
         workspace
             .stage_plan_package(&fixture.token, "core", &source)
             .expect("stage plan package");
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
         workspace
             .verify_staged_install(&fixture.token)
             .expect("verify complete stage");
@@ -917,7 +1087,7 @@ mod tests {
         std::fs::create_dir(workspace.stage_path().join("skills/.system"))
             .expect("inject external root");
         let error = workspace
-            .verify_staged_install(&fixture.token)
+            .stage_external_state(&fixture.token)
             .expect_err("unfrozen external root must fail");
         assert_eq!(
             error.to_string(),
@@ -954,6 +1124,9 @@ mod tests {
             .stage_plan_package(&fixture.token, "core", &source)
             .expect("matching token stages package");
         workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
             .verify_staged_install(&fixture.token)
             .expect("matching token verifies");
         drop(source);
@@ -971,6 +1144,9 @@ mod tests {
         workspace
             .stage_plan_package(&fixture.token, "core", &source)
             .expect("stage package");
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
         let lock_path = workspace
             .stage_path()
             .join(".agent-skills/agent-skills.lock");
@@ -1003,6 +1179,9 @@ mod tests {
         workspace
             .stage_plan_package(&fixture.token, "core", &source)
             .expect("stage package");
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
         let lock_path = workspace
             .stage_path()
             .join(".agent-skills/agent-skills.lock");
@@ -1038,6 +1217,9 @@ mod tests {
             workspace
                 .stage_plan_package(&fixture.token, "core", &source)
                 .expect("stage package");
+            workspace
+                .stage_external_state(&fixture.token)
+                .expect("stage empty external state");
             std::fs::hard_link(
                 workspace.stage_path().join(relative),
                 fixture
@@ -1055,6 +1237,213 @@ mod tests {
             drop(source);
             workspace.cleanup().expect("cleanup workspace");
         }
+    }
+
+    #[test]
+    fn external_system_tree_is_preserved_without_following_symlinks() {
+        let fixture = Fixture::new();
+        let system = fixture.target().join("skills/.system");
+        std::fs::create_dir_all(system.join("nested")).expect("create external .system tree");
+        std::fs::write(system.join("nested/tool"), b"system tool\n")
+            .expect("write external .system file");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../missing-target", system.join("tool-link"))
+            .expect("create external .system symlink");
+        set_mode(&system, 0o555);
+        set_mode(&system.join("nested"), 0o555);
+        set_mode(&system.join("nested/tool"), 0o751);
+
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage external .system tree");
+        workspace
+            .verify_staged_install(&fixture.token)
+            .expect("verify external .system tree");
+        let staged_system = workspace.stage_path().join("skills/.system");
+        assert_eq!(
+            std::fs::read(staged_system.join("nested/tool")).expect("read staged external file"),
+            b"system tool\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::read_link(staged_system.join("tool-link")).expect("read staged symlink"),
+                PathBuf::from("../missing-target")
+            );
+            assert_eq!(
+                std::fs::metadata(&staged_system)
+                    .expect("inspect staged .system root")
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o555
+            );
+            assert_eq!(
+                std::fs::metadata(staged_system.join("nested/tool"))
+                    .expect("inspect staged external file")
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o751
+            );
+        }
+        drop(source);
+        workspace.cleanup().expect("cleanup workspace");
+    }
+
+    #[test]
+    fn external_system_source_and_stage_drift_are_rejected() {
+        for drift_stage in [false, true] {
+            let fixture = Fixture::new();
+            let system = fixture.target().join("skills/.system");
+            std::fs::create_dir_all(&system).expect("create external .system tree");
+            std::fs::write(system.join("state"), b"before\n").expect("write external state");
+            let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+            workspace
+                .stage_external_state(&fixture.token)
+                .expect("stage external state");
+            let changed = if drift_stage {
+                workspace.stage_path().join("skills/.system/state")
+            } else {
+                system.join("state")
+            };
+            std::fs::write(changed, b"after\n").expect("tamper external state");
+            let error = workspace
+                .verify_staged_install(&fixture.token)
+                .expect_err("external state drift must fail");
+            assert!(
+                error.to_string().contains(if drift_stage {
+                    "staged .system Skills differ"
+                } else {
+                    "target .system Skills changed"
+                }),
+                "{error}"
+            );
+            drop(source);
+            workspace.cleanup().expect("cleanup workspace");
+        }
+    }
+
+    #[test]
+    fn staged_external_system_files_reject_hard_link_aliases() {
+        let fixture = Fixture::new();
+        let system = fixture.target().join("skills/.system");
+        std::fs::create_dir_all(&system).expect("create external .system tree");
+        std::fs::write(system.join("state"), b"state\n").expect("write external state");
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage external state");
+        std::fs::hard_link(
+            workspace.stage_path().join("skills/.system/state"),
+            fixture.root.join("external-state-alias"),
+        )
+        .expect("create staged external hard-link alias");
+        let error = workspace
+            .verify_staged_install(&fixture.token)
+            .expect_err("staged external alias must fail");
+        assert!(
+            error.to_string().contains("unsafe hard-link alias"),
+            "{error}"
+        );
+        drop(source);
+        workspace.cleanup().expect("cleanup workspace");
+    }
+
+    #[test]
+    fn valid_activation_lock_is_preserved_byte_for_byte() {
+        let fixture = Fixture::new();
+        let expected_hash = bytes_sha256(b"external tool\n");
+        let activation_bytes = write_activation_fixture(&fixture, &expected_hash);
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage Activation state");
+        workspace
+            .verify_staged_install(&fixture.token)
+            .expect("verify Activation state");
+        assert_eq!(
+            std::fs::read(
+                workspace
+                    .stage_path()
+                    .join(".agent-skills/activation-lock.json")
+            )
+            .expect("read staged Activation Lock"),
+            activation_bytes
+        );
+        drop(source);
+        workspace.cleanup().expect("cleanup workspace");
+    }
+
+    #[test]
+    fn invalid_activation_contract_is_rejected_before_preservation() {
+        let fixture = Fixture::new();
+        write_activation_fixture(&fixture, &"0".repeat(64));
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        let error = workspace
+            .stage_external_state(&fixture.token)
+            .expect_err("invalid activated file hash must fail");
+        assert_eq!(error.to_string(), "activated file differs: bin/tool");
+        assert!(
+            !workspace
+                .stage_path()
+                .join(".agent-skills/activation-lock.json")
+                .exists()
+        );
+        drop(source);
+        workspace.cleanup().expect("cleanup workspace");
+    }
+
+    #[test]
+    fn external_state_freeze_is_ordered_and_single_use() {
+        let fixture = Fixture::new();
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        assert_eq!(
+            workspace
+                .stage_external_state(&fixture.token)
+                .expect_err("second external freeze must fail")
+                .to_string(),
+            "lifecycle workspace external state is already staged"
+        );
+        assert_eq!(
+            workspace
+                .stage_plan_package(&fixture.token, "core", &source)
+                .expect_err("plan trees must freeze before external state")
+                .to_string(),
+            "lifecycle workspace external state is already staged"
+        );
+        drop(source);
+        workspace.cleanup().expect("cleanup workspace");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_external_system_root_is_rejected() {
+        let fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.target().join("skills"))
+            .expect("create target Skills root");
+        std::fs::create_dir_all(fixture.root.join("external-system"))
+            .expect("create symlink target");
+        std::os::unix::fs::symlink(
+            fixture.root.join("external-system"),
+            fixture.target().join("skills/.system"),
+        )
+        .expect("create unsafe .system symlink");
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        let error = workspace
+            .stage_external_state(&fixture.token)
+            .expect_err("symlinked .system must fail");
+        assert_eq!(
+            error.to_string(),
+            "target .system Skills is missing or unsafe"
+        );
+        drop(source);
+        workspace.cleanup().expect("cleanup workspace");
     }
 
     fn refresh_plan_fingerprint(plan: &mut Value) {

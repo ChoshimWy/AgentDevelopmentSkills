@@ -219,9 +219,11 @@ package Lockfile in both directions. Plan-bound workspace methods assemble
 canonical `AGENTS.md`, Install Lock, persistent Lockfile, package trees, and
 Skill trees, then run a complete managed pre-swap gate over exact topology,
 canonical bytes, Manifest-derived semantics, Bindings, permissions, and both
-identity anchors. External `skills/.system` and Activation preservation,
-rollback-point assembly, managed-root swaps, and production command routing
-remain later lifecycle slices.
+identity anchors. The workspace now also freezes and copies external
+`skills/.system` trees without following symlinks, preserves the exact validated
+Activation Lock, and revalidates both the target and staged external state
+around the complete pre-swap gate. Rollback-point assembly, managed-root swaps,
+and production command routing remain later lifecycle slices.
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
 holds directory capabilities and opens contract files without following
