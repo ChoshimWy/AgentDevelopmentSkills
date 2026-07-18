@@ -39,6 +39,7 @@ pub use sessions::{
 
 use agent_contracts::{canonical_json, canonical_sha256, parse_json};
 use agent_engine::validate_plan_package_lock;
+use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use serde_json::{Map, Value, json};
@@ -1114,6 +1115,11 @@ fn open_ledger_handle(path: &Path, resume: bool) -> Result<std::fs::File, Runtim
     } else {
         std::env::current_dir()?.join(path)
     };
+    if !absolute.is_absolute() {
+        return Err(RuntimeError::Contract(
+            "runtime ledger path must be absolute".to_owned(),
+        ));
+    }
     let parent = absolute
         .parent()
         .ok_or_else(|| RuntimeError::Contract("runtime ledger path has no parent".to_owned()))?;
@@ -1154,16 +1160,17 @@ fn open_ledger_handle(path: &Path, resume: bool) -> Result<std::fs::File, Runtim
             }
         }
     }
-    let before = std::fs::metadata(parent)?;
-    let directory = Dir::open_ambient_dir(parent, ambient_authority())?;
-    let after = std::fs::metadata(parent)?;
-    if !same_file_identity(&before, &after) {
+    let directory = open_ledger_directory_nofollow(&current)?;
+    let opened_parent = directory.dir_metadata()?;
+    let current_parent = open_ledger_directory_nofollow(&current)?.dir_metadata()?;
+    if !same_cap_file_identity(&opened_parent, &current_parent) {
         return Err(RuntimeError::Contract(
             "runtime ledger parent changed while acquiring its directory handle".to_owned(),
         ));
     }
     let mut options = CapOpenOptions::new();
-    options.read(true).write(true);
+    options.read(true).write(true).follow(FollowSymlinks::No);
+    configure_ledger_nofollow(&mut options);
     let file = if resume {
         let metadata = directory.symlink_metadata(file_name)?;
         if metadata.is_symlink() || !metadata.is_file() {
@@ -1197,22 +1204,55 @@ fn open_ledger_handle(path: &Path, resume: bool) -> Result<std::fs::File, Runtim
         })?
     };
     let file = file.into_std();
-    ensure_opened_ledger_identity(&file, &absolute)?;
+    ensure_opened_ledger_identity(&file, &directory, file_name)?;
     file.try_lock().map_err(|_| {
         RuntimeError::Contract("runtime ledger is already owned by another process".to_owned())
     })?;
     Ok(file)
 }
 
+fn open_ledger_directory_nofollow(path: &Path) -> Result<Dir, RuntimeError> {
+    let mut root = PathBuf::new();
+    let mut children = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => root.push(prefix.as_os_str()),
+            Component::RootDir => root.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(part) => children.push(part.to_owned()),
+            Component::ParentDir => {
+                return Err(RuntimeError::Contract(
+                    "runtime ledger parent traversal is forbidden".to_owned(),
+                ));
+            }
+        }
+    }
+    if root.as_os_str().is_empty() {
+        return Err(RuntimeError::Contract(
+            "runtime ledger parent must be absolute".to_owned(),
+        ));
+    }
+    let mut directory = Dir::open_ambient_dir(&root, ambient_authority())?;
+    for child in children {
+        directory = directory.open_dir_nofollow(child)?;
+    }
+    Ok(directory)
+}
+
 fn ensure_opened_ledger_identity(
     file: &std::fs::File,
-    absolute: &Path,
+    directory: &Dir,
+    file_name: &std::ffi::OsStr,
 ) -> Result<(), RuntimeError> {
-    let opened = file.metadata()?;
-    let current = std::fs::symlink_metadata(absolute)?;
+    let opened = cap_std::fs::Metadata::from_file(file)?;
+    let current = directory.symlink_metadata(file_name)?;
+    let mut options = CapOpenOptions::new();
+    options.read(true).write(true).follow(FollowSymlinks::No);
+    configure_ledger_nofollow(&mut options);
+    let current_opened = directory.open_with(file_name, &options)?.metadata()?;
     if current.file_type().is_symlink()
         || !current.is_file()
-        || !same_file_identity(&opened, &current)
+        || !same_cap_file_identity(&opened, &current_opened)
     {
         return Err(RuntimeError::Contract(
             "runtime ledger path changed while acquiring its file handle".to_owned(),
@@ -1222,22 +1262,37 @@ fn ensure_opened_ledger_identity(
 }
 
 #[cfg(unix)]
-fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
+fn same_cap_file_identity(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
+    use cap_std::fs::MetadataExt as _;
     left.dev() == right.dev() && left.ino() == right.ino()
 }
 
 #[cfg(windows)]
-fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt as _;
-    left.volume_serial_number() == right.volume_serial_number()
-        && left.file_index() == right.file_index()
+fn same_cap_file_identity(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
+    use cap_fs_ext::MetadataExt as _;
+    left.dev() == right.dev() && left.ino() == right.ino()
 }
 
 #[cfg(not(any(unix, windows)))]
-fn same_file_identity(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
+fn same_cap_file_identity(_left: &cap_std::fs::Metadata, _right: &cap_std::fs::Metadata) -> bool {
     false
 }
+
+#[cfg(unix)]
+fn configure_ledger_nofollow(options: &mut CapOpenOptions) {
+    use cap_std::fs::OpenOptionsExt as _;
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+}
+
+#[cfg(windows)]
+fn configure_ledger_nofollow(options: &mut CapOpenOptions) {
+    use cap_std::fs::OpenOptionsExt as _;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_ledger_nofollow(_options: &mut CapOpenOptions) {}
 
 fn prepare_approval(
     machine: &NodeStateMachine,
@@ -3022,5 +3077,36 @@ mod tests {
         let ready_budget =
             runtime_event_budget(ready_plan.as_object().expect("plan object")).expect("budget");
         assert_eq!(blocked_budget, ready_budget + 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ledger_parent_capability_rejects_replaced_symlink_component() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "agent-runtime-ledger-parent-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time after epoch")
+                .as_nanos()
+        ));
+        let external = root.join("external");
+        let parent = root.join("parent");
+        std::fs::create_dir_all(&external).expect("create external ledger directory");
+        symlink(&external, &parent).expect("replace ledger parent with symlink");
+        let error =
+            open_ledger_directory_nofollow(&parent).expect_err("symlink parent must fail closed");
+        assert!(!error.to_string().is_empty());
+        std::fs::remove_dir_all(root).expect("remove ledger parent test root");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ledger_rejects_drive_relative_prefix() {
+        let error = open_ledger_handle(Path::new(r"C:relative\ledger.json"), false)
+            .expect_err("drive-relative ledger path must fail closed");
+        assert!(error.to_string().contains("absolute"));
     }
 }

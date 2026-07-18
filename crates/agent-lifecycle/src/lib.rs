@@ -510,28 +510,27 @@ fn check_schema_inventory(schemas: &Path, package_lock: &Value) -> Result<Value,
 }
 
 fn open_root_directory(path: &Path, mode: Option<u32>, label: &str) -> Result<Dir, LifecycleError> {
-    let before = std::fs::symlink_metadata(path)
+    let directory = open_absolute_directory_nofollow(path)
         .map_err(|_| LifecycleError::Invalid(format!("{label} is missing or unsafe")))?;
-    if before.file_type().is_symlink() || !before.is_dir() {
+    let opened = directory.dir_metadata()?;
+    if !opened.is_dir() {
         return Err(LifecycleError::Invalid(format!(
             "{label} is missing or unsafe"
         )));
     }
     if let Some(mode) = mode {
-        require_std_mode(&before, mode, label)?;
+        require_cap_mode(&opened, mode, label)?;
     }
-    let directory = Dir::open_ambient_dir(path, ambient_authority())
-        .map_err(|_| LifecycleError::Invalid(format!("{label} is missing or unsafe")))?;
-    let opened = directory.dir_metadata()?;
-    let after = std::fs::symlink_metadata(path)
+    let current = open_absolute_directory_nofollow(path)
+        .and_then(|directory| Ok(directory.dir_metadata()?))
         .map_err(|_| LifecycleError::Invalid(format!("{label} changed while opening")))?;
-    if after.file_type().is_symlink()
-        || !same_object_std_cap(&before, &opened)
-        || !same_object_std_cap(&after, &opened)
-    {
+    if !same_object_cap(&opened, &current) {
         return Err(LifecycleError::Invalid(format!(
             "{label} changed while opening"
         )));
+    }
+    if let Some(mode) = mode {
+        require_cap_mode(&current, mode, label)?;
     }
     Ok(directory)
 }
@@ -542,6 +541,16 @@ fn open_child_directory(
     mode: Option<u32>,
     label: &str,
 ) -> Result<Dir, LifecycleError> {
+    open_child_directory_with_hook(parent, name, mode, label, || Ok(()))
+}
+
+fn open_child_directory_with_hook(
+    parent: &Dir,
+    name: &str,
+    mode: Option<u32>,
+    label: &str,
+    before_open: impl FnOnce() -> Result<(), LifecycleError>,
+) -> Result<Dir, LifecycleError> {
     let before = parent
         .symlink_metadata(name)
         .map_err(|_| LifecycleError::Invalid(format!("{label} is missing or unsafe")))?;
@@ -550,9 +559,7 @@ fn open_child_directory(
             "{label} is missing or unsafe"
         )));
     }
-    if let Some(mode) = mode {
-        require_cap_mode(&before, mode, label)?;
-    }
+    before_open()?;
     let directory = parent
         .open_dir_nofollow(name)
         .map_err(|_| LifecycleError::Invalid(format!("{label} is missing or unsafe")))?;
@@ -560,13 +567,18 @@ fn open_child_directory(
     let after = parent
         .symlink_metadata(name)
         .map_err(|_| LifecycleError::Invalid(format!("{label} changed while opening")))?;
-    if after.file_type().is_symlink()
-        || !same_object_cap(&before, &opened)
-        || !same_object_cap(&after, &opened)
-    {
+    let current = parent
+        .open_dir_nofollow(name)
+        .and_then(|directory| directory.dir_metadata())
+        .map_err(|_| LifecycleError::Invalid(format!("{label} changed while opening")))?;
+    if after.file_type().is_symlink() || !after.is_dir() || !same_object_cap(&opened, &current) {
         return Err(LifecycleError::Invalid(format!(
             "{label} changed while opening"
         )));
+    }
+    if let Some(mode) = mode {
+        require_cap_mode(&opened, mode, label)?;
+        require_cap_mode(&current, mode, label)?;
     }
     Ok(directory)
 }
@@ -577,6 +589,16 @@ fn open_child_file(
     mode: u32,
     label: &str,
 ) -> Result<cap_std::fs::File, LifecycleError> {
+    open_child_file_with_hook(parent, name, mode, label, || Ok(()))
+}
+
+fn open_child_file_with_hook(
+    parent: &Dir,
+    name: &str,
+    mode: u32,
+    label: &str,
+    before_open: impl FnOnce() -> Result<(), LifecycleError>,
+) -> Result<cap_std::fs::File, LifecycleError> {
     let before = parent
         .symlink_metadata(name)
         .map_err(|_| LifecycleError::Invalid(format!("{label} is missing or unsafe")))?;
@@ -585,7 +607,7 @@ fn open_child_file(
             "{label} is missing or unsafe"
         )));
     }
-    require_cap_mode(&before, mode, label)?;
+    before_open()?;
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
     configure_nofollow(&mut options);
@@ -596,15 +618,17 @@ fn open_child_file(
     let after = parent
         .symlink_metadata(name)
         .map_err(|_| LifecycleError::Invalid(format!("{label} changed while opening")))?;
-    if after.file_type().is_symlink()
-        || !after.is_file()
-        || !same_object_cap(&before, &opened)
-        || !same_object_cap(&after, &opened)
-    {
+    let current = parent
+        .open_with(name, &options)
+        .and_then(|file| file.metadata())
+        .map_err(|_| LifecycleError::Invalid(format!("{label} changed while opening")))?;
+    if after.file_type().is_symlink() || !after.is_file() || !same_object_cap(&opened, &current) {
         return Err(LifecycleError::Invalid(format!(
             "{label} changed while opening"
         )));
     }
+    require_cap_mode(&opened, mode, label)?;
+    require_cap_mode(&current, mode, label)?;
     Ok(file)
 }
 
@@ -641,18 +665,77 @@ fn load_json_file(
     let after_path = parent
         .symlink_metadata(name)
         .map_err(|_| LifecycleError::Invalid(format!("{label} changed while reading")))?;
+    let after_opened = open_child_file(parent, name, mode, label)?.metadata()?;
     if after_path.file_type().is_symlink()
         || !after_path.is_file()
         || !same_object_cap(&opened, &after_file)
-        || !same_object_cap(&opened, &after_path)
+        || !same_object_cap(&opened, &after_opened)
         || !same_content_state_cap(&opened, &after_file)
-        || !same_content_state_cap(&opened, &after_path)
+        || !same_content_state_cap(&opened, &after_opened)
     {
         return Err(LifecycleError::Invalid(format!(
             "{label} changed while reading"
         )));
     }
     Ok(parse_json(&bytes)?)
+}
+
+fn open_absolute_directory_nofollow(path: &Path) -> Result<Dir, LifecycleError> {
+    let input = absolute_path(path)?;
+    if !input.is_absolute() {
+        return Err(LifecycleError::Invalid(
+            "directory path must be absolute".to_owned(),
+        ));
+    }
+    let mut absolute = PathBuf::new();
+    for component in input.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => absolute.push(prefix.as_os_str()),
+            std::path::Component::RootDir => absolute.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err(LifecycleError::Invalid(
+                    "directory parent traversal is forbidden".to_owned(),
+                ));
+            }
+            std::path::Component::Normal(part) => {
+                absolute.push(part);
+                let metadata = std::fs::symlink_metadata(&absolute)?;
+                if metadata.file_type().is_symlink() && absolute.components().count() <= 2 {
+                    absolute = std::fs::canonicalize(&absolute)?;
+                } else if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(LifecycleError::Invalid(
+                        "directory path is missing or unsafe".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+    let mut root = PathBuf::new();
+    let mut children = Vec::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => root.push(prefix.as_os_str()),
+            std::path::Component::RootDir => root.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => children.push(part.to_owned()),
+            std::path::Component::ParentDir => {
+                return Err(LifecycleError::Invalid(
+                    "directory parent traversal is forbidden".to_owned(),
+                ));
+            }
+        }
+    }
+    if root.as_os_str().is_empty() {
+        return Err(LifecycleError::Invalid(
+            "directory path must be absolute".to_owned(),
+        ));
+    }
+    let mut directory = Dir::open_ambient_dir(&root, ambient_authority())?;
+    for child in children {
+        directory = directory.open_dir_nofollow(child)?;
+    }
+    Ok(directory)
 }
 
 fn ignored_os_metadata(parent: &Dir, name: &std::ffi::OsStr) -> Result<bool, LifecycleError> {
@@ -680,30 +763,6 @@ fn configure_nofollow(options: &mut OpenOptions) {
 fn configure_nofollow(_options: &mut OpenOptions) {}
 
 #[cfg(unix)]
-fn require_std_mode(
-    metadata: &std::fs::Metadata,
-    expected: u32,
-    label: &str,
-) -> Result<(), LifecycleError> {
-    use std::os::unix::fs::MetadataExt as _;
-    if metadata.mode() & 0o777 != expected {
-        return Err(LifecycleError::Invalid(format!(
-            "{label} mode is not canonical"
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn require_std_mode(
-    _metadata: &std::fs::Metadata,
-    _expected: u32,
-    _label: &str,
-) -> Result<(), LifecycleError> {
-    Ok(())
-}
-
-#[cfg(unix)]
 fn require_cap_mode(
     metadata: &cap_std::fs::Metadata,
     expected: u32,
@@ -719,19 +778,13 @@ fn require_cap_mode(
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn require_cap_mode(
     _metadata: &cap_std::fs::Metadata,
     _expected: u32,
     _label: &str,
 ) -> Result<(), LifecycleError> {
     Ok(())
-}
-
-#[cfg(unix)]
-fn same_object_std_cap(standard: &std::fs::Metadata, capability: &cap_std::fs::Metadata) -> bool {
-    use cap_std::fs::MetadataExt as _;
-    use std::os::unix::fs::MetadataExt as _;
-    standard.dev() == capability.dev() && standard.ino() == capability.ino()
 }
 
 #[cfg(unix)]
@@ -751,34 +804,9 @@ fn same_content_state_cap(left: &cap_std::fs::Metadata, right: &cap_std::fs::Met
 }
 
 #[cfg(windows)]
-fn same_object_std_cap(standard: &std::fs::Metadata, capability: &cap_std::fs::Metadata) -> bool {
-    use cap_std::fs::MetadataExt as _;
-    use std::os::windows::fs::MetadataExt as _;
-    matches!(
-        (
-            standard.volume_serial_number(),
-            standard.file_index(),
-            capability.volume_serial_number(),
-            capability.file_index(),
-        ),
-        (Some(left_volume), Some(left_index), Some(right_volume), Some(right_index))
-            if left_volume == right_volume && left_index == right_index
-    )
-}
-
-#[cfg(windows)]
 fn same_object_cap(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
-    use cap_std::fs::MetadataExt as _;
-    matches!(
-        (
-            left.volume_serial_number(),
-            left.file_index(),
-            right.volume_serial_number(),
-            right.file_index(),
-        ),
-        (Some(left_volume), Some(left_index), Some(right_volume), Some(right_index))
-            if left_volume == right_volume && left_index == right_index
-    )
+    use cap_fs_ext::MetadataExt as _;
+    left.dev() == right.dev() && left.ino() == right.ino()
 }
 
 #[cfg(windows)]
@@ -786,11 +814,6 @@ fn same_content_state_cap(left: &cap_std::fs::Metadata, right: &cap_std::fs::Met
     left.len() == right.len()
         && left.modified().ok().is_some()
         && left.modified().ok() == right.modified().ok()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn same_object_std_cap(_standard: &std::fs::Metadata, _capability: &cap_std::fs::Metadata) -> bool {
-    false
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -934,6 +957,85 @@ mod tests {
             check(&managed_value, "install.lock").get("status"),
             Some(&json!("failed"))
         );
+
+        let nested = real.join("nested");
+        std::fs::create_dir(&nested).expect("create nested real target");
+        let intermediate = root.join("intermediate");
+        symlink(&real, &intermediate).expect("create intermediate target symlink");
+        let intermediate_value =
+            inspect_doctor_baseline(intermediate.join("nested"), root.join("schemas"))
+                .expect("inspect intermediate linked target");
+        assert_eq!(
+            check(&intermediate_value, "filesystem.target").get("status"),
+            Some(&json!("failed"))
+        );
         std::fs::remove_dir_all(&root).expect("remove lifecycle test root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_modes_are_rechecked_after_replacement() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = temporary_root("mode-swap");
+        let directory = Dir::open_ambient_dir(&root, ambient_authority())
+            .expect("open lifecycle mode-swap root");
+
+        let managed = root.join(".agent-skills");
+        let original_managed = root.join(".agent-skills-original");
+        let replacement_managed = root.join(".agent-skills-replacement");
+        std::fs::create_dir(&managed).expect("create canonical managed directory");
+        std::fs::create_dir(&replacement_managed).expect("create replacement managed directory");
+        std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755))
+            .expect("set canonical directory mode");
+        std::fs::set_permissions(&replacement_managed, std::fs::Permissions::from_mode(0o777))
+            .expect("set noncanonical directory mode");
+        let error = open_child_directory_with_hook(
+            &directory,
+            ".agent-skills",
+            Some(0o755),
+            "managed directory",
+            || {
+                std::fs::rename(&managed, &original_managed)?;
+                std::fs::rename(&replacement_managed, &managed)?;
+                Ok(())
+            },
+        )
+        .expect_err("directory mode replacement must fail");
+        assert!(error.to_string().contains("mode is not canonical"));
+
+        for name in ["install-lock.json", PERSISTENT_PACKAGE_LOCK] {
+            let path = root.join(name);
+            let original = root.join(format!("{name}.original"));
+            let replacement = root.join(format!("{name}.replacement"));
+            std::fs::write(&path, b"{}\n").expect("write canonical contract");
+            std::fs::write(&replacement, b"{}\n").expect("write replacement contract");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                .expect("set canonical contract mode");
+            std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o666))
+                .expect("set noncanonical contract mode");
+            let error =
+                open_child_file_with_hook(&directory, name, 0o644, "managed contract", || {
+                    std::fs::rename(&path, &original)?;
+                    std::fs::rename(&replacement, &path)?;
+                    Ok(())
+                })
+                .expect_err("file mode replacement must fail");
+            assert!(error.to_string().contains("mode is not canonical"));
+        }
+
+        drop(directory);
+        std::fs::remove_dir_all(root).expect("remove lifecycle mode-swap root");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn target_rejects_drive_relative_prefix() {
+        let value = inspect_doctor_baseline(Path::new(r"C:relative"), Path::new(r"C:schemas"))
+            .expect("Doctor reports unsafe target as a failed check");
+        assert_eq!(
+            check(&value, "filesystem.target").get("status"),
+            Some(&json!("failed"))
+        );
     }
 }

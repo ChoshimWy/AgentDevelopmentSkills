@@ -2072,25 +2072,16 @@ fn reserve_schema_entry(entry_count: &mut usize) -> Result<(), EngineError> {
 }
 
 fn open_schema_root(path: &Path) -> Result<Dir, EngineError> {
-    let before = std::fs::symlink_metadata(path).map_err(|error| {
+    let directory = open_schema_absolute_directory(path).map_err(|error| {
         EngineError::Invalid(format!(
             "schema root is missing or unsafe: {}: {error}",
             path.display()
         ))
     })?;
-    if before.file_type().is_symlink() || !before.is_dir() {
-        return invalid(format!(
-            "schema root is missing or unsafe: {}",
-            path.display()
-        ));
-    }
-    let directory = Dir::open_ambient_dir(path, ambient_authority())?;
     let opened = directory.dir_metadata()?;
-    let after = std::fs::symlink_metadata(path)?;
-    if after.file_type().is_symlink()
-        || !same_schema_object_std_cap(&before, &opened)
-        || !same_schema_object_std_cap(&after, &opened)
-    {
+    let current = open_schema_absolute_directory(path)
+        .and_then(|directory| directory.dir_metadata().map_err(EngineError::from))?;
+    if !opened.is_dir() || !same_schema_object_cap(&opened, &current) {
         return invalid(format!(
             "schema root changed while opening: {}",
             path.display()
@@ -2118,9 +2109,12 @@ fn open_schema_child_directory(
     let directory = parent.open_dir_nofollow(name)?;
     let opened = directory.dir_metadata()?;
     let after = parent.symlink_metadata(name)?;
+    let current = parent
+        .open_dir_nofollow(name)
+        .and_then(|directory| directory.dir_metadata())?;
     if after.file_type().is_symlink()
-        || !same_schema_object_cap(&before, &opened)
-        || !same_schema_object_cap(&after, &opened)
+        || !after.is_dir()
+        || !same_schema_object_cap(&opened, &current)
     {
         return invalid(format!("schema directory changed while opening: {name}"));
     }
@@ -2147,17 +2141,14 @@ fn read_schema_file_with_hooks(
         return invalid(format!("schema file is unsafe: {display_name}"));
     }
     before_open()?;
-    let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    configure_schema_nofollow(&mut options);
-    let mut file = directory.open_with(name, &options)?;
+    let mut file = open_schema_file_nofollow(directory, name)?;
     let opened = file.metadata()?;
     after_open()?;
     let current = directory.symlink_metadata(name)?;
+    let current_opened = open_schema_file_nofollow(directory, name)?.metadata()?;
     if current.file_type().is_symlink()
         || !current.is_file()
-        || !same_schema_object_cap(&before, &opened)
-        || !same_schema_object_cap(&current, &opened)
+        || !same_schema_object_cap(&opened, &current_opened)
     {
         return invalid(format!("schema file changed while opening: {display_name}"));
     }
@@ -2181,16 +2172,75 @@ fn read_schema_file_with_hooks(
     }
     let after_file = file.metadata()?;
     let after_path = directory.symlink_metadata(name)?;
+    let after_opened = open_schema_file_nofollow(directory, name)?.metadata()?;
     if after_path.file_type().is_symlink()
         || !after_path.is_file()
         || !same_schema_object_cap(&opened, &after_file)
-        || !same_schema_object_cap(&opened, &after_path)
+        || !same_schema_object_cap(&opened, &after_opened)
         || !same_schema_content_state(&opened, &after_file)
-        || !same_schema_content_state(&opened, &after_path)
+        || !same_schema_content_state(&opened, &after_opened)
     {
         return invalid(format!("schema file changed while reading: {display_name}"));
     }
     Ok(bytes)
+}
+
+fn open_schema_absolute_directory(path: &Path) -> Result<Dir, EngineError> {
+    let input = lexical_absolute(path)?;
+    if !input.is_absolute() {
+        return invalid("schema root must be absolute");
+    }
+    let mut absolute = PathBuf::new();
+    for component in input.components() {
+        match component {
+            Component::Prefix(prefix) => absolute.push(prefix.as_os_str()),
+            Component::RootDir => absolute.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return invalid("schema root parent traversal is forbidden");
+            }
+            Component::Normal(part) => {
+                absolute.push(part);
+                let metadata = std::fs::symlink_metadata(&absolute)?;
+                if metadata.file_type().is_symlink() && absolute.components().count() <= 2 {
+                    absolute = std::fs::canonicalize(&absolute)?;
+                } else if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return invalid("schema root is missing or unsafe");
+                }
+            }
+        }
+    }
+    let mut root = PathBuf::new();
+    let mut children = Vec::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => root.push(prefix.as_os_str()),
+            Component::RootDir => root.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(part) => children.push(part.to_owned()),
+            Component::ParentDir => {
+                return invalid("schema root parent traversal is forbidden");
+            }
+        }
+    }
+    if root.as_os_str().is_empty() {
+        return invalid("schema root must be absolute");
+    }
+    let mut directory = Dir::open_ambient_dir(&root, ambient_authority())?;
+    for child in children {
+        directory = directory.open_dir_nofollow(child)?;
+    }
+    Ok(directory)
+}
+
+fn open_schema_file_nofollow(
+    directory: &Dir,
+    name: &std::ffi::OsStr,
+) -> Result<cap_std::fs::File, EngineError> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    configure_schema_nofollow(&mut options);
+    Ok(directory.open_with(name, &options)?)
 }
 
 fn reject_unknown_override_keys(
@@ -2490,16 +2540,6 @@ fn configure_schema_nofollow(options: &mut OpenOptions) {
 fn configure_schema_nofollow(_options: &mut OpenOptions) {}
 
 #[cfg(unix)]
-fn same_schema_object_std_cap(
-    standard: &std::fs::Metadata,
-    capability: &cap_std::fs::Metadata,
-) -> bool {
-    use cap_std::fs::MetadataExt as _;
-    use std::os::unix::fs::MetadataExt as _;
-    standard.dev() == capability.dev() && standard.ino() == capability.ino()
-}
-
-#[cfg(unix)]
 fn same_schema_object_cap(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
     use cap_std::fs::MetadataExt as _;
     left.dev() == right.dev() && left.ino() == right.ino()
@@ -2516,37 +2556,9 @@ fn same_schema_content_state(left: &cap_std::fs::Metadata, right: &cap_std::fs::
 }
 
 #[cfg(windows)]
-fn same_schema_object_std_cap(
-    standard: &std::fs::Metadata,
-    capability: &cap_std::fs::Metadata,
-) -> bool {
-    use cap_std::fs::MetadataExt as _;
-    use std::os::windows::fs::MetadataExt as _;
-    matches!(
-        (
-            standard.volume_serial_number(),
-            standard.file_index(),
-            capability.volume_serial_number(),
-            capability.file_index(),
-        ),
-        (Some(left_volume), Some(left_index), Some(right_volume), Some(right_index))
-            if left_volume == right_volume && left_index == right_index
-    )
-}
-
-#[cfg(windows)]
 fn same_schema_object_cap(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
-    use cap_std::fs::MetadataExt as _;
-    matches!(
-        (
-            left.volume_serial_number(),
-            left.file_index(),
-            right.volume_serial_number(),
-            right.file_index(),
-        ),
-        (Some(left_volume), Some(left_index), Some(right_volume), Some(right_index))
-            if left_volume == right_volume && left_index == right_index
-    )
+    use cap_fs_ext::MetadataExt as _;
+    left.dev() == right.dev() && left.ino() == right.ino()
 }
 
 #[cfg(windows)]
@@ -2554,14 +2566,6 @@ fn same_schema_content_state(left: &cap_std::fs::Metadata, right: &cap_std::fs::
     left.len() == right.len()
         && left.modified().ok().is_some()
         && left.modified().ok() == right.modified().ok()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn same_schema_object_std_cap(
-    _standard: &std::fs::Metadata,
-    _capability: &cap_std::fs::Metadata,
-) -> bool {
-    false
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -2623,11 +2627,15 @@ const fn executable_mode(_metadata: &std::fs::Metadata) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::read_schema_file_with_hooks;
     use super::{
         MAX_CONTRACT_JSON_BYTES, is_safe_contract_path, is_safe_https_uri, is_safe_relative_uri,
-        read_schema_file_with_hooks, schema_inventory,
+        schema_inventory,
     };
+    #[cfg(unix)]
     use cap_std::ambient_authority;
+    #[cfg(unix)]
     use cap_std::fs::Dir;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2644,6 +2652,7 @@ mod tests {
         root
     }
 
+    #[cfg(unix)]
     fn schema_bytes(title: &str) -> Vec<u8> {
         format!(
             "{{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"title\":\"{title}\",\"type\":\"object\"}}\n"
@@ -2737,5 +2746,30 @@ mod tests {
         drop(directory);
         std::fs::remove_dir_all(root).expect("remove schema test root");
         std::fs::remove_file(external).expect("remove external schema");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema_root_rejects_intermediate_symlink_component() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_root("root-component");
+        let external = root.join("external");
+        let nested = external.join("nested");
+        std::fs::create_dir_all(&nested).expect("create external schema root");
+        let linked = root.join("linked");
+        symlink(&external, &linked).expect("create intermediate schema symlink");
+        let error = schema_inventory(linked.join("nested"))
+            .expect_err("intermediate schema symlink must fail closed");
+        assert!(!error.to_string().is_empty());
+        std::fs::remove_dir_all(root).expect("remove schema root-component test");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn schema_root_rejects_drive_relative_prefix() {
+        let error = schema_inventory(PathBuf::from(r"C:relative"))
+            .expect_err("drive-relative schema root must fail closed");
+        assert!(error.to_string().contains("absolute"));
     }
 }

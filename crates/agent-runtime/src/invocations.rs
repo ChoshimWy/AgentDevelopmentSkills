@@ -1199,7 +1199,10 @@ fn metadata_identity_cap(
     (
         metadata.len(),
         metadata.permissions().readonly(),
-        metadata.modified().ok(),
+        metadata
+            .modified()
+            .ok()
+            .map(cap_std::time::SystemTime::into_std),
     )
 }
 
