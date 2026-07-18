@@ -7,8 +7,11 @@ use agent_engine::{
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
-    build_adapter_request, execute_fake_plan, execute_recorded_plan, validate_adapter_request,
-    validate_adapter_result,
+    build_adapter_request, execute_fake_plan, execute_recorded_plan, freeze_checkpoint,
+    inspect_repository, new_session_context, refresh_session_source_identity, registry_create,
+    registry_list, registry_load, registry_transition, registry_write, repository_patch,
+    session_source_identity, transition_session_context, validate_adapter_request,
+    validate_adapter_result, validate_worktree_session_context, worktree_status,
 };
 use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
@@ -169,6 +172,68 @@ enum Command {
         resume: bool,
         #[arg(long)]
         identity_seed: Option<String>,
+    },
+    /// Inspect staged, unstaged, and untracked Git Worktree state.
+    WorktreeStatus { repository: PathBuf },
+    /// Compute one deterministic repository-patch-v1 identity.
+    RepositoryPatch {
+        repository: PathBuf,
+        repository_id: String,
+        base_commit: String,
+        #[arg(long)]
+        checkpoint_commit: Option<String>,
+    },
+    /// Inspect one repository at a frozen base ref.
+    RepositoryInspect {
+        repository: PathBuf,
+        repository_id: String,
+        #[arg(long, default_value = "primary")]
+        role: String,
+        #[arg(long, default_value = "HEAD")]
+        base_ref: String,
+        #[arg(long, default_value = "explicit")]
+        base_source: String,
+        #[arg(long)]
+        committed: bool,
+    },
+    /// Derive session-source-v1 from a repository array.
+    SessionSourceIdentity {
+        repositories: PathBuf,
+        #[arg(long, default_value = "working")]
+        mode: String,
+    },
+    /// Validate one Worktree Session Context v1.
+    SessionContextValidate { context: PathBuf },
+    /// Create one Session Context from an explicit deterministic envelope.
+    SessionContextCreate { input: PathBuf },
+    /// Refresh one Session Context from live repository state.
+    SessionContextRefresh { context: PathBuf },
+    /// Freeze one active Session Context at clean repository checkpoints.
+    SessionContextFreeze { context: PathBuf },
+    /// Apply one legal non-gated Session lifecycle transition.
+    SessionContextTransition { context: PathBuf, target: String },
+    /// Create one persistent Worktree Session Registry entry.
+    SessionRegistryCreate {
+        repository: PathBuf,
+        context: PathBuf,
+    },
+    /// Load one persistent Worktree Session Registry entry.
+    SessionRegistryLoad {
+        repository: PathBuf,
+        session_id: String,
+    },
+    /// List persistent Worktree Session Registry entries.
+    SessionRegistryList { repository: PathBuf },
+    /// Replace one persistent Worktree Session Registry entry.
+    SessionRegistryWrite {
+        repository: PathBuf,
+        context: PathBuf,
+    },
+    /// Apply one persistent non-gated Session lifecycle transition.
+    SessionRegistryTransition {
+        repository: PathBuf,
+        session_id: String,
+        target: String,
     },
 }
 
@@ -425,6 +490,108 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 resume,
                 identity_seed.as_deref(),
             )?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::WorktreeStatus { repository } => {
+            let value = worktree_status(&repository)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::RepositoryPatch {
+            repository,
+            repository_id,
+            base_commit,
+            checkpoint_commit,
+        } => {
+            let value = repository_patch(
+                &repository,
+                &repository_id,
+                &base_commit,
+                checkpoint_commit.as_deref(),
+            )?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::RepositoryInspect {
+            repository,
+            repository_id,
+            role,
+            base_ref,
+            base_source,
+            committed,
+        } => {
+            let value = inspect_repository(
+                &repository,
+                &repository_id,
+                &role,
+                &base_ref,
+                &base_source,
+                committed,
+            )?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionSourceIdentity { repositories, mode } => {
+            let repositories = load_json(repositories)?;
+            let value = Value::String(session_source_identity(&repositories, &mode)?);
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionContextValidate { context } => {
+            let context = load_json(context)?;
+            validate_worktree_session_context(&context)?;
+            print!("{}", String::from_utf8(canonical_json(&context)?)?);
+        }
+        Command::SessionContextCreate { input } => {
+            let input = load_json(input)?;
+            let value = new_session_context(&input)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionContextRefresh { context } => {
+            let mut context = load_json(context)?;
+            refresh_session_source_identity(&mut context)?;
+            validate_worktree_session_context(&context)?;
+            print!("{}", String::from_utf8(canonical_json(&context)?)?);
+        }
+        Command::SessionContextFreeze { context } => {
+            let context = load_json(context)?;
+            let value = freeze_checkpoint(&context)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionContextTransition { context, target } => {
+            let context = load_json(context)?;
+            let value = transition_session_context(&context, &target)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionRegistryCreate {
+            repository,
+            context,
+        } => {
+            let context = load_json(context)?;
+            let value = registry_create(&repository, &context)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionRegistryLoad {
+            repository,
+            session_id,
+        } => {
+            let value = registry_load(&repository, &session_id)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionRegistryList { repository } => {
+            let value = registry_list(&repository)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionRegistryWrite {
+            repository,
+            context,
+        } => {
+            let context = load_json(context)?;
+            let value = registry_write(&repository, &context)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionRegistryTransition {
+            repository,
+            session_id,
+            target,
+        } => {
+            let value = registry_transition(&repository, &session_id, &target)?;
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
     }

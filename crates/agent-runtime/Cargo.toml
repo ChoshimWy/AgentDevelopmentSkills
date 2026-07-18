@@ -9,8 +9,11 @@ rust-version.workspace = true
 [dependencies]
 agent-contracts = { path = "../agent-contracts" }
 agent-engine = { path = "../agent-engine" }
+cap-fs-ext.workspace = true
 cap-std.workspace = true
+libc.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [lints]

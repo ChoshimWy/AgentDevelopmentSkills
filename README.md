@@ -118,6 +118,12 @@ cargo run --locked -p agent-skills-rs -- \
 cargo run --locked -p agent-skills-rs -- \
   runtime-execute-recorded /path/to/workflow-plan.json \
   /path/to/adapter-results.json /path/to/task-context.json
+cargo run --locked -p agent-skills-rs -- \
+  repository-inspect /path/to/repository app --base-ref HEAD
+cargo run --locked -p agent-skills-rs -- \
+  session-context-create /path/to/session-context-input.json
+cargo run --locked -p agent-skills-rs -- \
+  session-registry-list /path/to/repository
 ```
 
 The migration sequence and cutover gates are documented in
@@ -131,8 +137,12 @@ fake-adapter runtime covering node state transitions, retries, approvals,
 resource scheduling, append-only ledger replay, and locked-plan execution. It
 also freezes and validates Adapter Request/Result v1 contracts and consumes
 those recorded results through the same ledger, resource, resume, and
-final-status contracts. It does not invoke external providers, execute package
-code, or make installation changes.
+final-status contracts. The next native increment now covers bounded Git
+Worktree inspection, `repository-patch-v1`, `session-source-v1`, Session
+Context validation/checkpoint transitions, and the locked persistent Session
+Registry for non-gated lifecycle changes. It does not invoke external
+providers, execute package code, create Worktrees, run the Final Gate, or make
+installation changes.
 
 ## Release governance
 

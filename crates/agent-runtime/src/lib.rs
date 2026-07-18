@@ -1,13 +1,28 @@
 //! Native workflow runtime compatibility primitives.
 //!
-//! The crate executes deterministic fake adapter outcomes and consumes
-//! validated recorded Adapter Results. External provider invocation remains
-//! outside the runtime boundary. This mirrors the Python conformance executor
-//! while Phase 4 is migrated incrementally.
+//! The crate executes deterministic fake adapter outcomes, consumes validated
+//! recorded Adapter Results, and owns native Worktree/Session identity and
+//! Registry primitives. External provider invocation, Worktree creation, and
+//! Final Gate execution remain outside the native boundary while Phase 4 is
+//! migrated incrementally.
 
 mod adapters;
+mod git_workspace;
+mod session_registry;
+mod sessions;
 
 pub use adapters::{build_adapter_request, validate_adapter_request, validate_adapter_result};
+pub use git_workspace::{
+    inspect_repository, repository_patch, resolve_commit, resolve_worktree,
+    session_source_identity, worktree_status,
+};
+pub use session_registry::{
+    registry_create, registry_list, registry_load, registry_transition, registry_write,
+};
+pub use sessions::{
+    freeze_checkpoint, new_session_context, refresh_session_source_identity,
+    transition_session_context, validate_worktree_session_context,
+};
 
 use agent_contracts::{canonical_json, canonical_sha256, parse_json};
 use agent_engine::validate_plan_package_lock;

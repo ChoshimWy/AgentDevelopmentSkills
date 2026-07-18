@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import unittest
 from copy import deepcopy
+from unittest import mock
 
 from agent_workflow import __version__ as PYTHON_CORE_VERSION
 from agent_workflow.adapters import (
@@ -24,6 +25,7 @@ from agent_workflow.canonical_json import (
     MAX_CANONICAL_JSON_DEPTH,
 )
 from agent_workflow.discovery import DiscoveryEngine
+from agent_workflow.contracts import validate_worktree_session_context
 from agent_workflow.installation import build_install_bundle
 from agent_workflow.models import ContractError
 from agent_workflow.package_lock import (
@@ -38,6 +40,15 @@ from agent_workflow.policy import PolicyResolver
 from agent_workflow.recipes import automatic_recipe_capabilities
 from agent_workflow.registry import ManifestRegistry
 from agent_workflow.runtime import FakeAdapterExecutor, RecordedAdapterExecutor, RunLedger
+from agent_workflow.worktree_sessions.git_workspace import (
+    freeze_checkpoint,
+    inspect_repository,
+    refresh_session_source_identity,
+    repository_patch,
+    session_source_identity,
+    worktree_status,
+)
+from agent_workflow.worktree_sessions.registry import SessionRegistry, new_session_context
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2326,6 +2337,532 @@ class RustCompatibilityTests(unittest.TestCase):
             self.assertEqual(
                 _normalize_runtime_ledger(json.loads(actual_recovered.stdout)),
                 _normalize_runtime_ledger(expected_recovered),
+            )
+
+    def test_git_workspace_patch_and_source_identity_match_python(self) -> None:
+        from tests.test_worktree_sessions import commit_all, git, make_repo
+
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            app = make_repo(parent, "app")
+            dependency = make_repo(parent, "dependency")
+            helper = parent / "git-helper.sh"
+            marker = parent / "git-helper-marker"
+            if os.name != "nt":
+                helper.write_text(
+                    "#!/bin/sh\n"
+                    ': > "$(dirname "$0")/git-helper-marker"\n'
+                    'if [ "$#" -gt 0 ] && [ -f "$1" ]; then cat "$1"; fi\n'
+                    "exit 0\n",
+                    encoding="utf-8",
+                )
+                helper.chmod(0o755)
+                (app / ".gitattributes").write_text(
+                    "*.txt diff=evil\n",
+                    encoding="utf-8",
+                )
+                git(app, "add", ".gitattributes")
+                git(app, "commit", "-q", "-m", "attributes")
+            app_base = git(app, "rev-parse", "HEAD")
+            dependency_base = git(dependency, "rev-parse", "HEAD")
+            if os.name != "nt":
+                git(app, "config", "diff.evil.textconv", str(helper))
+                git(app, "config", "core.fsmonitor", str(helper))
+                (app / "file.txt").write_text(
+                    "helper probe\n",
+                    encoding="utf-8",
+                )
+                expected_probe_status = worktree_status(app)
+                self.assertFalse(marker.exists())
+                actual_probe_status = self.run_rust(
+                    "worktree-status",
+                    str(app),
+                )
+                self.assertEqual(
+                    actual_probe_status.returncode,
+                    0,
+                    actual_probe_status.stderr,
+                )
+                self.assertEqual(
+                    json.loads(actual_probe_status.stdout),
+                    expected_probe_status,
+                )
+                self.assertFalse(marker.exists())
+                (app / "file.txt").write_text("base\n", encoding="utf-8")
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GIT_DIR": str(dependency / ".git"),
+                    "GIT_WORK_TREE": str(dependency),
+                },
+            ):
+                expected_bound = inspect_repository(
+                    app,
+                    repository_id="app",
+                    role="primary",
+                    base_ref=app_base,
+                )
+                actual_bound = self.run_rust(
+                    "repository-inspect",
+                    str(app),
+                    "app",
+                    "--base-ref",
+                    app_base,
+                )
+            self.assertEqual(actual_bound.returncode, 0, actual_bound.stderr)
+            self.assertEqual(json.loads(actual_bound.stdout), expected_bound)
+            self.assertEqual(expected_bound["worktree_path"], str(app.resolve()))
+            self.assertFalse(marker.exists())
+
+            expected_status = worktree_status(app)
+            actual_status = self.run_rust("worktree-status", str(app))
+            self.assertEqual(actual_status.returncode, 0, actual_status.stderr)
+            self.assertEqual(json.loads(actual_status.stdout), expected_status)
+
+            (app / "file.txt").write_text("staged\n", encoding="utf-8")
+            git(app, "add", "file.txt")
+            (app / "file.txt").write_text(
+                "unstaged-after-index\n",
+                encoding="utf-8",
+            )
+            (app / "new.bin").write_bytes(b"one\x00two")
+            if os.name != "nt":
+                (app / "new-link").symlink_to("file.txt")
+
+            expected_status = worktree_status(app)
+            actual_status = self.run_rust("worktree-status", str(app))
+            self.assertEqual(actual_status.returncode, 0, actual_status.stderr)
+            self.assertEqual(json.loads(actual_status.stdout), expected_status)
+
+            expected_patch = repository_patch(
+                app,
+                repository_id="app",
+                base_commit=app_base,
+            )
+            actual_patch = self.run_rust(
+                "repository-patch",
+                str(app),
+                "app",
+                app_base,
+            )
+            self.assertEqual(actual_patch.returncode, 0, actual_patch.stderr)
+            self.assertEqual(json.loads(actual_patch.stdout), expected_patch)
+
+            expected_app = inspect_repository(
+                app,
+                repository_id="app",
+                role="primary",
+                base_ref=app_base,
+            )
+            actual_app = self.run_rust(
+                "repository-inspect",
+                str(app),
+                "app",
+                "--base-ref",
+                app_base,
+            )
+            self.assertEqual(actual_app.returncode, 0, actual_app.stderr)
+            self.assertEqual(json.loads(actual_app.stdout), expected_app)
+
+            (dependency / "file.txt").write_text(
+                "dependency change\n",
+                encoding="utf-8",
+            )
+            expected_dependency = inspect_repository(
+                dependency,
+                repository_id="dependency",
+                role="dependency",
+                base_ref=dependency_base,
+            )
+            actual_dependency = self.run_rust(
+                "repository-inspect",
+                str(dependency),
+                "dependency",
+                "--role",
+                "dependency",
+                "--base-ref",
+                dependency_base,
+            )
+            self.assertEqual(
+                actual_dependency.returncode,
+                0,
+                actual_dependency.stderr,
+            )
+            self.assertEqual(
+                json.loads(actual_dependency.stdout),
+                expected_dependency,
+            )
+
+            repositories = [expected_dependency, expected_app]
+            repositories_path = parent / "repositories.json"
+            dump(repositories, repositories_path)
+            actual_identity = self.run_rust(
+                "session-source-identity",
+                str(repositories_path),
+            )
+            self.assertEqual(
+                actual_identity.returncode,
+                0,
+                actual_identity.stderr,
+            )
+            self.assertEqual(
+                json.loads(actual_identity.stdout),
+                session_source_identity(repositories, mode="working"),
+            )
+            repositories.reverse()
+            dump(repositories, repositories_path)
+            reversed_identity = self.run_rust(
+                "session-source-identity",
+                str(repositories_path),
+            )
+            self.assertEqual(
+                reversed_identity.returncode,
+                0,
+                reversed_identity.stderr,
+            )
+            self.assertEqual(reversed_identity.stdout, actual_identity.stdout)
+
+            malformed_repositories = deepcopy(repositories)
+            malformed_repositories[0]["change_set"]["patch_hash"] = (
+                "repository-patch:not-a-digest"
+            )
+            with self.assertRaises(ContractError):
+                session_source_identity(
+                    malformed_repositories,
+                    mode="working",
+                )
+            dump(malformed_repositories, repositories_path)
+            malformed_identity = self.run_rust(
+                "session-source-identity",
+                str(repositories_path),
+            )
+            self.assertEqual(malformed_identity.returncode, 2)
+            dump(repositories, repositories_path)
+
+            commit_all(app, "feature")
+            expected_committed = inspect_repository(
+                app,
+                repository_id="app",
+                role="primary",
+                base_ref=app_base,
+                committed=True,
+            )
+            actual_committed = self.run_rust(
+                "repository-inspect",
+                str(app),
+                "app",
+                "--base-ref",
+                app_base,
+                "--committed",
+            )
+            self.assertEqual(
+                actual_committed.returncode,
+                0,
+                actual_committed.stderr,
+            )
+            self.assertEqual(
+                json.loads(actual_committed.stdout),
+                expected_committed,
+            )
+
+            context_input = {
+                "capability_closure": {},
+                "created_at": "2026-07-18T00:00:00+00:00",
+                "dependencies": [],
+                "platform_contexts": {},
+                "project_id": "project",
+                "repositories": [expected_app],
+                "selected_platforms": [],
+                "session_id": "feature-a",
+            }
+            expected_context = new_session_context(**context_input)
+            context_input_path = parent / "session-input.json"
+            context_path = parent / "session-context.json"
+            dump(context_input, context_input_path)
+            actual_context = self.run_rust(
+                "session-context-create",
+                str(context_input_path),
+            )
+            self.assertEqual(
+                actual_context.returncode,
+                0,
+                actual_context.stderr,
+            )
+            self.assertEqual(
+                json.loads(actual_context.stdout),
+                expected_context,
+            )
+            dump(expected_context, context_path)
+            validated = self.run_rust(
+                "session-context-validate",
+                str(context_path),
+            )
+            self.assertEqual(validated.returncode, 0, validated.stderr)
+            self.assertEqual(validated.stdout, dumps(expected_context))
+
+            active_context = deepcopy(expected_context)
+            active_context["lifecycle"]["state"] = "active"
+            validate_worktree_session_context(active_context)
+            dump(expected_context, context_path)
+            actual_active = self.run_rust(
+                "session-context-transition",
+                str(context_path),
+                "active",
+            )
+            self.assertEqual(actual_active.returncode, 0, actual_active.stderr)
+            self.assertEqual(json.loads(actual_active.stdout), active_context)
+
+            expected_frozen = deepcopy(active_context)
+            freeze_checkpoint(expected_frozen)
+            dump(active_context, context_path)
+            actual_frozen = self.run_rust(
+                "session-context-freeze",
+                str(context_path),
+            )
+            self.assertEqual(actual_frozen.returncode, 0, actual_frozen.stderr)
+            self.assertEqual(
+                json.loads(actual_frozen.stdout),
+                expected_frozen,
+            )
+
+            expected_reopened = deepcopy(expected_frozen)
+            expected_reopened["source_identity"]["mode"] = "working"
+            refresh_session_source_identity(expected_reopened)
+            expected_reopened["verification"] = {
+                "adapter_result_refs": [],
+                "status": "pending",
+            }
+            expected_reopened["review"] = {
+                "adapter_result_refs": [],
+                "status": "pending",
+            }
+            expected_reopened["lifecycle"]["state"] = "active"
+            validate_worktree_session_context(expected_reopened)
+            dump(expected_frozen, context_path)
+            actual_reopened = self.run_rust(
+                "session-context-transition",
+                str(context_path),
+                "active",
+            )
+            self.assertEqual(
+                actual_reopened.returncode,
+                0,
+                actual_reopened.stderr,
+            )
+            self.assertEqual(
+                json.loads(actual_reopened.stdout),
+                expected_reopened,
+            )
+
+            registry_root = (
+                Path(expected_context["repositories"][0]["git_common_dir"])
+                / "agent-sessions"
+            )
+
+            def reset_registry() -> None:
+                if registry_root.exists() or registry_root.is_symlink():
+                    if registry_root.is_symlink():
+                        registry_root.unlink()
+                    else:
+                        shutil.rmtree(registry_root)
+
+            empty_list = self.run_rust(
+                "session-registry-list",
+                str(app),
+            )
+            self.assertEqual(empty_list.returncode, 0, empty_list.stderr)
+            self.assertEqual(json.loads(empty_list.stdout), [])
+            self.assertFalse(registry_root.exists())
+
+            python_registry = SessionRegistry(app)
+            expected_created = python_registry.create(expected_context)
+            reset_registry()
+            dump(expected_context, context_path)
+            actual_created = self.run_rust(
+                "session-registry-create",
+                str(app),
+                str(context_path),
+            )
+            self.assertEqual(
+                actual_created.returncode,
+                0,
+                actual_created.stderr,
+            )
+            self.assertEqual(
+                json.loads(actual_created.stdout),
+                expected_created,
+            )
+            actual_loaded = self.run_rust(
+                "session-registry-load",
+                str(app),
+                expected_context["session_id"],
+            )
+            self.assertEqual(actual_loaded.returncode, 0, actual_loaded.stderr)
+            self.assertEqual(json.loads(actual_loaded.stdout), expected_context)
+            actual_list = self.run_rust(
+                "session-registry-list",
+                str(app),
+            )
+            self.assertEqual(actual_list.returncode, 0, actual_list.stderr)
+            self.assertEqual(json.loads(actual_list.stdout), [expected_context])
+            duplicate = self.run_rust(
+                "session-registry-create",
+                str(app),
+                str(context_path),
+            )
+            self.assertEqual(duplicate.returncode, 2)
+            self.assertEqual(duplicate.stdout, "")
+
+            reset_registry()
+            python_registry = SessionRegistry(app)
+            python_registry.create(expected_context)
+            expected_registry_active = python_registry.transition(
+                expected_context["session_id"],
+                "active",
+            )
+            reset_registry()
+            created = self.run_rust(
+                "session-registry-create",
+                str(app),
+                str(context_path),
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            actual_registry_active = self.run_rust(
+                "session-registry-transition",
+                str(app),
+                expected_context["session_id"],
+                "active",
+            )
+            self.assertEqual(
+                actual_registry_active.returncode,
+                0,
+                actual_registry_active.stderr,
+            )
+            self.assertEqual(
+                json.loads(actual_registry_active.stdout),
+                expected_registry_active,
+            )
+
+            reset_registry()
+            python_registry = SessionRegistry(app)
+            python_registry.create(expected_context)
+            python_registry.transition(
+                expected_context["session_id"],
+                "active",
+            )
+            expected_registry_frozen = python_registry.write(expected_frozen)
+            reset_registry()
+            created = self.run_rust(
+                "session-registry-create",
+                str(app),
+                str(context_path),
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            transitioned = self.run_rust(
+                "session-registry-transition",
+                str(app),
+                expected_context["session_id"],
+                "active",
+            )
+            self.assertEqual(transitioned.returncode, 0, transitioned.stderr)
+            dump(expected_frozen, context_path)
+            actual_registry_frozen = self.run_rust(
+                "session-registry-write",
+                str(app),
+                str(context_path),
+            )
+            self.assertEqual(
+                actual_registry_frozen.returncode,
+                0,
+                actual_registry_frozen.stderr,
+            )
+            self.assertEqual(
+                json.loads(actual_registry_frozen.stdout),
+                expected_registry_frozen,
+            )
+            immutable_drift = deepcopy(expected_registry_frozen)
+            immutable_drift["project_id"] = "different-project"
+            with self.assertRaisesRegex(
+                ContractError,
+                "immutable registry identity changed",
+            ):
+                SessionRegistry(app).write(immutable_drift)
+            dump(immutable_drift, context_path)
+            rejected_drift = self.run_rust(
+                "session-registry-write",
+                str(app),
+                str(context_path),
+            )
+            self.assertEqual(rejected_drift.returncode, 2)
+            self.assertEqual(rejected_drift.stdout, "")
+            self.assertIn(
+                "immutable registry identity changed",
+                rejected_drift.stderr,
+            )
+
+            if os.name != "nt":
+                reset_registry()
+                registry_root.mkdir()
+                lock_target = parent / "foreign-lock"
+                lock_target.write_text("foreign", encoding="utf-8")
+                (registry_root / ".registry.lock").symlink_to(lock_target)
+                with self.assertRaisesRegex(ContractError, "lock is unsafe"):
+                    SessionRegistry(app).create(expected_context)
+                dump(expected_context, context_path)
+                rejected_lock = self.run_rust(
+                    "session-registry-create",
+                    str(app),
+                    str(context_path),
+                )
+                self.assertEqual(rejected_lock.returncode, 2)
+                self.assertEqual(rejected_lock.stdout, "")
+                self.assertIn("lock is unsafe", rejected_lock.stderr)
+                self.assertEqual(
+                    lock_target.read_text(encoding="utf-8"),
+                    "foreign",
+                )
+                reset_registry()
+
+            invalid_context = deepcopy(expected_context)
+            invalid_context["unexpected"] = True
+            with self.assertRaises(ContractError):
+                validate_worktree_session_context(invalid_context)
+            dump(invalid_context, context_path)
+            rejected_context = self.run_rust(
+                "session-context-validate",
+                str(context_path),
+            )
+            self.assertEqual(rejected_context.returncode, 2)
+            self.assertEqual(rejected_context.stdout, "")
+
+            git(
+                dependency,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"160000,{dependency_base},vendor/dependency",
+            )
+            with self.assertRaisesRegex(
+                ContractError,
+                "does not support Git submodules",
+            ):
+                repository_patch(
+                    dependency,
+                    repository_id="dependency",
+                    base_commit=dependency_base,
+                )
+            rejected = self.run_rust(
+                "repository-patch",
+                str(dependency),
+                "dependency",
+                dependency_base,
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(rejected.stdout, "")
+            self.assertIn(
+                "does not support Git submodules",
+                rejected.stderr,
             )
 
     def test_fake_runtime_semantics_resume_and_lock_match_python(self) -> None:

@@ -22,9 +22,22 @@ def _git(
     check: bool = True,
     text: bool = True,
 ) -> subprocess.CompletedProcess[Any]:
-    environment = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("GIT_")
+    }
+    environment.update({"LC_ALL": "C", "LANG": "C"})
     result = subprocess.run(
-        ["git", "--no-optional-locks", *args],
+        [
+            "git",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            *args,
+        ],
         cwd=root,
         capture_output=True,
         check=False,
@@ -67,8 +80,23 @@ def resolve_commit(root: str | Path, ref: str) -> str:
 
 def worktree_status(root: str | Path) -> dict[str, Any]:
     worktree, _ = resolve_worktree(root)
-    staged = _git(worktree, "diff", "--cached", "--quiet", check=False).returncode
-    unstaged = _git(worktree, "diff", "--quiet", check=False).returncode
+    staged = _git(
+        worktree,
+        "diff",
+        "--cached",
+        "--quiet",
+        "--no-ext-diff",
+        "--no-textconv",
+        check=False,
+    ).returncode
+    unstaged = _git(
+        worktree,
+        "diff",
+        "--quiet",
+        "--no-ext-diff",
+        "--no-textconv",
+        check=False,
+    ).returncode
     if staged not in {0, 1} or unstaged not in {0, 1}:
         raise ContractError("unable to classify worktree status")
     untracked = _untracked_paths(worktree)
@@ -384,7 +412,15 @@ def session_source_identity(repositories: Iterable[dict[str, Any]], *, mode: str
     for repository in sorted(repositories, key=lambda item: item.get("repository_id", "")):
         patch_hash = repository.get("change_set", {}).get("patch_hash")
         checkpoint = repository.get("checkpoint")
-        if not isinstance(patch_hash, str) or not patch_hash.startswith("repository-patch:"):
+        if (
+            not isinstance(patch_hash, str)
+            or len(patch_hash) != len("repository-patch:") + 64
+            or not patch_hash.startswith("repository-patch:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in patch_hash.removeprefix("repository-patch:")
+            )
+        ):
             raise ContractError("repository patch identity is missing")
         if mode == "committed" and not isinstance(checkpoint, dict):
             raise ContractError("committed session source identity requires repository checkpoints")
