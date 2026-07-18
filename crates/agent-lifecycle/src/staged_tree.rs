@@ -385,6 +385,8 @@ fn create_destination_file(
     mode: u32,
     relative: &str,
 ) -> Result<cap_std::fs::File, LifecycleError> {
+    #[cfg(not(unix))]
+    let _ = mode;
     let mut options = OpenOptions::new();
     options
         .write(true)
@@ -797,6 +799,8 @@ mod tests {
             "hard-link fixture must create an alias"
         );
         assert!(result.is_err(), "hard-link alias must not be accepted");
+        drop(source_directory);
+        drop(destination_directory);
         std::fs::remove_dir_all(root).expect("remove hard-link fixture");
     }
 
