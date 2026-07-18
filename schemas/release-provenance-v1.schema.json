@@ -3,7 +3,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
-    "artifacts": {"items": {"additionalProperties": false, "properties": {"filename": {"type": "string"}, "kind": {"enum": ["bootstrap", "sdist", "source-bundle", "wheel"]}, "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"}, "size": {"minimum": 1, "type": "integer"}}, "required": ["filename", "kind", "sha256", "size"], "type": "object"}, "minItems": 1, "type": "array"},
+    "artifacts": {"items": {"additionalProperties": false, "properties": {"filename": {"type": "string"}, "kind": {"enum": ["bootstrap", "native-binary", "sdist", "source-bundle", "wheel"]}, "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"}, "size": {"minimum": 1, "type": "integer"}}, "required": ["filename", "kind", "sha256", "size"], "type": "object"}, "minItems": 1, "type": "array"},
     "builder": {"additionalProperties": false, "properties": {"id": {"const": "agent-development-skills.release-builder-v1"}, "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"}}, "required": ["id", "sha256"], "type": "object"},
     "fingerprint": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
     "materials_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},

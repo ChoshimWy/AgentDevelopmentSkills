@@ -172,11 +172,21 @@ cargo run --locked -p agent-skills-rs -- \
 
 `PublishedInstall` 现覆盖替换和首次安装两类 source activation。替换路径从已发布 Package snapshot 冻结资产；首次安装路径在发布前从 stage 读取已验证资产，并从目标读取 unmanaged destination、profile 与 `config.toml` 预像，再把精确 scope 写入 rollback point。两条路径都会拒绝冲突、只创建缺失 profile、通过私有 quarantine 发布，并最后写入 Activation Lock。首次安装失败时先撤回全部新 managed roots，再恢复每个外部预像。source deactivation 与 `PublishedUninstall` 同样受 rollback scope 约束，只移除 Activation-owned 内容，同时保留本机 profile、`config.toml` 语义和 `skills/.system`。
 
-`agent-session` launcher 仍由调用方显式提供，等待 release packaging 绑定经过验证的原生可执行文件。生产命令接线属于后续阶段，现有 `uninstall.sh` 尚未切换到原生 guard。生命周期锁只协调 lifecycle 命令；事务期间调用方仍须保持获批 external scope 静止，并关闭相关可写 handle。
+`agent-session` launcher 仍由调用方显式提供，直到生产 bootstrap 选择经过验证的原生可执行文件。Release packaging 现已绑定这些可执行文件，但不会激活它们。生产命令接线属于后续阶段，现有 `uninstall.sh` 尚未切换到原生 guard。生命周期锁只协调 lifecycle 命令；事务期间调用方仍须保持获批 external scope 静止，并关闭相关可写 handle。
 
 非默认的 `lifecycle-uninstall` 兼容命令现已接入原生卸载 guard：缺失目标不会被创建，执行与只读 dry-run 的 JSON、默认人类可读输出、canonical blocked report 及最终文件系统状态均已对照 Python 路径验证；这仍不代表 `uninstall.sh` 已完成生产切换。
 
 并行的 `install-selection` 兼容命令现已覆盖可安装源包目录、显式平台/Discipline/Runtime Config 选择、必需与可选依赖闭包、版本约束、确定性拓扑顺序和选择原因。后续的 `install-source-snapshot` 命令会通过有界、no-follow 遍历冻结声明的 Package 资产、Package/Provider Manifest、Instruction Fragment 与可安装 Skill 树，并复读源包检查并发变化；两者均已与 Python 完成差分验证。新增的非默认 `install-bundle` 命令会在冻结快照上独立重建 Manifest Registry、依赖能力、Instruction/rule、Skill、资产、Binding、权限、副作用、Install Plan v2 与持久化 Package Lockfile identity；core-only、Apple、QA、Codex Runtime Config 及 previous-Lock lineage 输出已与 Python 做逐字节差分。非默认 `lifecycle-install` 现进一步提供只读 dry-run，以及仅限首次安装的 staging、语义复验、原子发布、发布后复验、失败回滚与清理；core-only 和 Apple 的结果及受管文件树已与 Python 差分。该入口会拒绝替换既有安装，不执行 source activation，也未替换生产 Python CLI；升级与激活仍属于后续独立审批阶段。
+
+新增的 `agent-release` crate 会冻结 macOS、Linux、Windows 在
+`aarch64` 与 `x86_64` 上的六目标原生发布矩阵。每个记录都绑定准确的
+source revision、Cargo Lock hash、Rust 1.97.1 toolchain、目标格式与架构
+header、smoke 结果、文件大小和 SHA-256。CI 会在匹配架构的 GitHub-hosted
+runner 上构建并执行各目标二进制，只有完整且排序固定的六目标集合才能合并为
+`native-artifacts.json`。Qualification 会把这些原始二进制纳入同一候选版本，
+并由 provenance、精确 Release allowlist、外部 review 签名和最终 Release Gate
+共同约束。这只是原生发布打包里程碑，不代表生产切换：`install.sh`、
+`install.ps1` 与默认 CLI 仍走 Python，直到受控 bootstrap/fallback 阶段通过。
 
 ## 发布治理
 

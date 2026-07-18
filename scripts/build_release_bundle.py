@@ -84,6 +84,16 @@ def _load_python_artifact_module():
     return module
 
 
+def _load_native_artifact_module():
+    path = ROOT / "scripts/native_artifact_contract.py"
+    spec = importlib.util.spec_from_file_location("agent_skills_native_artifact_contract", path)
+    if spec is None or spec.loader is None:
+        raise ReleaseBuildError("cannot load native artifact contract")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _canonical_json(value: Any) -> bytes:
     bootstrap = _load_bootstrap_module()
     return bootstrap._canonical_json(value)
@@ -216,6 +226,7 @@ def build_release_bundle(
     channel: str = "stable",
     host_os: tuple[str, ...] = DEFAULT_HOST_OS,
     repository: str = DEFAULT_REPOSITORY,
+    native_artifacts_dir: Path | None = None,
 ) -> dict[str, Any]:
     root = root.resolve()
     output = Path(os.path.abspath(output.expanduser()))
@@ -252,6 +263,59 @@ def build_release_bundle(
         artifact_path = stage / artifact_name
         _write_zip(root, artifact_path, bundle_root=bundle_root, clean_source=not dirty)
         python_artifacts = _load_python_artifact_module().build_python_artifacts(root, stage)
+        native_artifacts = []
+        if native_artifacts_dir is not None:
+            native_root = Path(os.path.abspath(native_artifacts_dir.expanduser()))
+            native = _load_native_artifact_module()
+            try:
+                native_index = native.load_native_artifacts(
+                    native_root / "native-artifacts.json",
+                    native_root,
+                    expected_source_revision=revision,
+                    expected_version=version,
+                )
+            except native.NativeArtifactError as error:
+                raise ReleaseBuildError(str(error)) from error
+            expected_cargo_lock = _sha256(
+                _git_blob(root, "Cargo.lock")
+                if not dirty
+                else (root / "Cargo.lock").read_bytes()
+            )
+            if any(
+                record["cargo_lock_sha256"] != expected_cargo_lock
+                for record in native_index["artifacts"]
+            ):
+                raise ReleaseBuildError(
+                    "native artifact Cargo.lock differs from the release source"
+                )
+            index_bytes = (native_root / "native-artifacts.json").read_bytes()
+            if index_bytes != native.canonical_json(native_index):
+                raise ReleaseBuildError(
+                    "native artifact index changed after validation"
+                )
+            (stage / "native-artifacts.json").write_bytes(index_bytes)
+            for record in native_index["artifacts"]:
+                source = native_root / record["filename"]
+                destination = stage / record["filename"]
+                if source.is_symlink() or not source.is_file():
+                    raise ReleaseBuildError(
+                        f"native executable changed after validation: {record['filename']}"
+                    )
+                value = source.read_bytes()
+                if (
+                    len(value) != record["size"]
+                    or _sha256(value) != record["sha256"]
+                ):
+                    raise ReleaseBuildError(
+                        f"native executable changed after validation: {record['filename']}"
+                    )
+                destination.write_bytes(value)
+                native_artifacts.append({
+                    "filename": record["filename"],
+                    "kind": "native-binary",
+                    "sha256": record["sha256"],
+                    "size": record["size"],
+                })
         bootstrap_assets = []
         for relative in BOOTSTRAP_FILES:
             source = root / relative
@@ -303,7 +367,7 @@ def build_release_bundle(
             "kind": "source-bundle",
             "sha256": _sha256(artifact_data),
             "size": len(artifact_data),
-        }, *python_artifacts, *[
+        }, *native_artifacts, *python_artifacts, *[
             {**item, "kind": "bootstrap"} for item in bootstrap_assets
         ]]
         builder_relative = "scripts/build_release_bundle.py"
@@ -373,6 +437,7 @@ def main() -> int:
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--channel", choices=("stable", "beta", "development"), default="stable")
     parser.add_argument("--host-os", action="append", choices=("darwin", "linux", "windows"))
+    parser.add_argument("--native-artifacts-dir", type=Path)
     arguments = parser.parse_args()
     try:
         manifest = build_release_bundle(
@@ -381,6 +446,7 @@ def main() -> int:
             allow_dirty=arguments.allow_dirty,
             channel=arguments.channel,
             host_os=tuple(arguments.host_os or DEFAULT_HOST_OS),
+            native_artifacts_dir=arguments.native_artifacts_dir,
         )
     except (ReleaseBuildError, OSError, subprocess.SubprocessError, KeyError, ValueError) as error:
         print(f"release build blocked: {error}", file=sys.stderr)

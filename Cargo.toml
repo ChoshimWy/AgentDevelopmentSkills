@@ -3,6 +3,7 @@ members = [
     "crates/agent-contracts",
     "crates/agent-engine",
     "crates/agent-lifecycle",
+    "crates/agent-release",
     "crates/agent-registry",
     "crates/agent-runtime",
     "crates/agent-skills",
@@ -28,6 +29,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["arbitrary_precision", "unbounded_depth"] }
 serde_stacker = "0.1.14"
 sha2 = "0.10.9"
+tempfile = "3.27.0"
 thiserror = "2.0.17"
 toml = { version = "=0.8.23", features = ["preserve_order"] }
 winx = "0.36.4"

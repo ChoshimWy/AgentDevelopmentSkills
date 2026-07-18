@@ -61,8 +61,8 @@ file layout:
 
 ## Current state
 
-Phases 1 through 3 are complete and Phase 4 is in progress. The repository
-contains:
+Phases 1 through 3 are complete. The native Phase 4 compatibility surface and
+the Phase 5 release/package boundary are in progress. The repository contains:
 
 - a Rust workspace pinned to Rust 1.97.1;
 - `agent-contracts` canonical JSON, SHA-256, and schema-version primitives;
@@ -222,13 +222,18 @@ contains:
   unbounded-size numeric SemVer components, recipe closures, discovery
   fixtures and edge cases, policy corpora, compiled workflow plans, package
   Lockfile sources/lineage/tamper cases, and failure limits;
-- formatting, unit-test, Clippy, Python 3.11–3.14, Linux, and macOS
+- formatting, unit-test, Clippy, Python 3.11–3.14, Linux, macOS, and Windows
   compatibility gates in CI;
-- Rust workspace sources in source releases, Python sdists/wheels, SBOM, and
-  provenance inputs, without shipping or activating a Rust executable.
+- Rust workspace sources in source releases and Python sdists/wheels, plus a
+  six-target native release matrix for macOS, Linux, and Windows on `aarch64`
+  and `x86_64`. The native index binds source revision, Cargo Lock, Rust 1.97.1,
+  target binary headers, smoke output, sizes, and hashes. Qualification,
+  provenance, exact release allowlisting, external review, and the final Gate
+  cover the merged binaries.
 
-The Rust binary is not yet installed by the production bootstrap and is not a
-binary release artifact. The parallel CLI currently covers canonical JSON,
+The Rust binary is not yet installed or activated by the production bootstrap.
+The native artifacts are qualified release inputs for the next controlled
+cutover phase, while the parallel CLI currently covers canonical JSON,
 hashing, the shared schema-version boundary, registry snapshots, targeted
 binding resolution, source package-selection, package-snapshot, and complete
 Install Bundle/Plan/Lock compatibility, fresh-only guarded source install, an

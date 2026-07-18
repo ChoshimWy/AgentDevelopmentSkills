@@ -14,6 +14,7 @@ from tests.test_release_gate import (
     FIXTURE_SOURCE_REVISION,
     ROOT,
     build_fixture_release,
+    build_native_fixture,
     builder,
     review_trust_store,
     write_gate_prerequisites,
@@ -21,6 +22,7 @@ from tests.test_release_gate import (
 
 
 def build_clean_release(release: Path) -> None:
+    native = build_native_fixture(release.parent, FIXTURE_SOURCE_REVISION)
     with mock.patch.object(
         builder,
         "_source_identity",
@@ -35,6 +37,7 @@ def build_clean_release(release: Path) -> None:
             release,
             allow_dirty=False,
             channel="beta",
+            native_artifacts_dir=native,
         )
 
 
@@ -83,11 +86,18 @@ class ReleaseQualificationTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/conformance.yml").read_text(encoding="utf-8")
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("release-qualification-handoff:", workflow)
-        self.assertIn("needs: python-compatibility-matrix", workflow)
+        self.assertIn(
+            "needs: [native-binary-matrix, python-compatibility-matrix]",
+            workflow,
+        )
         self.assertIn("REVIEW_KEY_ID: ${{ inputs.review_key_id }}", workflow)
         self.assertIn('RELEASE_CHANNEL: ${{ inputs.release_channel }}', workflow)
         self.assertIn('--review-key-id "$REVIEW_KEY_ID"', workflow)
         self.assertIn('--channel "$RELEASE_CHANNEL"', workflow)
+        self.assertIn(
+            '--native-artifacts-dir "$RUNNER_TEMP/qualification/native"',
+            workflow,
+        )
         self.assertIn('--candidate-lock "$RUNNER_TEMP/qualification/agent-skills.lock"', workflow)
         self.assertNotIn('--review-key-id "${{ inputs.review_key_id }}"', workflow)
         self.assertNotIn('--channel "${{ inputs.release_channel }}"', workflow)

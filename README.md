@@ -279,9 +279,10 @@ and unmanaged config, profile, and destination preimages from the target. Both
 paths refuse unmanaged conflicts, create only missing profiles, use private
 no-replace publication, and write the Activation Lock last. A fresh failure
 removes the new managed roots before restoring every frozen external preimage.
-The session launcher remains an explicit caller-supplied payload until release
-packaging binds a verified native executable. A separate `PublishedUninstall`
-guard now freezes a complete
+The session launcher remains an explicit caller-supplied payload until the
+production bootstrap selects a verified native executable. Release packaging
+now binds those executables, but does not activate them. A separate
+`PublishedUninstall` guard now freezes a complete
 managed and external rollback point, moves all managed roots into a private
 backup, removes only Activation-owned files, preserves local profiles,
 `config.toml` semantics, and `skills/.system`, and supports explicit commit,
@@ -316,6 +317,18 @@ Apple results and managed filesystem trees are differential-tested against
 Python. It deliberately rejects replacement installs, does not run source
 activation, and does not replace the production Python CLI; upgrades and
 activation remain separate approval-bound phases.
+
+The `agent-release` crate now freezes a six-target native matrix for macOS,
+Linux, and Windows on `aarch64` and `x86_64`. Every record binds the exact
+source revision, Cargo lock hash, Rust 1.97.1 toolchain, target-specific
+executable header, smoke result, size, and SHA-256. CI builds and executes each
+binary on a matching GitHub-hosted architecture, then merges only the complete
+sorted matrix into `native-artifacts.json`. Qualification copies those exact
+binaries into the release candidate; provenance, the exact release allowlist,
+the external review signature, and the final Release Gate all cover them.
+This is a packaging milestone, not the production cutover: `install.sh`,
+`install.ps1`, and the default CLI still use the Python path until the
+controlled bootstrap/fallback phase passes.
 
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path

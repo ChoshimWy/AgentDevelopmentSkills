@@ -39,6 +39,7 @@ def load_script(name: str):
 
 builder = load_script("build_release_bundle.py")
 gate = load_script("run_release_gate.py")
+native_contract = load_script("native_artifact_contract.py")
 review_tool = load_script("prepare_release_review.py")
 FIXTURE_SOURCE_REVISION = "1" * 40
 TEST_RSA_EXPONENT = 65537
@@ -161,6 +162,73 @@ def build_fixture_release(release: Path) -> None:
         builder.build_release_bundle(ROOT, release, allow_dirty=True, channel="development")
 
 
+def build_native_fixture(root: Path, source_revision: str, version: str = "0.2.0") -> Path:
+    output = root / "native-fixture"
+    output.mkdir()
+    cargo_lock_sha256 = hashlib.sha256((ROOT / "Cargo.lock").read_bytes()).hexdigest()
+    records = []
+    for target in native_contract.EXPECTED_TARGETS:
+        arch, host_os, format_name, machine = native_contract._TARGETS[target]
+        if format_name == "elf":
+            value = bytearray(64)
+            value[:4] = b"\x7fELF"
+            value[4] = 2
+            value[5] = 1
+            value[18:20] = machine.to_bytes(2, "little")
+        elif format_name == "macho":
+            value = bytearray(32)
+            value[:4] = b"\xcf\xfa\xed\xfe"
+            value[4:8] = machine.to_bytes(4, "little")
+        else:
+            value = bytearray(128)
+            value[:2] = b"MZ"
+            value[60:64] = (64).to_bytes(4, "little")
+            value[64:68] = b"PE\0\0"
+            value[68:70] = machine.to_bytes(2, "little")
+        filename = native_contract.native_filename(version, target)
+        (output / filename).write_bytes(value)
+        record = {
+            "arch": arch,
+            "cargo_lock_sha256": cargo_lock_sha256,
+            "filename": filename,
+            "fingerprint": "",
+            "kind": "native-binary",
+            "os": host_os,
+            "profile": "release",
+            "rustc_version": "rustc 1.97.1 (fixture 2026-01-01)",
+            "schema_version": "1.0",
+            "sha256": hashlib.sha256(value).hexdigest(),
+            "size": len(value),
+            "smoke_output": f"agent-skills-rs {version}\n",
+            "smoke_status": "passed",
+            "source_revision": source_revision,
+            "target": target,
+            "version": version,
+        }
+        record["fingerprint"] = native_contract.fingerprint({
+            key: item for key, item in record.items() if key != "fingerprint"
+        })
+        records.append(record)
+    index = {
+        "artifacts": records,
+        "fingerprint": "",
+        "product": "agent-development-skills",
+        "schema_version": "1.0",
+        "source_revision": source_revision,
+        "target_set_sha256": native_contract.fingerprint(
+            list(native_contract.EXPECTED_TARGETS)
+        ),
+        "version": version,
+    }
+    index["fingerprint"] = native_contract.fingerprint({
+        key: item for key, item in index.items() if key != "fingerprint"
+    })
+    (output / "native-artifacts.json").write_bytes(
+        native_contract.canonical_json(index)
+    )
+    return output
+
+
 def compatibility_evidence(release: Path, source_revision: str) -> dict:
     records = sorted(
         json.loads((release / "python-artifacts.json").read_text(encoding="utf-8"))["artifacts"],
@@ -232,6 +300,119 @@ def write_gate_prerequisites(root: Path, release: Path) -> tuple[Path, Path, Pat
 
 
 class ReleaseGateTests(unittest.TestCase):
+    def test_beta_release_requires_complete_native_matrix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            release = Path(directory) / "release"
+            with mock.patch.object(
+                builder,
+                "_source_identity",
+                return_value=(FIXTURE_SOURCE_REVISION, False),
+            ), mock.patch.object(
+                builder,
+                "_git_file_modes",
+                return_value={},
+            ), mock.patch.object(
+                builder,
+                "_git_blob",
+                side_effect=lambda root, relative: (root / relative).read_bytes(),
+            ):
+                builder.build_release_bundle(ROOT, release, channel="beta")
+
+            report = gate.evaluate_release_gate(
+                release,
+                conformance_evidence=None,
+                python_compatibility_evidence_path=None,
+                review_evidence=None,
+                review_trust_store=None,
+            )
+
+            supply = next(
+                item for item in report["checks"] if item["id"] == "release.supply-chain"
+            )
+            self.assertEqual(supply["status"], "blocked")
+            self.assertIn("complete native artifact matrix", supply["details"]["error"])
+
+    def test_native_matrix_rejects_self_consistent_wrong_binary_header(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            native = build_native_fixture(root, FIXTURE_SOURCE_REVISION)
+            index_path = native / "native-artifacts.json"
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            record = index["artifacts"][0]
+            binary_path = native / record["filename"]
+            value = bytearray(binary_path.read_bytes())
+            value[:8] = b"\x7fELF\x02\x01\x00\x00"
+            value[18:20] = (183).to_bytes(2, "little")
+            binary_path.write_bytes(value)
+            record["sha256"] = hashlib.sha256(value).hexdigest()
+            record["fingerprint"] = native_contract.fingerprint({
+                key: item for key, item in record.items() if key != "fingerprint"
+            })
+            index["fingerprint"] = native_contract.fingerprint({
+                key: item for key, item in index.items() if key != "fingerprint"
+            })
+            index_path.write_bytes(native_contract.canonical_json(index))
+
+            with self.assertRaisesRegex(
+                native_contract.NativeArtifactError,
+                "header differs",
+            ):
+                native_contract.load_native_artifacts(
+                    index_path,
+                    native,
+                    expected_source_revision=FIXTURE_SOURCE_REVISION,
+                    expected_version="0.2.0",
+                )
+
+    def test_native_matrix_cannot_claim_a_different_cargo_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            native = build_native_fixture(root, FIXTURE_SOURCE_REVISION)
+            release = root / "release"
+            with mock.patch.object(
+                builder,
+                "_source_identity",
+                return_value=(FIXTURE_SOURCE_REVISION, False),
+            ), mock.patch.object(
+                builder,
+                "_git_file_modes",
+                return_value={},
+            ), mock.patch.object(
+                builder,
+                "_git_blob",
+                side_effect=lambda source, relative: (source / relative).read_bytes(),
+            ):
+                builder.build_release_bundle(
+                    ROOT,
+                    release,
+                    channel="beta",
+                    native_artifacts_dir=native,
+                )
+            index_path = release / "native-artifacts.json"
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            for record in index["artifacts"]:
+                record["cargo_lock_sha256"] = "4" * 64
+                record["fingerprint"] = native_contract.fingerprint({
+                    key: item for key, item in record.items() if key != "fingerprint"
+                })
+            index["fingerprint"] = native_contract.fingerprint({
+                key: item for key, item in index.items() if key != "fingerprint"
+            })
+            index_path.write_bytes(native_contract.canonical_json(index))
+
+            report = gate.evaluate_release_gate(
+                release,
+                conformance_evidence=None,
+                python_compatibility_evidence_path=None,
+                review_evidence=None,
+                review_trust_store=None,
+            )
+            supply = next(
+                item for item in report["checks"] if item["id"] == "release.supply-chain"
+            )
+            self.assertEqual(supply["status"], "blocked")
+            self.assertIn("Cargo.lock differs", supply["details"]["error"])
+
     def test_development_candidate_runs_distribution_smoke_but_blocks_missing_governance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             release = Path(directory) / "release"

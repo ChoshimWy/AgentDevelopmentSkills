@@ -96,6 +96,101 @@ jobs:
           PYTHONPATH: src
         run: python -m unittest tests.test_rust_compatibility -v
 
+  native-binary:
+    name: Native binary (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            executable_suffix: ""
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            executable_suffix: ""
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            executable_suffix: ""
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            executable_suffix: ""
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            executable_suffix: ".exe"
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            executable_suffix: ".exe"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Build and smoke native executable
+        shell: bash
+        env:
+          EXECUTABLE_SUFFIX: ${{ matrix.executable_suffix }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target "$TARGET" \
+            -p agent-skills-rs -p agent-release
+          executable="target/$TARGET/release/agent-skills-rs$EXECUTABLE_SUFFIX"
+          release_tool="target/$TARGET/release/agent-release$EXECUTABLE_SUFFIX"
+          "$release_tool" record \
+            --binary "$executable" \
+            --cargo-lock Cargo.lock \
+            --target "$TARGET" \
+            --source-revision "$GITHUB_SHA" \
+            --output "target/native-artifact-$TARGET"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-${{ matrix.target }}
+          path: target/native-artifact-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 30
+
+  native-binary-matrix:
+    name: Complete native binary matrix
+    needs: native-binary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.14"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: native-*
+          path: target/native-downloads
+      - name: Merge and verify exact native matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          records=()
+          while IFS= read -r -d '' record; do
+            records+=(--record "$record")
+          done < <(find target/native-downloads -name native-artifact-record.json -type f -print0)
+          cargo run --release --locked -p agent-release -- \
+            merge "${records[@]}" --output target/native-matrix
+          cargo run --release --locked -p agent-release -- \
+            verify \
+            --index target/native-matrix/native-artifacts.json \
+            --artifacts-dir target/native-matrix
+          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          python scripts/native_artifact_contract.py verify \
+            --index target/native-matrix/native-artifacts.json \
+            --artifacts-dir target/native-matrix \
+            --source-revision "$GITHUB_SHA" \
+            --version "$version"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-artifacts-${{ github.sha }}
+          path: target/native-matrix
+          if-no-files-found: error
+          retention-days: 90
+
   python-distribution:
     name: Python artifacts (${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -153,7 +248,7 @@ jobs:
   release-qualification-handoff:
     name: Release qualification handoff
     if: github.event_name == 'workflow_dispatch'
-    needs: python-compatibility-matrix
+    needs: [native-binary-matrix, python-compatibility-matrix]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -164,6 +259,10 @@ jobs:
         with:
           name: python-compatibility-v1
           path: ${{ runner.temp }}/qualification
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: native-artifacts-${{ github.sha }}
+          path: ${{ runner.temp }}/qualification/native
       - name: Resolve candidate lock and execute candidate-bound Conformance
         env:
           PYTHONPATH: src
@@ -185,6 +284,7 @@ jobs:
         run: |
           python scripts/build_release_bundle.py \
             --channel "$RELEASE_CHANNEL" \
+            --native-artifacts-dir "$RUNNER_TEMP/qualification/native" \
             --output "$RUNNER_TEMP/qualification/release"
       - name: Freeze unsigned external-review handoff
         env:

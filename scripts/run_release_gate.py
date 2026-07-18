@@ -39,6 +39,7 @@ from agent_workflow.contracts import validate_upgrade_conformance_evidence  # no
 from agent_workflow.models import ContractError  # noqa: E402
 
 import bootstrap_install  # noqa: E402
+import native_artifact_contract  # noqa: E402
 import python_compatibility_evidence  # noqa: E402
 
 
@@ -46,9 +47,10 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _FIXED_METADATA_FILES = {
     "provenance.json", "python-artifacts.json", "release-manifest.json", "sbom.json",
 }
+_OPTIONAL_METADATA_FILES = {"native-artifacts.json"}
 _EXPECTED_BOOTSTRAP_FILES = {"bootstrap_install.py", "install.ps1", "install.sh"}
 _FIXED_RELEASE_FILES = _FIXED_METADATA_FILES | _EXPECTED_BOOTSTRAP_FILES
-_MAX_RELEASE_FILES = 16
+_MAX_RELEASE_FILES = 24
 _MAX_RELEASE_BYTES = 1024 * 1024 * 1024
 _MAX_EVIDENCE_BYTES = 16 * 1024 * 1024
 _MAX_SDIST_BYTES = 128 * 1024 * 1024
@@ -154,6 +156,16 @@ def _safe_filename(value: Any) -> bool:
     )
 
 
+def _native_binary_filename(value: str) -> bool:
+    return (
+        value.startswith("agent-skills-")
+        and any(
+            value.endswith(target + (".exe" if "-windows-" in target else ""))
+            for target in native_artifact_contract.EXPECTED_TARGETS
+        )
+    )
+
+
 def _release_directory_identity(path: Path) -> dict[str, dict[str, Any]]:
     if path.is_symlink() or not path.is_dir():
         raise ContractError("release directory is missing or unsafe")
@@ -165,7 +177,12 @@ def _release_directory_identity(path: Path) -> dict[str, dict[str, Any]]:
     for item in candidates:
         if item.is_symlink() or not item.is_file() or not _safe_filename(item.name):
             raise ContractError(f"release directory contains an unsafe entry: {item.name}")
-        if item.name not in _FIXED_RELEASE_FILES and not item.name.endswith((".zip", ".whl", ".tar.gz")):
+        if (
+            item.name not in _FIXED_RELEASE_FILES
+            and item.name not in _OPTIONAL_METADATA_FILES
+            and not item.name.endswith((".zip", ".whl", ".tar.gz"))
+            and not _native_binary_filename(item.name)
+        ):
             raise ContractError(f"release directory contains an unknown entry: {item.name}")
         declared_size = item.stat().st_size
         total_size += declared_size
@@ -394,7 +411,8 @@ def _validate_provenance(value: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(record, dict) or set(record) != {"filename", "kind", "sha256", "size"}:
             raise ContractError("provenance artifact record fields are invalid")
         if (
-            record.get("kind") not in {"bootstrap", "sdist", "source-bundle", "wheel"}
+            record.get("kind")
+            not in {"bootstrap", "native-binary", "sdist", "source-bundle", "wheel"}
             or not _safe_filename(record.get("filename"))
             or type(record.get("size")) is not int
             or record["size"] <= 0
@@ -821,6 +839,7 @@ def _evaluate_release_gate_snapshot(
             details = action()
         except (
             ContractError,
+            native_artifact_contract.NativeArtifactError,
             OSError,
             TypeError,
             AttributeError,
@@ -850,6 +869,27 @@ def _evaluate_release_gate_snapshot(
             raise ContractError("SBOM must explicitly exclude local Xcode official export content")
         if not isinstance(manifest, dict):
             raise ContractError("release manifest is unavailable for supply-chain binding")
+        native_index_path = release / "native-artifacts.json"
+        native_index: dict[str, Any] | None = None
+        native_records: list[dict[str, Any]] = []
+        if native_index_path.exists() or native_index_path.is_symlink():
+            native_index = native_artifact_contract.load_native_artifacts(
+                native_index_path,
+                release,
+                expected_source_revision=manifest.get("source", {}).get("revision", ""),
+                expected_version=manifest.get("version", ""),
+            )
+            native_records = [
+                {
+                    "filename": item["filename"],
+                    "kind": "native-binary",
+                    "sha256": item["sha256"],
+                    "size": item["size"],
+                }
+                for item in native_index["artifacts"]
+            ]
+        elif manifest.get("channel") != "development":
+            raise ContractError("beta and stable releases require the complete native artifact matrix")
         if (
             len(manifest.get("artifacts", [])) != 1
             or manifest["artifacts"][0].get("id") != "universal-source-bundle"
@@ -889,6 +929,18 @@ def _evaluate_release_gate_snapshot(
             raise ContractError("provenance SBOM binding differs")
         if provenance.get("materials_sha256") != sha256(sbom["files"]):
             raise ContractError("provenance materials hash differs from SBOM")
+        if native_index is not None:
+            cargo_lock = next(
+                (item for item in sbom["files"] if item["path"] == "Cargo.lock"),
+                None,
+            )
+            if cargo_lock is None or any(
+                item["cargo_lock_sha256"] != cargo_lock["sha256"]
+                for item in native_index["artifacts"]
+            ):
+                raise ContractError(
+                    "native artifact Cargo.lock differs from the bound source SBOM"
+                )
         source_record = {
             "filename": manifest["artifacts"][0]["filename"],
             "kind": "source-bundle",
@@ -899,7 +951,7 @@ def _evaluate_release_gate_snapshot(
             {**item, "kind": "bootstrap"} for item in manifest["bootstrap_assets"]
         ]
         expected_artifacts = sorted(
-            [source_record, *python_records, *bootstrap_records],
+            [source_record, *native_records, *python_records, *bootstrap_records],
             key=lambda item: (item["kind"], item["filename"]),
         )
         if (
@@ -907,10 +959,14 @@ def _evaluate_release_gate_snapshot(
             or any(not _safe_filename(item.get("filename")) for item in provenance_records)
             or len({item["filename"] for item in provenance_records}) != len(provenance_records)
         ):
-            raise ContractError("manifest, Python index and provenance artifact records differ")
+            raise ContractError(
+                "manifest, native/Python indexes and provenance artifact records differ"
+            )
         expected_release_files = _FIXED_METADATA_FILES | {
             item["filename"] for item in provenance_records
         }
+        if native_records:
+            expected_release_files.add("native-artifacts.json")
         actual_release_files = {item.name for item in release.iterdir()}
         if actual_release_files != expected_release_files:
             raise ContractError("release directory files differ from the exact provenance allowlist")

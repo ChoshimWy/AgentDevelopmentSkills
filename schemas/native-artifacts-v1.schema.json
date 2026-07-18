@@ -1,0 +1,84 @@
+{
+  "$id": "https://agent-workflow.local/schemas/native-artifacts-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "items": {"$ref": "#/$defs/artifact"},
+      "maxItems": 6,
+      "minItems": 6,
+      "type": "array"
+    },
+    "fingerprint": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "product": {"const": "agent-development-skills"},
+    "schema_version": {"const": "1.0"},
+    "source_revision": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+    "target_set_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "version": {"pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "type": "string"}
+  },
+  "required": [
+    "schema_version",
+    "product",
+    "version",
+    "source_revision",
+    "target_set_sha256",
+    "artifacts",
+    "fingerprint"
+  ],
+  "title": "Native Artifact Index v1",
+  "type": "object",
+  "$defs": {
+    "artifact": {
+      "additionalProperties": false,
+      "properties": {
+        "arch": {"enum": ["aarch64", "x86_64"]},
+        "cargo_lock_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "filename": {
+          "pattern": "^agent-skills-[0-9]+\\.[0-9]+\\.[0-9]+-(?:aarch64|x86_64)-(?:apple-darwin|pc-windows-msvc|unknown-linux-gnu)(?:\\.exe)?$",
+          "type": "string"
+        },
+        "fingerprint": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "kind": {"const": "native-binary"},
+        "os": {"enum": ["darwin", "linux", "windows"]},
+        "profile": {"const": "release"},
+        "rustc_version": {"pattern": "^rustc 1\\.97\\.1 [^\\r\\n]+$", "type": "string"},
+        "schema_version": {"const": "1.0"},
+        "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "size": {"maximum": 134217728, "minimum": 1, "type": "integer"},
+        "smoke_output": {"pattern": "^agent-skills-rs [0-9]+\\.[0-9]+\\.[0-9]+\\n$", "type": "string"},
+        "smoke_status": {"const": "passed"},
+        "source_revision": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+        "target": {
+          "enum": [
+            "aarch64-apple-darwin",
+            "aarch64-pc-windows-msvc",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-apple-darwin",
+            "x86_64-pc-windows-msvc",
+            "x86_64-unknown-linux-gnu"
+          ]
+        },
+        "version": {"pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "type": "string"}
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "version",
+        "source_revision",
+        "target",
+        "os",
+        "arch",
+        "profile",
+        "filename",
+        "size",
+        "sha256",
+        "cargo_lock_sha256",
+        "rustc_version",
+        "smoke_status",
+        "smoke_output",
+        "fingerprint"
+      ],
+      "type": "object"
+    }
+  }
+}
