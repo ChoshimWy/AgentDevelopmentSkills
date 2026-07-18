@@ -9,6 +9,7 @@ import random
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from copy import deepcopy
@@ -42,7 +43,10 @@ from agent_workflow.canonical_json import (
     MAX_CANONICAL_JSON_DEPTH,
 )
 from agent_workflow.discovery import DiscoveryEngine
-from agent_workflow.contracts import validate_worktree_session_context
+from agent_workflow.contracts import (
+    validate_doctor_report,
+    validate_worktree_session_context,
+)
 from agent_workflow.doctor import diagnose_install
 from agent_workflow.installation import build_install_bundle, install_bundle
 from agent_workflow.models import ContractError
@@ -1372,6 +1376,120 @@ class RustCompatibilityTests(unittest.TestCase):
                     )
                     self.assertEqual(rejected.returncode, 2)
                     self.assertEqual(rejected.stdout, "")
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "Python installation mode contract is POSIX-only",
+    )
+    def test_doctor_report_matches_python_exactly(self) -> None:
+        python_version = (
+            f"{sys.version_info.major}."
+            f"{sys.version_info.minor}."
+            f"{sys.version_info.micro}"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["apple", "desktop"],
+                ),
+                target,
+            )
+            expected = diagnose_install(
+                target,
+                schema_root=ROOT / "schemas",
+            )
+            result = self.run_rust(
+                "doctor-report",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+                "--python-version",
+                python_version,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, dumps(expected))
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "empty"
+            target.mkdir()
+            expected = diagnose_install(
+                target,
+                schema_root=ROOT / "schemas",
+            )
+            result = self.run_rust(
+                "doctor-report",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+                "--python-version",
+                python_version,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            actual = json.loads(result.stdout)
+            validate_doctor_report(actual)
+            for report in (expected, actual):
+                report.pop("fingerprint")
+                for check in report["checks"]:
+                    if check["status"] == "failed":
+                        check["details"] = {"errors": ["failed"]}
+            self.assertEqual(actual, expected)
+
+            unsupported = self.run_rust(
+                "doctor-report",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+                "--python-version",
+                "3.10.9",
+            )
+            self.assertEqual(unsupported.returncode, 2, unsupported.stderr)
+            unsupported_report = json.loads(unsupported.stdout)
+            self.assertEqual(
+                unsupported_report["checks"][0],
+                {
+                    "category": "environment",
+                    "details": {
+                        "actual": "3.10.9",
+                        "required": ">=3.11",
+                    },
+                    "id": "environment.python",
+                    "status": "failed",
+                    "summary": (
+                        "Python runtime does not satisfy "
+                        "the supported baseline"
+                    ),
+                },
+            )
+            self.assertEqual(unsupported_report["status"], "blocked")
+
+            huge = self.run_rust(
+                "doctor-report",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+                "--python-version",
+                f"{'9' * 100}.0.0",
+            )
+            self.assertEqual(huge.returncode, 2, huge.stderr)
+            huge_report = json.loads(huge.stdout)
+            validate_doctor_report(huge_report)
+            self.assertEqual(
+                huge_report["checks"][0]["status"],
+                "passed",
+            )
+
+            invalid = self.run_rust(
+                "doctor-report",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+                "--python-version",
+                "03.11.0",
+            )
+            self.assertEqual(invalid.returncode, 2)
+            self.assertEqual(invalid.stdout, "")
 
     @unittest.skipIf(
         os.name == "nt",

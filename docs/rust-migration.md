@@ -103,8 +103,11 @@ contains:
   Persistent rollback points are validated as complete read-only snapshots:
   their own Lock pair, packages, Skills, AGENTS composition, external state,
   optional Activation ownership, semantic closure, and full tree digest must
-  agree. It holds directory capabilities and opens contract files without
-  following symlinks, and it never repairs or writes the inspected
+  agree. It can now wrap the projection in a validated Doctor Report v1. Since
+  v1 records its Python host, `doctor-report` requires an explicit
+  `--python-version` host attestation and never discovers or executes an
+  interpreter. It holds directory capabilities and opens contract files
+  without following symlinks, and it never repairs or writes the inspected
   installation. Activation and installed-package tree mode parity are
   POSIX-only for now; Windows-native Doctor verifies the Lock contract,
   no-follow paths, and content hashes without treating POSIX mode bits as an
@@ -175,9 +178,14 @@ Skill/AGENTS/Binding/permission integrity is now included in that native
 projection and covered by healthy-install, cross-Lock, semantic-forgery, and
 content-tamper differential cases. Rollback-point validation is also projected
 with healthy internal/external snapshots and contract, content, symlink, and
-snapshot-digest tamper cases. Full Doctor Report v1 emission and every mutating
-lifecycle transaction remain on the Python production path until their own
-differential, tamper, concurrency, rollback, and independent-review gates pass.
+snapshot-digest tamper cases. The companion `doctor-report` command now
+assembles the complete v1 artifact, recomputes summary/status/fingerprint, and
+validates its cross-field invariants. Its required `--python-version` is
+supplied by the compatibility host rather than inferred or executed by Rust,
+so this closes report-emission parity without claiming the production CLI is
+Python-free. Every mutating lifecycle transaction remains on the Python
+production path until its own differential, tamper, concurrency, rollback, and
+independent-review gates pass.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

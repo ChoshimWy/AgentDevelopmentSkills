@@ -109,6 +109,9 @@ cargo run --locked -p agent-skills-rs -- \
 cargo run --locked -p agent-skills-rs -- \
   doctor-baseline /path/to/installed-root --schemas schemas
 cargo run --locked -p agent-skills-rs -- \
+  doctor-report /path/to/installed-root --schemas schemas \
+  --python-version 3.11.0
+cargo run --locked -p agent-skills-rs -- \
   runtime-execute /path/to/workflow-plan.json \
   --behaviors /path/to/fake-behaviors.json
 cargo run --locked -p agent-skills-rs -- \
@@ -196,8 +199,12 @@ closure, and permission profiles and per-Capability grants against rebuilt
 installed Manifest semantics. Persistent rollback points are now checked
 read-only as complete snapshots, including their own Lock pair, package,
 Skill, AGENTS, external-state, Activation, semantic, and snapshot-digest
-anchors. Full Doctor Report v1 emission and mutating lifecycle transactions
-remain on the Python path.
+anchors. The native lane can now assemble and validate a complete Doctor
+Report v1 through `doctor-report`. Because v1 freezes the hosting Python
+runtime, this compatibility command requires the host to attest
+`--python-version`; it never discovers or executes an interpreter and does not
+claim a no-Python production cutover. Mutating lifecycle transactions remain
+on the Python path.
 It holds directory capabilities and opens contract files without following
 symlinks; it does not repair, install, upgrade, roll back, uninstall, or
 otherwise write the target. Failed projected checks keep canonical JSON on

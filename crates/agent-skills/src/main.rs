@@ -6,7 +6,7 @@ use agent_engine::{
     resolve_package_lock, resolve_policy, validate_compiled_plan, validate_package_lock,
     validate_plan_package_lock,
 };
-use agent_lifecycle::inspect_doctor_baseline;
+use agent_lifecycle::{inspect_doctor_baseline, inspect_doctor_report_v1};
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
     attach_adapter_result, build_adapter_request, claim_provider_invocation,
@@ -146,6 +146,14 @@ enum Command {
         target_root: PathBuf,
         #[arg(long, default_value = "schemas")]
         schemas: PathBuf,
+    },
+    /// Emit a complete Doctor Report v1 using an explicit host Python attestation.
+    DoctorReport {
+        target_root: PathBuf,
+        #[arg(long, default_value = "schemas")]
+        schemas: PathBuf,
+        #[arg(long)]
+        python_version: String,
     },
     /// Execute a deterministic native fake-adapter workflow runtime.
     RuntimeExecute {
@@ -577,6 +585,17 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                         .any(|check| check.get("status").and_then(Value::as_str) == Some("failed"))
                 })
             {
+                return Ok(2);
+            }
+        }
+        Command::DoctorReport {
+            target_root,
+            schemas,
+            python_version,
+        } => {
+            let value = inspect_doctor_report_v1(target_root, schemas, &python_version)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+            if value.get("status").and_then(Value::as_str) == Some("blocked") {
                 return Ok(2);
             }
         }
