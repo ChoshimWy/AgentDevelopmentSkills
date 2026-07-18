@@ -18,11 +18,11 @@ AgentDevelopmentSkills is an offline-first, fail-closed workflow core for coding
 
 The incremental Rust migration has reached the controlled bootstrap phase.
 Release-manifest v2 binds a complete macOS, Linux, and Windows native binary
-matrix. A hosted, explicit, fresh Apple or Desktop installation selects the
-verified Rust lifecycle transaction by default. Source-checkout installs,
-dry-runs, interactive or compatibility-only requests, existing installations,
-upgrades, and legacy adoption still use the documented Python compatibility
-path. The repository carries an MIT `LICENSE`, a `NOTICE`, and verified
+matrix. A hosted, explicit, fresh Apple or Desktop install or dry-run selects
+the verified Rust lifecycle transaction by default. Source-checkout installs,
+interactive or compatibility-only requests, existing installations, upgrades,
+and legacy adoption still use the documented Python compatibility path. The
+repository carries an MIT `LICENSE`, a `NOTICE`, and verified
 migration-audit hashes. The GitHub Pages control plane is deployed; public
 release assets and remote installation remain gated on an external release
 signature and GitHub environment approval.
@@ -68,17 +68,17 @@ iwr -useb https://choshimwy.github.io/AgentDevelopmentSkills/install.ps1 | iex
 The Pages control plane is online, but the remote installer remains unavailable until a signed release has been published. Use a source checkout before that release gate is satisfied.
 
 After a v2 release is published, an explicit fresh `--platform apple` or
-`--platform desktop` request on macOS or a supported glibc 2.39+ Linux host
-defaults to the verified Rust binary. Musl and older glibc hosts remain on the
-Python compatibility route. The gated release renders exact source and
-host-binary sizes and SHA-256 identities into the POSIX bootstrap, so this
-fresh-install route needs `curl`, `unzip`, and a system SHA-256 command but does
-not require Python. Set
+`--platform desktop` install or dry-run on macOS or a supported glibc 2.39+
+Linux host defaults to the verified Rust binary. Musl and older glibc hosts
+remain on the Python compatibility route. The gated release renders exact
+source and host-binary sizes and SHA-256 identities into the POSIX bootstrap,
+so this route needs `curl`, `unzip`, and a system SHA-256 command but does not
+require Python. Set
 `AGENT_SKILLS_INSTALL_ENGINE=python` to request the transitional compatibility
 path. `AGENT_SKILLS_INSTALL_ENGINE=rust` fails closed if the request is not
 eligible; once Rust has been selected, a native failure never silently
-downgrades to Python. Source-checkout, dry-run, existing-install, upgrade, and
-other compatibility-only requests still require Python 3.11+. The PowerShell
+downgrades to Python. Source-checkout, existing-install, upgrade, and other
+compatibility-only requests still require Python 3.11+. The PowerShell
 bootstrap also remains on that compatibility path because Windows is blocked
 as a production source-install target until its complete install contract is
 enabled.

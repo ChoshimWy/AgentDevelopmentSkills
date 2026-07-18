@@ -63,8 +63,9 @@ file layout:
 ## Current state
 
 Phases 1 through 5 are complete. Phase 6 is in controlled rollout: eligible
-hosted fresh installs now select Rust, while upgrade, legacy adoption, the thin
-bootstrap acquisition layer, and other compatibility routes remain pending.
+hosted fresh installs and dry-runs now select Rust, while upgrade, legacy
+adoption, the remaining bootstrap compatibility layer, and other routes remain
+pending.
 The repository contains:
 
 - a Rust workspace pinned to Rust 1.97.1;
@@ -238,7 +239,8 @@ The repository contains:
   cover the merged binaries.
 
 Release Manifest v2 freezes the complete native index and defaults eligible
-hosted fresh Apple/Desktop requests to the matching verified Rust executable.
+hosted fresh Apple/Desktop install and dry-run requests to the matching verified
+Rust executable.
 For macOS and supported glibc 2.39+ Linux hosts, the gated release now renders
 the exact immutable asset base, source archive identity, and six-target native
 matrix into the POSIX bootstrap. Musl and older glibc hosts are deliberately
@@ -247,13 +249,12 @@ fresh Apple/Desktop request downloads both bounded assets with HTTPS-only
 redirects, verifies their exact size and SHA-256, extracts the frozen source
 archive, and invokes the verified native installer without requiring Python.
 The Final Gate independently recomputes the rendered bootstrap from source
-SBOM materials and the verified native index. Source-checkout, dry-run,
-interactive, compatibility-only,
-existing-install, upgrade, legacy-adoption, and PowerShell requests still use
-the Python compatibility path. Operators may explicitly select that path with
-`AGENT_SKILLS_INSTALL_ENGINE=python`; forced Rust fails closed when the request
-is ineligible, and a selected native acquisition or execution failure never
-silently downgrades. The parallel CLI currently covers canonical JSON,
+SBOM materials and the verified native index. Source-checkout, interactive,
+compatibility-only, existing-install, upgrade, legacy-adoption, and PowerShell
+requests still use the Python compatibility path. Operators may explicitly
+select that path with `AGENT_SKILLS_INSTALL_ENGINE=python`; forced Rust fails
+closed when the request is ineligible, and a selected native acquisition or
+execution failure never silently downgrades. The parallel CLI currently covers canonical JSON,
 hashing, the shared schema-version boundary, registry snapshots, targeted
 binding resolution, source package-selection, package-snapshot, and complete
 Install Bundle/Plan/Lock compatibility, fresh-only guarded source install, an

@@ -42,6 +42,7 @@ dependencies = [
  "rustix",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "toml",
  "winx",

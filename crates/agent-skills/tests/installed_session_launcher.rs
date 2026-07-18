@@ -92,6 +92,40 @@ fn fresh_apple_install_publishes_a_compatible_agent_session_cli() {
             <= 64 * 1024 * 1024,
         "stripped native session launcher exceeds the production contract limit"
     );
+    let preview = Command::new(&binary)
+        .args([
+            "install",
+            "--source-root",
+            repository_root().to_str().expect("UTF-8 workspace"),
+            "--target-root",
+            target.to_str().expect("UTF-8 target"),
+            "--platform",
+            "apple",
+            "--session-launcher",
+            launcher_source.to_str().expect("UTF-8 launcher"),
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("run native install preview");
+    assert!(
+        preview.status.success(),
+        "native install preview failed: {}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let preview: Value =
+        serde_json::from_slice(&preview.stdout).expect("native install preview JSON");
+    assert_eq!(preview["status"], "planned");
+    assert_eq!(preview["engine"], "rust");
+    assert!(
+        preview["activation"]["managed_file_updates"]
+            .as_array()
+            .expect("preview activation updates")
+            .iter()
+            .any(|value| value == "bin/agent-skills")
+    );
+    assert!(!target.exists(), "native preview created the target");
+
     let install = Command::new(&binary)
         .args([
             "install",

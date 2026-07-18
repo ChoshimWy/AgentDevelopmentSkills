@@ -1,16 +1,30 @@
-use crate::LifecycleError;
-use agent_contracts::{canonical_sha256, load_json};
+use crate::{
+    LifecycleError, configure_nofollow, open_root_directory, same_content_state_cap,
+    same_object_cap,
+};
+use agent_contracts::{MAX_CONTRACT_JSON_BYTES, canonical_sha256, load_json, parse_json};
 use agent_registry::{satisfies, validate_manifest_syntax};
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+use cap_std::fs::{Metadata, OpenOptions};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 const PACKAGE_COLLECTIONS: [&str; 3] = ["disciplines", "stacks", "runtime-configs"];
+const PLATFORM_ORDER: [&str; 5] = ["apple", "android", "web", "backend", "desktop"];
 
 #[derive(Debug, Clone)]
 struct PackageCandidate {
     root: PathBuf,
     manifest: Value,
+}
+
+struct ManifestSnapshot {
+    bytes: Vec<u8>,
+    identity: Metadata,
+    manifest: Value,
+    path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +208,195 @@ pub fn resolve_source_install_selection(
         resolve_platforms(&catalog, platforms, core_only)?
     };
     resolve_packages(&catalog, selected_platforms, disciplines, runtime_configs)
+}
+
+/// Read the source installer platform inventory with Python-compatible labels and handlers.
+///
+/// The inventory is read twice and must remain unchanged. This is a report
+/// projection rather than a persisted contract.
+///
+/// # Errors
+/// Returns a fail-closed error for unsafe or malformed platform Manifests, or
+/// for source mutation while reading the inventory.
+pub fn inspect_source_platform_options(
+    platform_root: impl AsRef<Path>,
+) -> Result<Vec<Value>, LifecycleError> {
+    let platform_root = std::fs::canonicalize(platform_root)?;
+    let collection = BTreeSet::from([platform_root.clone()]);
+    let paths = collect_direct_manifest_paths(&collection)?;
+    let order = PLATFORM_ORDER
+        .iter()
+        .enumerate()
+        .map(|(index, identifier)| (*identifier, index))
+        .collect::<BTreeMap<_, _>>();
+    let snapshots = paths
+        .iter()
+        .map(|path| read_manifest_snapshot(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut options = Vec::new();
+    for snapshot in &snapshots {
+        let path = &snapshot.path;
+        let manifest = &snapshot.manifest;
+        validate_manifest_syntax(manifest)?;
+        if manifest.get("kind").and_then(Value::as_str) != Some("platform") {
+            continue;
+        }
+        let identifier = manifest_string(manifest, "id")?;
+        let directory = path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                LifecycleError::Invalid(format!(
+                    "platform package directory is invalid: {}",
+                    path.display()
+                ))
+            })?;
+        if directory != identifier {
+            return invalid(format!(
+                "platform directory and manifest id differ: {directory}"
+            ));
+        }
+        let status = manifest_string(manifest, "implementation_status")?;
+        let handler = match identifier {
+            "apple" => Some(json!({
+                "activation": "apple-codex-v1",
+                "smoke": "ios-installed-workflow-v1",
+            })),
+            "desktop" => Some(json!({
+                "activation": "none",
+                "smoke": "desktop-installed-workflow-v1",
+            })),
+            _ => None,
+        };
+        let availability = if status != "implemented" {
+            status
+        } else if !manifest.get("installation").is_some_and(Value::is_object) {
+            "installation-contract-missing"
+        } else if handler.is_none() {
+            "source-installer-handler-missing"
+        } else {
+            "ready"
+        };
+        let label = match identifier {
+            "apple" => "Apple / iOS".to_owned(),
+            "android" => "Android".to_owned(),
+            "web" => "Web".to_owned(),
+            "backend" => "Backend".to_owned(),
+            "desktop" => "Desktop".to_owned(),
+            value => python_compatible_title(&value.replace('-', " ")),
+        };
+        options.push(json!({
+            "availability": availability,
+            "handler": handler,
+            "id": identifier,
+            "label": label,
+            "selectable": availability == "ready",
+            "status": status,
+            "version": manifest_string(manifest, "version")?,
+        }));
+    }
+    options.sort_by(|left, right| {
+        let left_id = left.get("id").and_then(Value::as_str).unwrap_or_default();
+        let right_id = right.get("id").and_then(Value::as_str).unwrap_or_default();
+        (order.get(left_id).copied().unwrap_or(order.len()), left_id).cmp(&(
+            order.get(right_id).copied().unwrap_or(order.len()),
+            right_id,
+        ))
+    });
+    if collect_direct_manifest_paths(&collection)? != paths {
+        return invalid("source platform inventory changed while reading");
+    }
+    for snapshot in snapshots {
+        let current = read_manifest_snapshot(&snapshot.path)?;
+        if !same_object_cap(&snapshot.identity, &current.identity)
+            || snapshot.bytes != current.bytes
+        {
+            return invalid("source platform inventory changed while reading");
+        }
+    }
+    Ok(options)
+}
+
+fn read_manifest_snapshot(path: &Path) -> Result<ManifestSnapshot, LifecycleError> {
+    let parent = path.parent().ok_or_else(|| {
+        LifecycleError::Invalid(format!(
+            "platform manifest has no parent: {}",
+            path.display()
+        ))
+    })?;
+    let directory = open_root_directory(parent, None, "platform package directory")?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            LifecycleError::Invalid(format!(
+                "platform manifest path is invalid: {}",
+                path.display()
+            ))
+        })?;
+    let before = directory.symlink_metadata(name)?;
+    if before.file_type().is_symlink() || !before.is_file() {
+        return invalid(format!("platform manifest is unsafe: {}", path.display()));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    configure_nofollow(&mut options);
+    let mut file = directory.open_with(name, &options)?;
+    let identity = file.metadata()?;
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(identity.len())
+            .unwrap_or(MAX_CONTRACT_JSON_BYTES)
+            .min(MAX_CONTRACT_JSON_BYTES),
+    );
+    file.by_ref()
+        .take((MAX_CONTRACT_JSON_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CONTRACT_JSON_BYTES {
+        return Err(agent_contracts::ContractError::InputTooLarge {
+            maximum: MAX_CONTRACT_JSON_BYTES,
+        }
+        .into());
+    }
+    let after_file = file.metadata()?;
+    let after_path = directory.symlink_metadata(name)?;
+    let reopened = directory.open_with(name, &options)?.metadata()?;
+    if after_path.file_type().is_symlink()
+        || !after_path.is_file()
+        || !same_object_cap(&before, &identity)
+        || !same_content_state_cap(&before, &identity)
+        || !same_object_cap(&identity, &after_file)
+        || !same_object_cap(&identity, &reopened)
+        || !same_content_state_cap(&identity, &after_file)
+        || !same_content_state_cap(&identity, &reopened)
+    {
+        return invalid("source platform inventory changed while reading");
+    }
+    Ok(ManifestSnapshot {
+        manifest: parse_json(&bytes)?,
+        bytes,
+        identity,
+        path: path.to_path_buf(),
+    })
+}
+
+fn python_compatible_title(value: &str) -> String {
+    let mut result = String::new();
+    let mut follows_cased = false;
+    for character in value.chars() {
+        if character.is_alphabetic() {
+            if follows_cased {
+                result.extend(character.to_lowercase());
+            } else {
+                result.extend(character.to_uppercase());
+            }
+            follows_cased = true;
+        } else {
+            result.push(character);
+            follows_cased = false;
+        }
+    }
+    result
 }
 
 fn load_package_catalog(
@@ -902,6 +1105,36 @@ mod tests {
             selection.compatibility_projection()["selection_reasons"]["git"],
             json!(["dependency:apple", "dependency:workflow"])
         );
+    }
+
+    #[test]
+    fn real_repository_platform_inventory_matches_source_installer_contract() {
+        let options =
+            inspect_source_platform_options(repository_platforms()).expect("inspect platforms");
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option["id"].as_str().expect("platform id"))
+                .collect::<Vec<_>>(),
+            ["apple", "android", "web", "backend", "desktop"]
+        );
+        assert_eq!(options[0]["availability"], "ready");
+        assert_eq!(options[0]["label"], "Apple / iOS");
+        assert_eq!(options[0]["handler"]["activation"], "apple-codex-v1");
+        assert_eq!(options[1]["availability"], "bootstrap-only");
+        assert_eq!(options[1]["selectable"], false);
+        assert_eq!(options[4]["availability"], "ready");
+        assert_eq!(
+            options[4]["handler"]["smoke"],
+            "desktop-installed-workflow-v1"
+        );
+    }
+
+    #[test]
+    fn fallback_platform_label_matches_python_title_boundaries() {
+        assert_eq!(python_compatible_title("foo_bar"), "Foo_Bar");
+        assert_eq!(python_compatible_title("foo.bar 2baz"), "Foo.Bar 2Baz");
+        assert_eq!(python_compatible_title("mIXed-case"), "Mixed-Case");
     }
 
     #[test]

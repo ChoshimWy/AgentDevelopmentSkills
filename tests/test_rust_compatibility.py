@@ -1137,6 +1137,59 @@ name = "one"
             self.assertEqual(result.stdout, dumps(expected.plan))
             self.assertFalse(target.exists())
 
+    @unittest.skipIf(os.name == "nt", "production POSIX bootstrap preview is not a Windows route")
+    def test_native_production_install_preview_matches_python_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "missing-target"
+            python = subprocess.run(
+                [
+                    str(ROOT / "install.sh"),
+                    "--target-root",
+                    str(target),
+                    "--platform",
+                    "apple",
+                    "--dry-run",
+                    "--json",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            native = self.run_rust(
+                "install",
+                "--source-root",
+                str(ROOT),
+                "--target-root",
+                str(target),
+                "--platform",
+                "apple",
+                "--session-launcher",
+                "/bin/echo",
+                "--dry-run",
+                "--json",
+            )
+            self.assertEqual(python.returncode, 0, python.stderr)
+            self.assertEqual(native.returncode, 0, native.stderr)
+            expected = json.loads(python.stdout)
+            actual = json.loads(native.stdout)
+            expected_activation = expected.pop("activation")
+            actual_activation = actual.pop("activation")
+            expected["engine"] = "rust"
+            self.assertEqual(actual, expected)
+            self.assertEqual(
+                set(actual_activation["managed_file_updates"]),
+                set(expected_activation["managed_file_updates"]) | {"bin/agent-skills"},
+            )
+            for field in (
+                "config_changed",
+                "managed_files_unchanged",
+                "profile_creates",
+                "profile_preserves",
+            ):
+                self.assertEqual(actual_activation[field], expected_activation[field])
+            self.assertFalse(target.exists())
+
     @unittest.skipIf(os.name == "nt", "Python source installation mode contract is POSIX-only")
     def test_native_fresh_source_install_matches_python_filesystem(self) -> None:
         def snapshot(root: Path) -> list[tuple[str, str, int, str | None]]:

@@ -657,8 +657,12 @@ class DistributionTests(unittest.TestCase):
         native_path = release / native_filename
         native_path.write_text(
             "#!/bin/sh\n"
+            "status=installed\n"
+            "for argument in \"$@\"; do\n"
+            "  if [ \"$argument\" = '--dry-run' ]; then status=planned; fi\n"
+            "done\n"
             "printf '%s\\n' \"$@\" > \"$AGENT_SKILLS_TEST_NATIVE_ARGS\"\n"
-            "printf '%s\\n' '{\"engine\":\"rust-shell\",\"status\":\"installed\"}'\n",
+            "printf '%s\\n' \"{\\\"engine\\\":\\\"rust-shell\\\",\\\"status\\\":\\\"$status\\\"}\"\n",
             encoding="utf-8",
         )
         native_data = native_path.read_bytes()
@@ -725,6 +729,34 @@ class DistributionTests(unittest.TestCase):
         self.assertIn("--platform", native_arguments)
         self.assertIn("--session-launcher", native_arguments)
         self.assertEqual(native_arguments[-1], "--json")
+
+        arguments_path.unlink()
+        dry_run_target = self.root / "rendered-native-dry-run-target"
+        dry_run = subprocess.run(
+            [
+                *command[:2],
+                "--target-root",
+                str(dry_run_target),
+                "--platform",
+                "apple",
+                "--dry-run",
+                "--json",
+            ],
+            cwd=self.root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+        self.assertEqual(
+            json.loads(dry_run.stdout),
+            {"engine": "rust-shell", "status": "planned"},
+        )
+        dry_run_arguments = arguments_path.read_text(encoding="utf-8").splitlines()
+        self.assertIn("--dry-run", dry_run_arguments)
+        self.assertIn("--session-launcher", dry_run_arguments)
+        self.assertFalse(dry_run_target.exists())
 
         arguments_path.unlink()
         native_path.write_bytes(native_data + b"tampered")

@@ -1,8 +1,9 @@
 use crate::{
     INSTALL_BACKUP_PREFIX, INSTALL_STAGE_PREFIX, LIFECYCLE_LOCK_DIRECTORY, LifecycleError,
     LifecycleLock, LifecycleWorkspace, UNINSTALL_BACKUP_PREFIX, ValidatedInstallPlan,
-    ignored_os_metadata, open_root_directory, source_bundle::SourceInstallBundle,
-    source_packages::SourcePackageSet, transaction_lock,
+    ignored_os_metadata, open_root_directory, source_activation,
+    source_bundle::SourceInstallBundle, source_packages::SourcePackageSet, staged_install,
+    transaction_lock,
 };
 use agent_engine::validate_install_plan;
 use cap_std::fs::Dir;
@@ -29,6 +30,107 @@ pub fn inspect_source_install(
     validate_source_install_inputs(bundle, package_set)?;
     inspect_fresh_target(target_root.as_ref())?;
     Ok(bundle.plan().clone())
+}
+
+/// Validate a fresh native source installation and its Apple activation without target writes.
+///
+/// The managed candidate is assembled in an ephemeral private directory so the
+/// same package/Skill and activation readers used by the mutating transaction
+/// validate the preview. The requested target remains untouched. Non-Apple
+/// selections return the same Install Plan with no activation projection.
+///
+/// # Errors
+/// Returns a fail-closed error for the same invalid source, target, or
+/// activation conflicts as the fresh installation path.
+pub fn inspect_source_install_with_activation(
+    bundle: &SourceInstallBundle,
+    package_set: &SourcePackageSet,
+    target_root: impl AsRef<Path>,
+    session_launcher: &[u8],
+) -> Result<Value, LifecycleError> {
+    validate_source_install_inputs(bundle, package_set)?;
+    let target_root = target_root.as_ref();
+    let target_snapshot = transaction_lock::LifecycleTargetSnapshot::capture(target_root)?;
+    let target_contract = target_snapshot
+        .contract_target()
+        .to_str()
+        .ok_or_else(|| LifecycleError::Invalid("lifecycle target is not UTF-8".to_owned()))?
+        .to_owned();
+    let selected = selected_platforms(bundle.plan())?;
+    if !selected.contains("apple") {
+        if let Some(target) = target_snapshot.directory() {
+            inspect_fresh_target_directory(target, false)?;
+        }
+        target_snapshot.validate()?;
+        return Ok(serde_json::json!({
+            "activation": Value::Null,
+            "install_plan": bundle.plan(),
+            "target_root": target_contract,
+        }));
+    }
+    if session_launcher.is_empty() {
+        return invalid("native Apple source install requires a frozen session launcher");
+    }
+
+    if let Some(target) = target_snapshot.directory() {
+        inspect_fresh_target_directory(target, false)?;
+    }
+    let empty_destination = if target_snapshot.directory().is_none() {
+        Some(tempfile::tempdir()?)
+    } else {
+        None
+    };
+    let temporary_destination = empty_destination
+        .as_ref()
+        .map(|directory| {
+            open_root_directory(directory.path(), None, "native install preview destination")
+        })
+        .transpose()?;
+    let destination = target_snapshot
+        .directory()
+        .or(temporary_destination.as_ref())
+        .ok_or_else(|| {
+            LifecycleError::Invalid("native install preview destination is unavailable".to_owned())
+        })?;
+
+    let temporary_stage = tempfile::tempdir()?;
+    let stage = open_root_directory(temporary_stage.path(), None, "native install preview stage")?;
+    let plan = ValidatedInstallPlan::new(bundle.plan().clone(), bundle.package_lock().clone())?;
+    staged_install::stage_layout(&stage, &plan, bundle.instructions().as_bytes())?;
+    for ((package_id, root), package) in bundle.package_roots().iter().zip(&package_set.packages) {
+        if package_id != &package.id {
+            return invalid("source package order differs from Install Bundle");
+        }
+        let package_source =
+            open_root_directory(root, None, &format!("source package {package_id}"))?;
+        staged_install::stage_package(&stage, &plan, package_id, &package_source)?;
+        for skill in &package.skills {
+            let skill_source = open_root_directory(
+                &root.join(&skill.relative_root),
+                None,
+                &format!("source Skill {}", skill.name),
+            )?;
+            staged_install::stage_skill(&stage, &plan, &skill.name, &skill_source)?;
+        }
+    }
+    staged_install::verify(&stage, &plan, staged_install::ExternalLayout::default())?;
+    let target_path = Path::new(&target_contract);
+    let activation = source_activation::SourceActivation::prepare_fresh(
+        &stage,
+        destination,
+        target_path,
+        session_launcher,
+    )?;
+    activation.revalidate_from(&stage, destination)?;
+    if let Some(target) = target_snapshot.directory() {
+        inspect_fresh_target_directory(target, false)?;
+    }
+    target_snapshot.validate()?;
+    Ok(serde_json::json!({
+        "activation": activation.preview(),
+        "install_plan": bundle.plan(),
+        "target_root": target_contract,
+    }))
 }
 
 /// Stage, verify, atomically publish, and commit a fresh native source install.
@@ -92,6 +194,7 @@ pub fn install_source_bundle_with_activation(
     Ok(serde_json::json!({
         "activation": outcome.activation,
         "install_plan": outcome.install_plan,
+        "target_root": outcome.target_root,
     }))
 }
 
@@ -99,6 +202,7 @@ pub fn install_source_bundle_with_activation(
 struct SourceInstallOutcome {
     activation: Option<Value>,
     install_plan: Value,
+    target_root: String,
 }
 
 fn install_source_bundle_with_options(
@@ -114,8 +218,16 @@ fn install_source_bundle_with_options(
     if activate_apple && session_launcher.is_none() {
         return invalid("native Apple source install requires a frozen session launcher");
     }
+    let expected_contract_target = transaction_lock::normalize_lifecycle_target(target_root)?;
+    let expected_contract_target = expected_contract_target
+        .to_str()
+        .ok_or_else(|| LifecycleError::Invalid("lifecycle target is not UTF-8".to_owned()))?
+        .to_owned();
     before_lock(target_root)?;
     let lock = LifecycleLock::acquire(target_root)?;
+    if lock.contract_target().to_str() != Some(expected_contract_target.as_str()) {
+        return invalid("lifecycle target changed while acquiring install transaction");
+    }
     let locked_target = lock.target_directory()?;
     inspect_fresh_target_directory(&locked_target, true)?;
     let plan = ValidatedInstallPlan::new(bundle.plan().clone(), bundle.package_lock().clone())?;
@@ -127,6 +239,7 @@ fn install_source_bundle_with_options(
     validate_install_plan(&installed)?;
 
     let mut workspace = LifecycleWorkspace::from_lock(lock)?;
+    let contract_target = expected_contract_target;
     workspace.stage_install_layout(&plan, bundle.instructions().as_bytes())?;
     for ((package_id, root), package) in bundle.package_roots().iter().zip(&package_set.packages) {
         if package_id != &package.id {
@@ -176,6 +289,7 @@ fn install_source_bundle_with_options(
     Ok(SourceInstallOutcome {
         activation,
         install_plan: installed,
+        target_root: contract_target,
     })
 }
 
@@ -375,6 +489,107 @@ mod tests {
     }
 
     #[test]
+    fn apple_dry_run_validates_native_activation_without_target_writes() {
+        let fixture = Fixture::new();
+        let target = fixture.target();
+        let root = repository_root();
+        let selection = resolve_source_install_selection(
+            root.join("platforms"),
+            &["apple".to_owned()],
+            &[],
+            &["codex".to_owned()],
+            false,
+        )
+        .expect("resolve Apple");
+        let packages = snapshot_source_packages(&selection).expect("snapshot Apple");
+        let bundle =
+            compile_source_install_bundle(&selection, &packages, root.join("schemas"), None)
+                .expect("compile Apple bundle");
+
+        let preview = inspect_source_install_with_activation(
+            &bundle,
+            &packages,
+            &target,
+            b"frozen native preview launcher\n",
+        )
+        .expect("preview Apple activation");
+
+        assert_eq!(preview["install_plan"], *bundle.plan());
+        assert_eq!(preview["activation"]["config_changed"], true);
+        assert!(
+            preview["activation"]["updated_files"]
+                .as_array()
+                .expect("updated activation files")
+                .iter()
+                .any(|value| value == "bin/agent-session")
+        );
+        assert!(
+            preview["activation"]["updated_files"]
+                .as_array()
+                .expect("updated activation files")
+                .iter()
+                .any(|value| value == "bin/agent-skills")
+        );
+        assert!(!target.exists(), "dry-run must not create the target");
+    }
+
+    #[test]
+    fn apple_dry_run_rejects_unmanaged_native_cli_without_mutation() {
+        let fixture = Fixture::new();
+        let target = fixture.target();
+        let root = repository_root();
+        std::fs::create_dir_all(target.join("bin")).expect("create target bin");
+        std::fs::write(target.join("bin/agent-skills"), b"unmanaged\n")
+            .expect("write unmanaged CLI");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(
+                target.join("bin/agent-skills"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("set unmanaged CLI mode");
+        }
+        let selection = resolve_source_install_selection(
+            root.join("platforms"),
+            &["apple".to_owned()],
+            &[],
+            &["codex".to_owned()],
+            false,
+        )
+        .expect("resolve Apple");
+        let packages = snapshot_source_packages(&selection).expect("snapshot Apple");
+        let bundle =
+            compile_source_install_bundle(&selection, &packages, root.join("schemas"), None)
+                .expect("compile Apple bundle");
+
+        let error = inspect_source_install_with_activation(
+            &bundle,
+            &packages,
+            &target,
+            b"frozen native preview launcher\n",
+        )
+        .expect_err("unmanaged native CLI must block preview");
+
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to overwrite unmanaged activation destination"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(target.join("bin/agent-skills")).expect("read unmanaged CLI"),
+            b"unmanaged\n"
+        );
+        assert_eq!(
+            std::fs::read_dir(target.join("bin"))
+                .expect("read target bin")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn occupied_managed_root_is_rejected_without_mutation() {
         let fixture = Fixture::new();
         let target = fixture.target();
@@ -425,6 +640,31 @@ mod tests {
         for root in MANAGED_ROOTS {
             assert!(!target.join(root).exists());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_target_is_rejected_before_the_install_transaction() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let fixture = Fixture::new();
+        let target = fixture.root.join(OsString::from_vec(vec![
+            b't', b'a', b'r', b'g', b'e', b't', 0xff,
+        ]));
+        std::fs::create_dir(&target).expect("create non-UTF-8 target");
+        let (bundle, packages) = core_bundle();
+
+        let error = install_source_bundle(&bundle, &packages, &target)
+            .expect_err("non-UTF-8 report target must fail before mutation");
+
+        assert!(error.to_string().contains("target is not UTF-8"));
+        assert_eq!(
+            std::fs::read_dir(&target)
+                .expect("read rejected target")
+                .count(),
+            0
+        );
     }
 
     #[test]

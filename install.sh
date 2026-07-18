@@ -113,6 +113,7 @@ fi
 NATIVE_PLATFORMS=()
 NATIVE_PLATFORM_KEYS='|'
 NATIVE_JSON=0
+NATIVE_DRY_RUN=0
 
 parse_native_request() {
     local argument value
@@ -121,6 +122,10 @@ parse_native_request() {
         case "$argument" in
             --json)
                 NATIVE_JSON=1
+                shift
+                ;;
+            --dry-run)
+                NATIVE_DRY_RUN=1
                 shift
                 ;;
             --target-root|--platform)
@@ -294,6 +299,9 @@ run_native_install() {
     fi
     if ((NATIVE_JSON)); then
         command+=(--json)
+    fi
+    if ((NATIVE_DRY_RUN)); then
+        command+=(--dry-run)
     fi
     AGENT_SKILLS_INSTALL_ENGINE_SELECTED=rust \
     AGENT_SKILLS_RELEASE_SHA256="$AGENT_SKILLS_EMBEDDED_SOURCE_SHA256" \

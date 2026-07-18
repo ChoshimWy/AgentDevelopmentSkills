@@ -10,9 +10,10 @@ use agent_engine::{
 };
 use agent_lifecycle::{
     LifecycleError, LifecycleWorkspace, compile_source_install_bundle, inspect_doctor_baseline,
-    inspect_doctor_report_v1, inspect_source_install, inspect_uninstall_plan,
-    install_source_bundle, install_source_bundle_with_activation, render_codex_config,
-    resolve_source_install_selection, snapshot_source_packages,
+    inspect_doctor_report_v1, inspect_source_install, inspect_source_install_with_activation,
+    inspect_source_platform_options, inspect_uninstall_plan, install_source_bundle,
+    install_source_bundle_with_activation, render_codex_config, resolve_source_install_selection,
+    snapshot_source_packages,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
@@ -136,6 +137,8 @@ enum Command {
         runtime_configs: Vec<String>,
         #[arg(long)]
         session_launcher: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
         #[arg(long)]
         json: bool,
     },
@@ -757,6 +760,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             disciplines,
             mut runtime_configs,
             session_launcher,
+            dry_run,
             json,
         } => {
             if platforms.iter().any(|platform| platform == "apple")
@@ -766,8 +770,10 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             }
             runtime_configs.sort();
             runtime_configs.dedup();
+            let platform_root = source_root.join("platforms");
+            let platform_options = inspect_source_platform_options(&platform_root)?;
             let selection = resolve_source_install_selection(
-                source_root.join("platforms"),
+                &platform_root,
                 &platforms,
                 &disciplines,
                 &runtime_configs,
@@ -788,13 +794,28 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             } else {
                 None
             };
-            let outcome = install_source_bundle_with_activation(
-                &bundle,
-                &packages,
-                &target_root,
-                launcher.as_deref().unwrap_or_default(),
-            )?;
-            let report = native_install_report(&outcome, &target_root)?;
+            if inspect_source_platform_options(&platform_root)? != platform_options {
+                return Err("source platform inventory changed while preparing install".into());
+            }
+            let outcome = if dry_run {
+                inspect_source_install_with_activation(
+                    &bundle,
+                    &packages,
+                    &target_root,
+                    launcher.as_deref().unwrap_or_default(),
+                )?
+            } else {
+                install_source_bundle_with_activation(
+                    &bundle,
+                    &packages,
+                    &target_root,
+                    launcher.as_deref().unwrap_or_default(),
+                )?
+            };
+            if dry_run && inspect_source_platform_options(&platform_root)? != platform_options {
+                return Err("source platform inventory changed while previewing install".into());
+            }
+            let report = native_install_report(&outcome, &platform_options, dry_run)?;
             if json {
                 std::io::stdout().write_all(&canonical_json(&report)?)?;
             } else {
@@ -1759,7 +1780,8 @@ fn read_frozen_executable(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Er
 
 fn native_install_report(
     outcome: &Value,
-    target_root: &Path,
+    platform_options: &[Value],
+    dry_run: bool,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let plan = outcome
         .get("install_plan")
@@ -1792,24 +1814,46 @@ fn native_install_report(
         .ok_or("native Install Plan skills are invalid")?
         .len();
     let activation = native_activation_report(outcome.get("activation").unwrap_or(&Value::Null))?;
-    Ok(json!({
+    let target_root = outcome
+        .get("target_root")
+        .and_then(Value::as_str)
+        .ok_or("native install outcome has no target root")?;
+    let mut report = json!({
         "activation": activation,
         "engine": "rust",
         "persistent_backup": false,
-        "post_install_validation": {
-            "kind": "native-lifecycle-transaction",
-            "status": "passed",
-        },
-        "preserved_system_skills": target_root.join("skills/.system").is_dir(),
-        "removed_legacy_symlinks": [],
+        "platform_options": platform_options,
         "schema_version": "1.0",
         "selected_packages": selected_packages,
         "selected_platforms": selected_platforms,
         "selected_runtime_configs": selected_runtime_configs,
         "skill_count": skill_count,
-        "status": "installed",
+        "status": if dry_run { "planned" } else { "installed" },
         "target_root": target_root,
-    }))
+    });
+    let report = report
+        .as_object_mut()
+        .ok_or("native install report must be an object")?;
+    if dry_run {
+        report.insert(
+            "would_remove_legacy_symlinks".to_owned(),
+            serde_json::json!([]),
+        );
+    } else {
+        report.insert(
+            "post_install_validation".to_owned(),
+            json!({
+                "kind": "native-lifecycle-transaction",
+                "status": "passed",
+            }),
+        );
+        report.insert(
+            "preserved_system_skills".to_owned(),
+            Value::Bool(Path::new(target_root).join("skills/.system").is_dir()),
+        );
+        report.insert("removed_legacy_symlinks".to_owned(), serde_json::json!([]));
+    }
+    Ok(Value::Object(report.clone()))
 }
 
 fn native_activation_report(activation: &Value) -> Result<Value, Box<dyn std::error::Error>> {
@@ -1826,6 +1870,10 @@ fn native_activation_report(activation: &Value) -> Result<Value, Box<dyn std::er
         .get("updated_files")
         .cloned()
         .ok_or("native activation report has no updated files")?;
+    let unchanged = record
+        .get("unchanged_files")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
     let created = record
         .get("created_profiles")
         .cloned()
@@ -1850,7 +1898,7 @@ fn native_activation_report(activation: &Value) -> Result<Value, Box<dyn std::er
     Ok(json!({
         "config_changed": record.get("config_changed").cloned().unwrap_or(Value::Bool(false)),
         "managed_file_updates": updated,
-        "managed_files_unchanged": [],
+        "managed_files_unchanged": unchanged,
         "profile_creates": created,
         "profile_preserves": preserved,
     }))
@@ -1869,6 +1917,40 @@ fn native_install_human_report(report: &Value) -> Result<String, Box<dyn std::er
         .get("target_root")
         .and_then(Value::as_str)
         .ok_or("native install target is invalid")?;
+    if report.get("status").and_then(Value::as_str) == Some("planned") {
+        let activation = report
+            .get("activation")
+            .and_then(Value::as_object)
+            .ok_or("native install preview activation is invalid")?;
+        let updates = activation
+            .get("managed_file_updates")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let unchanged = activation
+            .get("managed_files_unchanged")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let creates = activation
+            .get("profile_creates")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let preserves = activation
+            .get("profile_preserves")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let config = if activation
+            .get("config_changed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "将合并更新"
+        } else {
+            "已一致"
+        };
+        return Ok(format!(
+            "◇ {platforms} 平台安装预览\n\n变更摘要\n  ↻ config.toml：{config}\n  ↻ 受管文件：将更新 {updates} 个\n  ✓ 其余已一致：{unchanged} 个\n  ↻ Profiles：将创建 {creates} 个，保留 {preserves} 个\n  • 持久备份：不创建（按当前安装策略）\n\n未写入目标目录：{target}\n确认后移除 --dry-run，重新执行原命令。\n\n自动化场景：添加 --json 获取 canonical JSON。\n"
+        ));
+    }
     Ok(format!(
         "✓ {platforms} 平台安装完成\n\n  Rust 原生事务：passed\n  安装态验证：passed\n  目标目录：{target}\n\n自动化场景：添加 --json 获取 canonical JSON。\n"
     ))

@@ -302,6 +302,43 @@ impl SourceActivation {
         &self.scope
     }
 
+    pub(super) fn preview(&self) -> Value {
+        let (updated_files, unchanged_files) = self.candidate_changes();
+        json!({
+            "config_changed": self.config_changed(),
+            "created_profiles": self.created_profile_paths,
+            "handler": ACTIVATION_HANDLER_ID,
+            "migration": self.migration,
+            "retired_files": self.retired.iter()
+                .map(|record| record.path.clone())
+                .collect::<Vec<_>>(),
+            "unchanged_files": unchanged_files,
+            "updated_files": updated_files,
+        })
+    }
+
+    fn candidate_changes(&self) -> (Vec<String>, Vec<String>) {
+        let mut updated_files = Vec::new();
+        let mut unchanged_files = Vec::new();
+        for candidate in &self.candidates {
+            let is_unchanged = candidate.preimage.as_ref().is_some_and(|preimage| {
+                preimage.bytes == candidate.bytes && preimage.mode == candidate.mode
+            });
+            if is_unchanged {
+                unchanged_files.push(candidate.path.clone());
+            } else {
+                updated_files.push(candidate.path.clone());
+            }
+        }
+        (updated_files, unchanged_files)
+    }
+
+    fn config_changed(&self) -> bool {
+        self.config.preimage.as_ref().is_none_or(|preimage| {
+            preimage.bytes != self.config.bytes || preimage.mode != self.config.mode
+        })
+    }
+
     pub(super) fn revalidate(&self, target: &Dir) -> Result<(), LifecycleError> {
         self.revalidate_from(target, target)
     }
@@ -367,7 +404,7 @@ impl SourceActivation {
             handler_hook(&record.path, "retired-file-removed")?;
         }
 
-        let mut updated_files = Vec::new();
+        let (updated_files, unchanged_files) = self.candidate_changes();
         for candidate in &self.candidates {
             let unchanged = candidate.preimage.as_ref().is_some_and(|preimage| {
                 preimage.bytes == candidate.bytes && preimage.mode == candidate.mode
@@ -380,7 +417,6 @@ impl SourceActivation {
                     scratch_path,
                     candidate,
                 )?;
-                updated_files.push(candidate.path.clone());
                 handler_hook(&candidate.path, "managed-file-published")?;
             }
         }
@@ -392,9 +428,7 @@ impl SourceActivation {
             }
         }
 
-        let config_changed = self.config.preimage.as_ref().is_none_or(|preimage| {
-            preimage.bytes != self.config.bytes || preimage.mode != self.config.mode
-        });
+        let config_changed = self.config_changed();
         if config_changed {
             publish_activation_candidate(target, target_path, scratch, scratch_path, &self.config)?;
             handler_hook(&self.config.path, "config-published")?;
@@ -416,6 +450,7 @@ impl SourceActivation {
             "handler": ACTIVATION_HANDLER_ID,
             "migration": self.migration,
             "retired_files": retired_files,
+            "unchanged_files": unchanged_files,
             "updated_files": updated_files,
         }))
     }

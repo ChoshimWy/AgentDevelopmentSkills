@@ -3,6 +3,7 @@ use super::{
     open_absolute_directory_nofollow, open_child_directory, same_object_cap,
 };
 use cap_std::fs::Dir;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Exclusive directory lock for one installation lifecycle transaction.
@@ -257,6 +258,135 @@ pub(super) fn inspect_optional_target(target_root: &Path) -> Result<Option<Dir>,
     }
 }
 
+pub(super) struct LifecycleTargetSnapshot {
+    contract_target: PathBuf,
+    state: LifecycleTargetState,
+}
+
+enum LifecycleTargetState {
+    Existing {
+        canonical: PathBuf,
+        directory: Dir,
+        requested: PathBuf,
+    },
+    Missing {
+        ancestor: Dir,
+        ancestor_canonical: PathBuf,
+        ancestor_requested: PathBuf,
+        first_missing: OsString,
+    },
+}
+
+impl LifecycleTargetSnapshot {
+    pub(super) fn capture(target_root: &Path) -> Result<Self, LifecycleError> {
+        reject_unexpanded_home(target_root)?;
+        let requested = absolute_path(target_root)?;
+        let mut existing = requested.as_path();
+        let mut missing = Vec::new();
+        loop {
+            match std::fs::symlink_metadata(existing) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    return invalid(format!(
+                        "lifecycle target must not traverse a symlink or non-directory: {}",
+                        requested.display()
+                    ));
+                }
+                Ok(_) => {
+                    let directory = open_absolute_directory_nofollow(existing)?;
+                    let canonical = canonical_path_for_directory(existing, &directory)?;
+                    if missing.is_empty() {
+                        let contract_target =
+                            contract_path_for_directory(&requested, &canonical, &directory);
+                        return Ok(Self {
+                            contract_target,
+                            state: LifecycleTargetState::Existing {
+                                canonical,
+                                directory,
+                                requested,
+                            },
+                        });
+                    }
+                    let first_missing = missing.last().cloned().ok_or_else(|| {
+                        LifecycleError::Invalid("lifecycle target is invalid".to_owned())
+                    })?;
+                    let mut contract_target = canonical.clone();
+                    for component in missing.iter().rev() {
+                        contract_target.push(component);
+                    }
+                    #[cfg(windows)]
+                    if !has_explicit_verbatim_prefix(&requested) {
+                        contract_target = strip_verbatim_prefix(&contract_target);
+                    }
+                    return Ok(Self {
+                        contract_target,
+                        state: LifecycleTargetState::Missing {
+                            ancestor: directory,
+                            ancestor_canonical: canonical,
+                            ancestor_requested: existing.to_path_buf(),
+                            first_missing,
+                        },
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let component = existing.file_name().ok_or_else(|| {
+                        LifecycleError::Invalid("lifecycle target is invalid".to_owned())
+                    })?;
+                    missing.push(component.to_owned());
+                    existing = existing.parent().ok_or_else(|| {
+                        LifecycleError::Invalid("lifecycle target is invalid".to_owned())
+                    })?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    pub(super) fn directory(&self) -> Option<&Dir> {
+        match &self.state {
+            LifecycleTargetState::Existing { directory, .. } => Some(directory),
+            LifecycleTargetState::Missing { .. } => None,
+        }
+    }
+
+    pub(super) fn contract_target(&self) -> &Path {
+        &self.contract_target
+    }
+
+    pub(super) fn validate(&self) -> Result<(), LifecycleError> {
+        match &self.state {
+            LifecycleTargetState::Existing {
+                canonical,
+                directory,
+                requested,
+            } => {
+                let current = canonical_path_for_directory(requested, directory)?;
+                if &current != canonical {
+                    return invalid("lifecycle target changed while previewing install");
+                }
+            }
+            LifecycleTargetState::Missing {
+                ancestor,
+                ancestor_canonical,
+                ancestor_requested,
+                first_missing,
+            } => {
+                let current = canonical_path_for_directory(ancestor_requested, ancestor)?;
+                if &current != ancestor_canonical {
+                    return invalid("lifecycle target changed while previewing install");
+                }
+                match ancestor.symlink_metadata(first_missing) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => {
+                        return invalid("lifecycle target appeared while previewing install");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Drop for LifecycleLock {
     fn drop(&mut self) {
         if self.active && self.validate().is_ok() {
@@ -285,6 +415,55 @@ fn create_lock_directory(target: &Dir) -> std::io::Result<()> {
     #[cfg(any(not(unix), target_os = "wasi"))]
     {
         target.create_dir(LIFECYCLE_LOCK_DIRECTORY)
+    }
+}
+
+/// Resolve the Python-compatible absolute spelling for an existing or missing lifecycle target.
+///
+/// Existing ancestors must be real directories. Missing suffix components are
+/// appended to the canonical nearest existing ancestor without creating them.
+///
+/// # Errors
+/// Returns a fail-closed error for unexpanded home shorthand, symlink or
+/// non-directory traversal, invalid roots, or canonicalization failure.
+pub fn normalize_lifecycle_target(
+    target_root: impl AsRef<Path>,
+) -> Result<PathBuf, LifecycleError> {
+    reject_unexpanded_home(target_root.as_ref())?;
+    let requested = absolute_path(target_root.as_ref())?;
+    let mut existing = requested.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return invalid(format!(
+                    "lifecycle target must not traverse a symlink or non-directory: {}",
+                    requested.display()
+                ));
+            }
+            Ok(_) => {
+                open_absolute_directory_nofollow(existing)?;
+                let mut normalized = std::fs::canonicalize(existing)?;
+                for component in missing.iter().rev() {
+                    normalized.push(component);
+                }
+                #[cfg(windows)]
+                if !has_explicit_verbatim_prefix(&requested) {
+                    normalized = strip_verbatim_prefix(&normalized);
+                }
+                return Ok(normalized);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let component = existing.file_name().ok_or_else(|| {
+                    LifecycleError::Invalid("lifecycle target is invalid".to_owned())
+                })?;
+                missing.push(component.to_owned());
+                existing = existing.parent().ok_or_else(|| {
+                    LifecycleError::Invalid("lifecycle target is invalid".to_owned())
+                })?;
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 
@@ -505,6 +684,61 @@ mod tests {
         drop(explicit);
 
         std::fs::remove_dir_all(&root).expect("remove Windows contract target");
+    }
+
+    #[test]
+    fn normalized_missing_target_uses_the_canonical_existing_parent_without_writes() {
+        let root = temporary_path("normalized-target");
+        std::fs::create_dir(&root).expect("create normalized target parent");
+        let requested = root.join("missing/nested");
+        let normalized =
+            normalize_lifecycle_target(&requested).expect("normalize missing lifecycle target");
+        assert_eq!(
+            normalized,
+            std::fs::canonicalize(&root)
+                .expect("canonical target parent")
+                .join("missing/nested")
+        );
+        assert!(!requested.exists());
+        std::fs::remove_dir_all(&root).expect("remove normalized target parent");
+    }
+
+    #[test]
+    fn missing_target_snapshot_rejects_a_concurrent_path_appearance() {
+        let root = temporary_path("missing-target-snapshot");
+        std::fs::create_dir(&root).expect("create snapshot parent");
+        let requested = root.join("missing/nested");
+        let snapshot =
+            LifecycleTargetSnapshot::capture(&requested).expect("capture missing target");
+        std::fs::create_dir(root.join("missing")).expect("create concurrent target prefix");
+        let error = snapshot
+            .validate()
+            .expect_err("appeared target must invalidate snapshot");
+        assert!(
+            error
+                .to_string()
+                .contains("appeared while previewing install")
+        );
+        drop(snapshot);
+        std::fs::remove_dir_all(&root).expect("remove snapshot parent");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_target_snapshot_rejects_a_concurrent_path_replacement() {
+        let root = temporary_path("existing-target-snapshot");
+        let requested = root.join("target");
+        std::fs::create_dir_all(&requested).expect("create snapshot target");
+        let snapshot =
+            LifecycleTargetSnapshot::capture(&requested).expect("capture existing target");
+        std::fs::rename(&requested, root.join("replaced")).expect("rename captured target");
+        std::fs::create_dir(&requested).expect("replace captured target");
+        let error = snapshot
+            .validate()
+            .expect_err("replaced target must invalidate snapshot");
+        assert!(error.to_string().contains("changed while resolving"));
+        drop(snapshot);
+        std::fs::remove_dir_all(&root).expect("remove snapshot root");
     }
 
     #[cfg(unix)]
