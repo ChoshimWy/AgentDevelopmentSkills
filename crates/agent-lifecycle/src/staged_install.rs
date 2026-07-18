@@ -1985,6 +1985,302 @@ mod tests {
     }
 
     #[test]
+    fn published_source_deactivation_commits_only_owned_external_changes() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        let expected_hash = bytes_sha256(b"external tool\n");
+        write_activation_fixture(&fixture, &expected_hash);
+        let config = format!(
+            "# user config\nmodel_instructions_file = {:?}\nmodel = \"gpt\"\n[features]\nfast = true\n",
+            target
+                .canonicalize()
+                .expect("canonical target")
+                .join("AGENTS.md")
+                .to_string_lossy()
+        );
+        std::fs::write(target.join("config.toml"), &config).expect("write config");
+        set_mode(&target.join("config.toml"), 0o640);
+        let paths = vec!["bin/tool".to_owned(), "config.toml".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage Activation state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage deactivation rollback point");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let result = published
+            .apply_source_deactivation()
+            .expect("apply trusted source deactivation");
+        assert_eq!(
+            result,
+            json!({
+                "config_action": "removed-managed-instructions-path",
+                "handler": "core.source-deactivation.apple-codex-v1",
+                "removed_files": ["bin/tool"],
+            })
+        );
+        assert!(!target.join("bin/tool").exists());
+        assert!(!target.join(".agent-skills/activation-lock.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(target.join("config.toml")).expect("read deactivated config"),
+            "# user config\nmodel = \"gpt\"\n[features]\nfast = true\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(target.join("config.toml"))
+                    .expect("config metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o640
+            );
+        }
+        published
+            .verify(&fixture.token)
+            .expect("verify post-deactivation publication");
+        published
+            .commit(&fixture.token)
+            .expect("commit source deactivation");
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn published_source_deactivation_rolls_back_external_and_activation_state() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        let expected_hash = bytes_sha256(b"external tool\n");
+        let activation = write_activation_fixture(&fixture, &expected_hash);
+        let config = format!(
+            "model_instructions_file = {:?}\nmodel = \"gpt\"\n",
+            target
+                .canonicalize()
+                .expect("canonical target")
+                .join("AGENTS.md")
+                .to_string_lossy()
+        );
+        std::fs::write(target.join("config.toml"), &config).expect("write config");
+        set_mode(&target.join("config.toml"), MANAGED_FILE_MODE);
+        let paths = vec!["bin/tool".to_owned(), "config.toml".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage Activation state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage deactivation rollback point");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        published
+            .apply_source_deactivation()
+            .expect("apply trusted source deactivation");
+        published
+            .rollback()
+            .expect("roll back trusted source deactivation");
+        assert_eq!(
+            std::fs::read(target.join("bin/tool")).expect("read restored activated tool"),
+            b"external tool\n"
+        );
+        assert_eq!(
+            std::fs::read(target.join(".agent-skills/activation-lock.json"))
+                .expect("read restored Activation Lock"),
+            activation
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("config.toml")).expect("read restored config"),
+            config
+        );
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn failed_mid_source_deactivation_restores_every_external_preimage() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        let expected_hash = bytes_sha256(b"external tool\n");
+        let activation = write_activation_fixture(&fixture, &expected_hash);
+        let config = format!(
+            "model_instructions_file = {:?}\nmodel = \"gpt\"\n",
+            target
+                .canonicalize()
+                .expect("canonical target")
+                .join("AGENTS.md")
+                .to_string_lossy()
+        );
+        std::fs::write(target.join("config.toml"), &config).expect("write config");
+        set_mode(&target.join("config.toml"), MANAGED_FILE_MODE);
+        let paths = vec!["bin/tool".to_owned(), "config.toml".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage Activation state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage deactivation rollback point");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let error = published
+            .apply_source_deactivation_with_test_hook(|path, phase| {
+                assert_eq!(path, "bin/tool");
+                assert_eq!(phase, "owned-file-removed");
+                Err(LifecycleError::Invalid(
+                    "injected failure after owned-file removal".to_owned(),
+                ))
+            })
+            .expect_err("mid-handler failure must be recoverable");
+        assert!(
+            error
+                .to_string()
+                .contains("injected failure after owned-file removal"),
+            "{error}"
+        );
+        assert!(!target.join("bin/tool").exists());
+        assert!(target.join(".agent-skills/activation-lock.json").is_file());
+        published
+            .rollback()
+            .expect("roll back partial trusted source deactivation");
+        assert_eq!(
+            std::fs::read(target.join("bin/tool")).expect("read restored activated tool"),
+            b"external tool\n"
+        );
+        assert_eq!(
+            std::fs::read(target.join(".agent-skills/activation-lock.json"))
+                .expect("read restored Activation Lock"),
+            activation
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("config.toml")).expect("read restored config"),
+            config
+        );
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn failed_config_replacement_cleans_private_temporary_before_rollback() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        let expected_hash = bytes_sha256(b"external tool\n");
+        let activation = write_activation_fixture(&fixture, &expected_hash);
+        let config = format!(
+            "model_instructions_file = {:?}\nmodel = \"gpt\"\n",
+            target
+                .canonicalize()
+                .expect("canonical target")
+                .join("AGENTS.md")
+                .to_string_lossy()
+        );
+        std::fs::write(target.join("config.toml"), &config).expect("write config");
+        set_mode(&target.join("config.toml"), MANAGED_FILE_MODE);
+        let paths = vec!["bin/tool".to_owned(), "config.toml".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage Activation state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage deactivation rollback point");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let error = published
+            .apply_source_deactivation_with_test_hook(|_, phase| {
+                if phase == "config-temporary-prepared" {
+                    return Err(LifecycleError::Invalid(
+                        "injected config publication failure".to_owned(),
+                    ));
+                }
+                Ok(())
+            })
+            .expect_err("config publication failure must be recoverable");
+        assert!(
+            error
+                .to_string()
+                .contains("injected config publication failure"),
+            "{error}"
+        );
+        let lock = target.join(LIFECYCLE_LOCK_DIRECTORY);
+        assert_eq!(
+            std::fs::read_dir(&lock)
+                .expect("read private lifecycle scratch")
+                .count(),
+            0
+        );
+        published
+            .rollback()
+            .expect("roll back config publication failure");
+        assert_eq!(
+            std::fs::read(target.join("bin/tool")).expect("read restored activated tool"),
+            b"external tool\n"
+        );
+        assert_eq!(
+            std::fs::read(target.join(".agent-skills/activation-lock.json"))
+                .expect("read restored Activation Lock"),
+            activation
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("config.toml")).expect("read restored config"),
+            config
+        );
+        assert!(!lock.exists());
+        drop(source);
+    }
+
+    #[test]
+    fn published_source_deactivation_requires_the_exact_frozen_scope() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let target = fixture.target();
+        let expected_hash = bytes_sha256(b"external tool\n");
+        write_activation_fixture(&fixture, &expected_hash);
+        std::fs::write(target.join("config.toml"), "model = \"gpt\"\n").expect("write config");
+        set_mode(&target.join("config.toml"), MANAGED_FILE_MODE);
+        let expanded_paths = vec![
+            "bin/tool".to_owned(),
+            "config.toml".to_owned(),
+            "other".to_owned(),
+        ];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage Activation state");
+        workspace
+            .stage_rollback_point(&fixture.token, &expanded_paths)
+            .expect("stage expanded deactivation scope");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let error = published
+            .apply_source_deactivation()
+            .expect_err("incomplete rollback scope must fail");
+        assert!(
+            error.to_string().contains("external handler scope differs"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(target.join("bin/tool")).expect("read untouched activated tool"),
+            b"external tool\n"
+        );
+        assert!(target.join(".agent-skills/activation-lock.json").is_file());
+        published
+            .rollback()
+            .expect("roll back untouched publication");
+        drop(source);
+    }
+
+    #[test]
     fn dropping_failed_external_mutation_restores_its_preimage() {
         let fixture = Fixture::new();
         materialize_current_install(&fixture);

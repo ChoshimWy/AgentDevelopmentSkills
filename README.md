@@ -257,8 +257,14 @@ held directory handles, so replaced junction ancestors cannot redirect nested
 external operations. The lifecycle lock coordinates lifecycle commands, not
 arbitrary same-user file handles: callers must keep the approved external
 scope quiescent and must not retain writable handles to those entries during a
-transaction. Trusted source-activation/deactivation handlers, uninstall, and
-production command routing remain later lifecycle slices.
+transaction. The first trusted handler, source deactivation, now derives its
+exact scope from the validated Activation Lock, requires an exact frozen
+rollback scope, validates every owned preimage, removes only owned files and
+the managed root-level `model_instructions_file`, and permits commit only after
+the Activation Lock is absent and the remaining installation is revalidated.
+Its config rewrite uses TOML 1.0 parsing while preserving every unrelated byte
+and the original POSIX mode. Source activation, uninstall, and production
+command routing remain later lifecycle slices.
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
 holds directory capabilities and opens contract files without following

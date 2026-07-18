@@ -11,9 +11,10 @@
 //! roots recoverable until explicit commit or rollback. After managed-root
 //! recovery, its internal mutation boundary restores validated external
 //! rollback preimages through a private quarantine. The approved external scope
-//! must remain quiescent without concurrently writable handles. Trusted
-//! post-install handler execution, uninstall, and production command routing
-//! remain outside this slice.
+//! must remain quiescent without concurrently writable handles. The first
+//! trusted handler performs source deactivation with exact rollback-scope and
+//! Activation ownership checks. Source activation, uninstall, and production
+//! command routing remain outside this slice.
 
 mod doctor_report;
 mod external_stage;
@@ -22,6 +23,7 @@ mod packages;
 mod post_install;
 mod rollback;
 mod rollback_stage;
+mod source_activation;
 mod staged_install;
 mod staged_tree;
 mod transaction_lock;

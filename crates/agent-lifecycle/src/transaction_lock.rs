@@ -98,6 +98,17 @@ impl LifecycleLock {
         Ok(self.target_directory.try_clone()?)
     }
 
+    pub(super) fn directory(&self) -> Result<Dir, LifecycleError> {
+        self.validate()?;
+        Ok(self
+            .lock_directory
+            .as_ref()
+            .ok_or_else(|| {
+                LifecycleError::Invalid("lifecycle lock token is no longer active".into())
+            })?
+            .try_clone()?)
+    }
+
     /// Prove that the lock directory still denotes the acquired object.
     ///
     /// # Errors

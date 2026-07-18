@@ -1115,6 +1115,7 @@ fn set_directory_mode(directory: &Dir, mode: u32) -> Result<(), LifecycleError> 
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn set_directory_mode(_directory: &Dir, _mode: u32) -> Result<(), LifecycleError> {
     Ok(())
 }
@@ -1176,15 +1177,30 @@ fn validate_activation_snapshot(
             .and_then(Value::as_str)
             .ok_or_else(|| invalid_error("rollback point activation lock record is invalid"))?;
         let external = external_by_path.get(path).copied();
-        if external.is_none_or(|entry| {
-            entry.get("state").and_then(Value::as_str) != Some("file")
-                || entry.get("mode") != record_object.get("mode")
-                || entry.get("sha256") != record_object.get("sha256")
-        }) {
+        if external.is_none_or(|entry| !activation_snapshot_matches(entry, record_object)) {
             return invalid("rollback point activation lock differs from external snapshot");
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn activation_snapshot_matches(
+    external: &Map<String, Value>,
+    activation: &Map<String, Value>,
+) -> bool {
+    external.get("state").and_then(Value::as_str) == Some("file")
+        && external.get("mode") == activation.get("mode")
+        && external.get("sha256") == activation.get("sha256")
+}
+
+#[cfg(not(unix))]
+fn activation_snapshot_matches(
+    external: &Map<String, Value>,
+    activation: &Map<String, Value>,
+) -> bool {
+    external.get("state").and_then(Value::as_str) == Some("file")
+        && external.get("sha256") == activation.get("sha256")
 }
 
 fn validate_skills(skills_root: &Dir, install_lock: &Value) -> Result<(), LifecycleError> {

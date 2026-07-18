@@ -152,8 +152,14 @@ contains:
   paths from held directory handles so junction-ancestor replacement cannot
   redirect nested operations. The lifecycle lock coordinates lifecycle
   commands only; the approved external scope must remain quiescent with no
-  concurrently writable handles. Trusted source activation/deactivation
-  execution, uninstall, and production command routing are not implemented yet.
+  concurrently writable handles. The first trusted handler now implements
+  source deactivation inside the same guard. It derives the exact owned-file
+  plus `config.toml` scope from the validated Activation Lock, requires exact
+  equality with the frozen rollback scope, validates all preimages, performs a
+  byte-preserving TOML 1.0 removal of only the managed root assignment, removes
+  the Activation Lock last, and supports both guarded commit and full external
+  rollback. Source activation, uninstall, and production command routing are
+  not implemented yet.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit

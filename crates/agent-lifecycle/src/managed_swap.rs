@@ -1,8 +1,10 @@
 use super::{
     LifecycleError, LifecycleWorkspace, MANAGED_DIRECTORY_MODE, MANAGED_FILE_MODE,
-    ValidatedInstallPlan, open_child_directory, open_child_file, same_object_cap,
+    ValidatedInstallPlan, external_stage, open_child_directory, open_child_file, same_object_cap,
+    source_activation,
 };
 use cap_std::fs::{Dir, Metadata};
+use serde_json::Value;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -51,6 +53,13 @@ struct RootMove {
     staged_identity: Metadata,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExternalMutationState {
+    Preserved,
+    InProgress,
+    ActivationRemoved,
+}
+
 /// A published managed installation whose previous roots remain recoverable.
 ///
 /// The guard keeps the lifecycle lock and recovery backup alive across final
@@ -61,6 +70,7 @@ struct RootMove {
 #[must_use = "a published install must be committed or rolled back"]
 pub struct PublishedInstall {
     external_mutation_started: bool,
+    external_mutation_state: ExternalMutationState,
     plan: ValidatedInstallPlan,
     roots: Vec<RootMove>,
     workspace: Option<LifecycleWorkspace>,
@@ -144,6 +154,7 @@ impl LifecycleWorkspace {
         match result {
             Ok(()) => Ok(PublishedInstall {
                 external_mutation_started: false,
+                external_mutation_state: ExternalMutationState::Preserved,
                 plan: plan.clone(),
                 roots,
                 workspace: Some(self),
@@ -287,8 +298,59 @@ impl PublishedInstall {
     pub fn verify(&self, plan: &ValidatedInstallPlan) -> Result<(), LifecycleError> {
         let workspace = self.workspace()?;
         verify_published_roots(workspace, &self.roots)?;
-        workspace.verify_published_install(plan)?;
+        self.verify_published_state(workspace, plan)?;
         verify_published_roots(workspace, &self.roots)
+    }
+
+    /// Run the trusted source-deactivation handler inside this transaction.
+    ///
+    /// The handler derives its exact scope from the validated Activation Lock
+    /// and requires that scope to match the frozen rollback point before the
+    /// first external write. It validates every owned file and `config.toml`
+    /// preimage, removes only Activation-owned files, removes only the managed
+    /// root-level `model_instructions_file` assignment, and finally removes
+    /// the Activation Lock. Any error leaves this guard recoverable; dropping
+    /// or rolling it back restores the frozen external and managed preimages.
+    ///
+    /// # Errors
+    /// Fails when the handler is repeated, rollback scope is incomplete,
+    /// Activation ownership or config semantics drift, or a write cannot be
+    /// completed safely.
+    pub fn apply_source_deactivation(&mut self) -> Result<Value, LifecycleError> {
+        self.apply_source_deactivation_with(|_, _| Ok(()))
+    }
+
+    fn apply_source_deactivation_with(
+        &mut self,
+        handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<Value, LifecycleError> {
+        if self.external_mutation_state != ExternalMutationState::Preserved {
+            return invalid("external mutation has already started");
+        }
+        let (prepared, target, scratch) = {
+            let workspace = self.workspace()?;
+            workspace.verify_published_install(&self.plan)?;
+            let target = workspace.target_directory()?;
+            let scratch = workspace.handler_scratch_directory()?;
+            let prepared =
+                source_activation::SourceDeactivation::prepare(&target, workspace.target())?;
+            workspace.require_rollback_external_paths(prepared.scope())?;
+            prepared.revalidate(&target)?;
+            (prepared, target, scratch)
+        };
+        self.external_mutation_started = true;
+        self.external_mutation_state = ExternalMutationState::InProgress;
+        let result = prepared.apply_with_hook(&target, &scratch, handler_hook)?;
+        self.external_mutation_state = ExternalMutationState::ActivationRemoved;
+        Ok(result)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_source_deactivation_with_test_hook(
+        &mut self,
+        handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<Value, LifecycleError> {
+        self.apply_source_deactivation_with(handler_hook)
     }
 
     /// Finalize the published installation and discard the recovery backup.
@@ -302,7 +364,7 @@ impl PublishedInstall {
     pub fn commit(mut self, plan: &ValidatedInstallPlan) -> Result<(), LifecycleError> {
         let workspace = self.take_workspace()?;
         if let Err(error) = verify_published_roots(&workspace, &self.roots)
-            .and_then(|()| workspace.verify_published_install(plan))
+            .and_then(|()| self.verify_published_state(&workspace, plan))
             .and_then(|()| verify_published_roots(&workspace, &self.roots))
         {
             return Err(abort_workspace(
@@ -371,6 +433,21 @@ impl PublishedInstall {
             .ok_or_else(|| LifecycleError::Invalid("published install is inactive".to_owned()))
     }
 
+    fn verify_published_state(
+        &self,
+        workspace: &LifecycleWorkspace,
+        plan: &ValidatedInstallPlan,
+    ) -> Result<(), LifecycleError> {
+        match self.external_mutation_state {
+            ExternalMutationState::Preserved => workspace.verify_published_install(plan),
+            ExternalMutationState::ActivationRemoved => workspace
+                .verify_published_after_handler(plan, external_stage::PublishedActivation::Absent),
+            ExternalMutationState::InProgress => {
+                invalid("external handler did not complete successfully")
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn run_external_mutation_with<T>(
         &mut self,
@@ -388,7 +465,10 @@ impl PublishedInstall {
             return invalid("external mutation has already started");
         }
         self.external_mutation_started = true;
-        mutation(&target)
+        self.external_mutation_state = ExternalMutationState::InProgress;
+        let result = mutation(&target)?;
+        self.external_mutation_state = ExternalMutationState::Preserved;
+        Ok(result)
     }
 
     fn take_workspace(&mut self) -> Result<LifecycleWorkspace, LifecycleError> {
@@ -484,7 +564,7 @@ fn recover_transaction_with_hook(
 ) -> Vec<String> {
     if external_mutation_started
         && let Err(error) = verify_published_roots(workspace, roots)
-            .and_then(|()| workspace.verify_published_install(plan))
+            .and_then(|()| workspace.verify_published_during_handler(plan))
             .and_then(|()| verify_published_roots(workspace, roots))
     {
         return vec![format!(
@@ -552,7 +632,12 @@ fn recover_roots_with_hook(
     if complete_backup && let Err(error) = workspace.verify_recovery_backup() {
         errors.push(format!("verify recovery backup before restore: {error}"));
         if fully_published {
-            errors.extend(reinstate_after_failed_recovery(workspace, roots, plan));
+            errors.extend(reinstate_after_failed_recovery(
+                workspace,
+                roots,
+                plan,
+                restore_external,
+            ));
         }
         return errors;
     }
@@ -574,7 +659,7 @@ fn recover_roots_with_hook(
     }
 
     let primary = errors.join("; ");
-    let reinstate_errors = reinstate_published_roots(workspace, roots, plan);
+    let reinstate_errors = reinstate_published_roots(workspace, roots, plan, restore_external);
     if reinstate_errors.is_empty() {
         vec![format!(
             "{primary}; original publication was reinstated after failed recovery"
@@ -711,9 +796,11 @@ fn reinstate_after_failed_recovery(
     workspace: &LifecycleWorkspace,
     roots: &mut [RootMove],
     plan: &ValidatedInstallPlan,
+    external_mutation_started: bool,
 ) -> Vec<String> {
     let mut errors = Vec::new();
-    let reinstate_errors = reinstate_published_roots(workspace, roots, plan);
+    let reinstate_errors =
+        reinstate_published_roots(workspace, roots, plan, external_mutation_started);
     if reinstate_errors.is_empty() {
         errors.push("original publication was reinstated after failed recovery".to_owned());
     } else {
@@ -726,8 +813,14 @@ fn reinstate_published_roots(
     workspace: &LifecycleWorkspace,
     roots: &mut [RootMove],
     plan: &ValidatedInstallPlan,
+    external_mutation_started: bool,
 ) -> Vec<String> {
-    if let Err(error) = workspace.verify_reinstatement_stage(plan) {
+    let verified = if external_mutation_started {
+        workspace.verify_reinstatement_stage_during_handler(plan)
+    } else {
+        workspace.verify_reinstatement_stage(plan)
+    };
+    if let Err(error) = verified {
         return vec![format!(
             "verify staged publication before failed-recovery reinstatement: {error}"
         )];
@@ -737,7 +830,8 @@ fn reinstate_published_roots(
         errors.extend(republish_staged_roots(workspace, roots));
     }
     if errors.is_empty()
-        && let Err(error) = verify_reinstated_publication(workspace, roots, plan)
+        && let Err(error) =
+            verify_reinstated_publication(workspace, roots, plan, external_mutation_started)
     {
         errors.push(format!(
             "verify reinstated publication after failed recovery: {error}"
@@ -862,6 +956,7 @@ fn verify_reinstated_publication(
     workspace: &LifecycleWorkspace,
     roots: &[RootMove],
     plan: &ValidatedInstallPlan,
+    external_mutation_started: bool,
 ) -> Result<(), LifecycleError> {
     workspace.validate()?;
     for moved in roots {
@@ -888,7 +983,11 @@ fn verify_reinstated_publication(
             )?;
         }
     }
-    workspace.verify_published_install(plan)?;
+    if external_mutation_started {
+        workspace.verify_published_during_handler(plan)?;
+    } else {
+        workspace.verify_published_install(plan)?;
+    }
     workspace.validate()
 }
 

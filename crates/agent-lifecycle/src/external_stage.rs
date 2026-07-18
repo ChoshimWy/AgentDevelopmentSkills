@@ -45,6 +45,12 @@ struct TreeEntry {
     path: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PublishedActivation {
+    Preserved,
+    Absent,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum EntryKind {
     Directory,
@@ -118,14 +124,65 @@ pub(super) fn verify_published(
     target: &Dir,
     expected: &ExternalStageSnapshot,
 ) -> Result<(), LifecycleError> {
-    if inspect_staged_activation(target)? != expected.activation {
-        return invalid("published Activation Lock differs from preserved state");
+    verify_published_after_handler(target, expected, PublishedActivation::Preserved)
+}
+
+pub(super) fn verify_published_after_handler(
+    target: &Dir,
+    expected: &ExternalStageSnapshot,
+    activation: PublishedActivation,
+) -> Result<(), LifecycleError> {
+    let current_activation = inspect_staged_activation(target)?;
+    match activation {
+        PublishedActivation::Preserved if current_activation != expected.activation => {
+            return invalid("published Activation Lock differs from preserved state");
+        }
+        PublishedActivation::Absent if current_activation.is_some() => {
+            return invalid("published Activation Lock remains after handler execution");
+        }
+        PublishedActivation::Preserved | PublishedActivation::Absent => {}
     }
     if inspect_staged_system_skills(target)? != expected.system_skills {
         return invalid("published .system Skills differ from preserved state");
     }
-    check_activation(target)?;
+    if activation == PublishedActivation::Preserved {
+        let status = check_activation(target)?;
+        if expected.activation.is_some()
+            && status.get("managed").and_then(serde_json::Value::as_bool) != Some(true)
+        {
+            return invalid("published Activation Lock is missing after handler execution");
+        }
+    }
     Ok(())
+}
+
+pub(super) fn verify_published_during_handler(
+    target: &Dir,
+    expected: &ExternalStageSnapshot,
+) -> Result<bool, LifecycleError> {
+    verify_during_handler(target, expected)
+}
+
+pub(super) fn verify_staged_during_handler(
+    stage: &Dir,
+    expected: &ExternalStageSnapshot,
+) -> Result<bool, LifecycleError> {
+    verify_during_handler(stage, expected)
+}
+
+fn verify_during_handler(
+    root: &Dir,
+    expected: &ExternalStageSnapshot,
+) -> Result<bool, LifecycleError> {
+    let activation = inspect_staged_activation(root)?;
+    let system = inspect_staged_system_skills(root)?;
+    if system != expected.system_skills {
+        return invalid("published .system Skills differ from preserved state");
+    }
+    if activation.is_some() && activation != expected.activation {
+        return invalid("published Activation Lock changed during handler execution");
+    }
+    Ok(activation.is_some())
 }
 
 fn inspect_activation(target: &Dir) -> Result<Option<Vec<u8>>, LifecycleError> {

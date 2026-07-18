@@ -25,7 +25,8 @@ static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// installation. Managed roots can then be published through an identity-bound
 /// [`super::PublishedInstall`] guard. That guard owns external rollback
 /// restoration once its internal mutation boundary starts; trusted handler
-/// execution and production install/rollback commands are not routed through it.
+/// execution is currently limited to source deactivation, while production
+/// install/rollback commands are not routed through it.
 #[must_use = "the lifecycle workspace must be held for the full transaction"]
 pub struct LifecycleWorkspace {
     backup: WorkspaceEntry,
@@ -354,6 +355,82 @@ impl LifecycleWorkspace {
         self.validate()
     }
 
+    pub(super) fn verify_published_after_handler(
+        &self,
+        plan: &ValidatedInstallPlan,
+        activation: external_stage::PublishedActivation,
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        self.validate_staged_install_identity(plan)?;
+        let external = self.staged_external_state.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid(
+                "lifecycle workspace external state has not been staged".to_owned(),
+            )
+        })?;
+        let mut layout = external.layout();
+        layout.activation = activation != external_stage::PublishedActivation::Absent;
+        if self.staged_rollback_point.is_some() {
+            layout.rollback_point = true;
+        }
+        staged_install::verify_published(&self.target_directory, plan, layout)?;
+        external_stage::verify_published_after_handler(
+            &self.target_directory,
+            external,
+            activation,
+        )?;
+        if let Some(rollback) = self.staged_rollback_point.as_ref() {
+            rollback_stage::verify_published(&self.target_directory, rollback)?;
+        }
+        self.validate()
+    }
+
+    pub(super) fn verify_published_during_handler(
+        &self,
+        plan: &ValidatedInstallPlan,
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        self.validate_staged_install_identity(plan)?;
+        let external = self.staged_external_state.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid(
+                "lifecycle workspace external state has not been staged".to_owned(),
+            )
+        })?;
+        let mut layout = external.layout();
+        layout.activation =
+            external_stage::verify_published_during_handler(&self.target_directory, external)?;
+        if self.staged_rollback_point.is_some() {
+            layout.rollback_point = true;
+        }
+        staged_install::verify_published(&self.target_directory, plan, layout)?;
+        if let Some(rollback) = self.staged_rollback_point.as_ref() {
+            rollback_stage::verify_published(&self.target_directory, rollback)?;
+        }
+        self.validate()
+    }
+
+    pub(super) fn target_directory(&self) -> Result<Dir, LifecycleError> {
+        self.validate()?;
+        Ok(self.target_directory.try_clone()?)
+    }
+
+    pub(super) fn require_rollback_external_paths(
+        &self,
+        expected: &[String],
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        if self.staged_rollback_point.is_none() {
+            return invalid("external mutation requires a verified rollback point");
+        }
+        if self.rollback_external_paths != expected {
+            return invalid("external handler scope differs from the frozen rollback point");
+        }
+        let rollback = self.staged_rollback_point.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid("lifecycle workspace has no frozen rollback point".to_owned())
+        })?;
+        rollback_stage::verify_published(&self.target_directory, rollback)?;
+        self.validate()
+    }
+
     pub(super) fn verify_reinstatement_stage(
         &self,
         plan: &ValidatedInstallPlan,
@@ -371,6 +448,30 @@ impl LifecycleWorkspace {
         }
         staged_install::verify(self.stage.directory()?, plan, layout)?;
         external_stage::verify_staged(self.stage.directory()?, external)?;
+        if let Some(rollback) = self.staged_rollback_point.as_ref() {
+            rollback_stage::verify_staged(self.stage.directory()?, rollback)?;
+        }
+        self.validate()
+    }
+
+    pub(super) fn verify_reinstatement_stage_during_handler(
+        &self,
+        plan: &ValidatedInstallPlan,
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        self.validate_staged_install_identity(plan)?;
+        let external = self.staged_external_state.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid(
+                "lifecycle workspace external state has not been staged".to_owned(),
+            )
+        })?;
+        let mut layout = external.layout();
+        layout.activation =
+            external_stage::verify_staged_during_handler(self.stage.directory()?, external)?;
+        if self.staged_rollback_point.is_some() {
+            layout.rollback_point = true;
+        }
+        staged_install::verify(self.stage.directory()?, plan, layout)?;
         if let Some(rollback) = self.staged_rollback_point.as_ref() {
             rollback_stage::verify_staged(self.stage.directory()?, rollback)?;
         }
@@ -568,6 +669,10 @@ impl LifecycleWorkspace {
 
     pub(super) fn target_directory_cap(&self) -> &Dir {
         &self.target_directory
+    }
+
+    pub(super) fn handler_scratch_directory(&self) -> Result<Dir, LifecycleError> {
+        self.lock()?.directory()
     }
 
     pub(super) fn has_staged_rollback_point(&self) -> bool {
