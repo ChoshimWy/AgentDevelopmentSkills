@@ -304,10 +304,14 @@ jobs:
             "$base/release-manifest.json" > "$RUNNER_TEMP/pages-manifest.json"
           curl --fail --silent --show-error --location --retry 10 --retry-delay 5 \
             "$base/install.sh" > "$RUNNER_TEMP/pages-install.sh"
+          curl --fail --silent --show-error --location --retry 10 --retry-delay 5 \
+            "$base/uninstall.sh" > "$RUNNER_TEMP/pages-uninstall.sh"
           asset_base=$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["asset_base_url"])' "$RUNNER_TEMP/pages-manifest.json")
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
             --retry 10 --retry-delay 5 "${asset_base}install.sh" > "$RUNNER_TEMP/release-install.sh"
-          python - "$RUNNER_TEMP/pages-release.json" "$RUNNER_TEMP/pages-manifest.json" "$RUNNER_TEMP/pages-install.sh" <<'PY'
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --retry 10 --retry-delay 5 "${asset_base}uninstall.sh" > "$RUNNER_TEMP/release-uninstall.sh"
+          python - "$RUNNER_TEMP/pages-release.json" "$RUNNER_TEMP/pages-manifest.json" "$RUNNER_TEMP/pages-install.sh" "$RUNNER_TEMP/pages-uninstall.sh" <<'PY'
           import hashlib, json, os, sys
           release, manifest = (json.load(open(path, encoding="utf-8")) for path in sys.argv[1:3])
           if release.get("source_revision") != os.environ["EXPECTED_REVISION"] or release.get("gate_fingerprint") != os.environ.get("EXPECTED_GATE"):
@@ -319,4 +323,11 @@ jobs:
               raise SystemExit("deployed bootstrap does not match the immutable manifest")
           if release_value != value:
               raise SystemExit("GitHub Release bootstrap differs from Pages manifest asset")
+          uninstall_value = open(sys.argv[4], "rb").read()
+          release_uninstall = open(os.path.join(os.environ["RUNNER_TEMP"], "release-uninstall.sh"), "rb").read()
+          uninstall_asset = next((item for item in manifest.get("bootstrap_assets", []) if item.get("filename") == "uninstall.sh"), None)
+          if not uninstall_asset or uninstall_asset.get("sha256") != hashlib.sha256(uninstall_value).hexdigest() or uninstall_asset.get("size") != len(uninstall_value):
+              raise SystemExit("deployed uninstall bootstrap does not match the immutable manifest")
+          if release_uninstall != uninstall_value:
+              raise SystemExit("GitHub Release uninstall bootstrap differs from Pages manifest asset")
           PY

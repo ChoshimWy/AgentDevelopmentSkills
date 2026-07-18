@@ -183,7 +183,11 @@ The repository contains:
   spelling, ownership, and transaction recovery while the Python source
   installer remains POSIX-mode only. The command now also provides a read-only
   dry-run, Python-compatible human output, and canonical blocked JSON.
-  `uninstall.sh` still uses the Python compatibility path.
+  The gated hosted `uninstall.sh` verifies the installed executable against its
+  embedded host artifact size and SHA-256 before defaulting to the native
+  guard. Source-checkout, release-mismatch, unsupported-host, and
+  compatibility-only requests retain the verified Python path; a selected
+  native execution never silently falls back.
   The crate now also resolves the source package catalog used before native
   installation: explicit platform, discipline, and runtime-config selection;
   required and optional package dependencies; numeric version constraints;

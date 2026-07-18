@@ -93,6 +93,21 @@ installation:
 ~/.codex/bin/agent-skills uninstall ~/.codex --platform all
 ```
 
+The gated hosted uninstaller authenticates that installed executable against
+its embedded release matrix before selecting Rust:
+
+```bash
+curl -fsSL --proto '=https' --tlsv1.2 \
+  https://choshimwy.github.io/AgentDevelopmentSkills/uninstall.sh \
+  | bash -s -- --dry-run
+```
+
+Set `AGENT_SKILLS_UNINSTALL_ENGINE=python` for the compatibility route or
+`AGENT_SKILLS_UNINSTALL_ENGINE=rust` to fail closed unless the installed binary
+matches the hosted release. A source-checkout `uninstall.sh` intentionally
+remains on Python 3.11+; a selected native uninstall never falls back after
+execution begins.
+
 ## Development
 
 - [Contributing guide](CONTRIBUTING.md)
@@ -331,8 +346,11 @@ report and resulting filesystem state on the supported POSIX source-installer
 path. Windows keeps native unit coverage for target spelling, ownership, and
 transaction recovery while the Python source installer remains POSIX-mode
 only. The native command now also matches the source CLI's read-only dry-run,
-human-readable success output, and canonical blocked JSON surface. The source
-`uninstall.sh` has not switched to it yet.
+human-readable success output, and canonical blocked JSON surface. The gated
+hosted `uninstall.sh` authenticates the installed executable against its
+embedded host record and defaults eligible requests to this Rust guard without
+Python. Source-checkout, release-mismatch, unsupported-host, and
+compatibility-only requests retain the verified Python route.
 
 The parallel `install-selection` compatibility command now resolves the
 installable source package catalog, explicit platform/discipline/runtime

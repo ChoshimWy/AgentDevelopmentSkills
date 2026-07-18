@@ -849,6 +849,159 @@ class DistributionTests(unittest.TestCase):
         )
         self.assertTrue(arguments_path.is_file())
 
+    @unittest.skipIf(os.name == "nt", "POSIX native bootstrap is covered on macOS/Linux")
+    def test_rendered_posix_uninstall_uses_only_the_release_matched_installed_binary(self) -> None:
+        release = self.root / "rendered-native-uninstall-release"
+        release.mkdir()
+        bundle_root = "agent-development-skills-1.0.0"
+        source_filename = f"{bundle_root}.zip"
+        source_path = release / source_filename
+        with zipfile.ZipFile(source_path, "w", compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr(
+                f"{bundle_root}/scripts/uninstall_local.py",
+                b"import json, sys\n"
+                b"print(json.dumps({'arguments': sys.argv[1:], 'engine': 'python-shell'}, "
+                b"sort_keys=True, separators=(',', ':')))\n",
+            )
+        source_data = source_path.read_bytes()
+        target_triple = bootstrap._NATIVE_TARGETS[
+            (bootstrap._host_os(), bootstrap._host_arch())
+        ]
+        native_data = (
+            b"#!/bin/sh\n"
+            b"printf '%s\\n' \"$@\" > \"$AGENT_SKILLS_TEST_NATIVE_ARGS\"\n"
+            b"printf '%s\\n' \"$0\" > \"$AGENT_SKILLS_TEST_NATIVE_EXECUTABLE\"\n"
+            b"printf '%s\\n' '{\"engine\":\"rust-shell\",\"status\":\"planned\"}'\n"
+        )
+        native_record = {
+            "filename": f"agent-skills-1.0.0-{target_triple}",
+            "sha256": hashlib.sha256(native_data).hexdigest(),
+            "size": len(native_data),
+            "target": target_triple,
+        }
+        rendered = builder._render_posix_bootstrap(
+            (ROOT / "uninstall.sh").read_bytes(),
+            asset_base_url=release.as_uri() + "/",
+            source_artifact={
+                "filename": source_filename,
+                "root": bundle_root,
+                "sha256": hashlib.sha256(source_data).hexdigest(),
+                "size": len(source_data),
+            },
+            native_records=[native_record],
+            version="1.0.0",
+        )
+        script = self.root / "rendered-uninstall.sh"
+        script.write_bytes(rendered)
+        target = self.root / "rendered-native-uninstall-target"
+        executable = target / "bin" / "agent-skills"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(native_data)
+        executable.chmod(0o755)
+        arguments_path = self.root / "rendered-uninstall-arguments.txt"
+        executed_path = self.root / "rendered-uninstall-executable.txt"
+        environment = {
+            **os.environ,
+            "AGENT_SKILLS_PYTHON": str(self.root / "missing-python"),
+            "AGENT_SKILLS_TEST_NATIVE_ARGS": str(arguments_path),
+            "AGENT_SKILLS_TEST_NATIVE_EXECUTABLE": str(executed_path),
+            "PATH": "/usr/bin:/bin",
+        }
+
+        completed = subprocess.run(
+            [
+                "/bin/bash",
+                str(script),
+                "--target-root",
+                str(target),
+                "--platform",
+                "all",
+                "--dry-run",
+                "--dry-run",
+                "--json",
+                "--json",
+            ],
+            cwd=self.root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {"engine": "rust-shell", "status": "planned"},
+        )
+        self.assertEqual(
+            arguments_path.read_text(encoding="utf-8").splitlines(),
+            [
+                "uninstall",
+                str(target),
+                "--platform",
+                "all",
+                "--dry-run",
+                "--json",
+            ],
+        )
+        copied_executable = Path(executed_path.read_text(encoding="utf-8").strip())
+        self.assertNotEqual(copied_executable, executable)
+        self.assertFalse(copied_executable.exists())
+
+        arguments_path.unlink()
+        executable.write_bytes(native_data + b"tampered")
+        forced_environment = {
+            **environment,
+            "AGENT_SKILLS_UNINSTALL_ENGINE": "rust",
+        }
+        tampered = subprocess.run(
+            ["/bin/bash", str(script), "--target-root", str(target), "--dry-run"],
+            cwd=self.root,
+            env=forced_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(tampered.returncode, 2)
+        self.assertIn("matching this release", tampered.stderr)
+        self.assertFalse(arguments_path.exists())
+
+        compatibility_environment = {
+            **environment,
+            "AGENT_SKILLS_ALLOW_FILE_URL": "1",
+            "AGENT_SKILLS_PYTHON": sys.executable,
+        }
+        compatibility = subprocess.run(
+            [
+                "/bin/bash",
+                str(script),
+                "--target-root",
+                str(target),
+                "--platform",
+                "all",
+                "--dry-run",
+            ],
+            cwd=self.root,
+            env=compatibility_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(compatibility.returncode, 0, compatibility.stderr)
+        self.assertEqual(
+            json.loads(compatibility.stdout),
+            {
+                "arguments": [
+                    "--target-root",
+                    str(target),
+                    "--platform",
+                    "all",
+                    "--dry-run",
+                ],
+                "engine": "python-shell",
+            },
+        )
+
     @unittest.skipIf(os.name == "nt", "POSIX pipe bootstrap is covered on macOS/Linux")
     def test_piped_posix_bootstrap_downloads_shared_core_and_forwards_arguments(self) -> None:
         fake_bin = self.root / "fake-bin"

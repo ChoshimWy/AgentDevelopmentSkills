@@ -54,7 +54,12 @@ RELEASE_FILES = (
     "skill-naming-policy.json",
     "uninstall.sh",
 )
-BOOTSTRAP_FILES = ("install.sh", "install.ps1", "scripts/bootstrap_install.py")
+BOOTSTRAP_FILES = (
+    "install.sh",
+    "install.ps1",
+    "scripts/bootstrap_install.py",
+    "uninstall.sh",
+)
 IGNORED_NAMES = {".DS_Store", "__pycache__"}
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 DEFAULT_HOST_OS = ("darwin", "linux")
@@ -117,7 +122,7 @@ def _render_posix_bootstrap(
     try:
         text = source.decode("utf-8")
     except UnicodeDecodeError as error:
-        raise ReleaseBuildError("install.sh must be valid UTF-8") from error
+        raise ReleaseBuildError("POSIX bootstrap must be valid UTF-8") from error
     begin = text.find(POSIX_METADATA_BEGIN)
     end = text.find(POSIX_METADATA_END)
     if (
@@ -126,7 +131,7 @@ def _render_posix_bootstrap(
         or text.find(POSIX_METADATA_BEGIN, begin + 1) >= 0
         or text.find(POSIX_METADATA_END, end + 1) >= 0
     ):
-        raise ReleaseBuildError("install.sh embedded release metadata block is invalid")
+        raise ReleaseBuildError("POSIX bootstrap embedded release metadata block is invalid")
     end += len(POSIX_METADATA_END)
     assignments = [
         POSIX_METADATA_BEGIN,
@@ -396,7 +401,7 @@ def build_release_bundle(
             filename = "bootstrap_install.py" if relative == "scripts/bootstrap_install.py" else source.name
             destination = stage / filename
             data = _git_blob(root, relative) if not dirty else source.read_bytes()
-            if relative == "install.sh" and native_index is not None:
+            if relative in {"install.sh", "uninstall.sh"} and native_index is not None:
                 data = _render_posix_bootstrap(
                     data,
                     asset_base_url=asset_base_url,

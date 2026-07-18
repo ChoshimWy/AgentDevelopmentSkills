@@ -39,7 +39,9 @@ jobs:
         run: python -m unittest tests.test_distribution -v
       - name: Validate POSIX bootstrap syntax
         if: runner.os != 'Windows'
-        run: bash -n install.sh
+        run: |
+          bash -n install.sh
+          bash -n uninstall.sh
       - name: Validate PowerShell bootstrap syntax
         if: runner.os == 'Windows'
         shell: pwsh

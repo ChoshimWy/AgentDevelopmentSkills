@@ -91,6 +91,20 @@ Rust 生命周期 CLI。移除精确受管安装前可先预览：
 ~/.codex/bin/agent-skills uninstall ~/.codex --platform all
 ```
 
+发布门禁生成的托管卸载入口会先用内嵌 Release Matrix 校验已安装可执行文件，
+再选择 Rust：
+
+```bash
+curl -fsSL --proto '=https' --tlsv1.2 \
+  https://choshimwy.github.io/AgentDevelopmentSkills/uninstall.sh \
+  | bash -s -- --dry-run
+```
+
+`AGENT_SKILLS_UNINSTALL_ENGINE=python` 可强制兼容路径；
+`AGENT_SKILLS_UNINSTALL_ENGINE=rust` 会在已安装二进制与当前托管 Release
+不一致时 fail-closed。源码 checkout 中的 `uninstall.sh` 仍明确保留 Python
+3.11+ 路径；一旦原生卸载已被选择，执行失败不会再降级。
+
 ## 开发与验证
 
 完整 Conformance：
@@ -200,9 +214,9 @@ cargo run --locked -p agent-skills-rs -- \
 
 `PublishedInstall` 现覆盖替换和首次安装两类 source activation。替换路径从已发布 Package snapshot 冻结资产；首次安装路径在发布前从 stage 读取已验证资产，并从目标读取 unmanaged destination、profile 与 `config.toml` 预像，再把精确 scope 写入 rollback point。两条路径都会拒绝冲突、只创建缺失 profile、通过私有 quarantine 发布，并最后写入 Activation Lock。首次安装失败时先撤回全部新 managed roots，再恢复每个外部预像。source deactivation 与 `PublishedUninstall` 同样受 rollback scope 约束，只移除 Activation-owned 内容，同时保留本机 profile、`config.toml` 语义和 `skills/.system`。
 
-兼容命令仍要求调用方显式提供 `agent-session` launcher；合格的托管首次安装则由 v2 bootstrap 把同一份经过校验的原生可执行文件冻结为 launcher，并在事务内完成激活。现有 `uninstall.sh` 尚未切换到原生 guard。生命周期锁只协调 lifecycle 命令；事务期间调用方仍须保持获批 external scope 静止，并关闭相关可写 handle。
+兼容命令仍要求调用方显式提供 `agent-session` launcher；合格的托管首次安装则由 v2 bootstrap 把同一份经过校验的原生可执行文件冻结为 launcher，并在事务内完成激活。发布门禁生成的托管 `uninstall.sh` 已切换到 release-matched 原生 guard；源码 checkout、Release 不匹配、host 不支持或兼容参数仍走经过校验的 Python 路径。生命周期锁只协调 lifecycle 命令；事务期间调用方仍须保持获批 external scope 静止，并关闭相关可写 handle。
 
-非默认的 `lifecycle-uninstall` 兼容命令现已接入原生卸载 guard：缺失目标不会被创建，执行与只读 dry-run 的 JSON、默认人类可读输出、canonical blocked report 及最终文件系统状态均已对照 Python 路径验证；这仍不代表 `uninstall.sh` 已完成生产切换。
+非默认的 `lifecycle-uninstall` 兼容别名与公开 `uninstall` 命令均已接入原生卸载 guard：缺失目标不会被创建，执行与只读 dry-run 的 JSON、默认人类可读输出、canonical blocked report 及最终文件系统状态均已对照 Python 路径验证。托管 `uninstall.sh` 只在已安装二进制与内嵌 host artifact 的大小和 SHA-256 完全一致时默认进入该路径，原生一旦选中不静默降级。
 
 并行的 `install-selection` 兼容命令现已覆盖可安装源包目录、显式平台/Discipline/Runtime Config 选择、必需与可选依赖闭包、版本约束、确定性拓扑顺序和选择原因。后续的 `install-source-snapshot` 命令会通过有界、no-follow 遍历冻结声明的 Package 资产、Package/Provider Manifest、Instruction Fragment 与可安装 Skill 树，并复读源包检查并发变化；两者均已与 Python 完成差分验证。新增的 `install-bundle` 命令会在冻结快照上独立重建 Manifest Registry、依赖能力、Instruction/rule、Skill、资产、Binding、权限、副作用、Install Plan v2 与持久化 Package Lockfile identity；core-only、Apple、QA、Codex Runtime Config 及 previous-Lock lineage 输出已与 Python 做逐字节差分。原生生命周期现同时提供只读 `lifecycle-install` 兼容命令，以及面向合格首次安装的 production `install` 命令；它会执行 staging、语义复验、原子发布、发布后复验、失败回滚与清理。Apple 安装还会冻结同一份 launcher 字节，并在同一受保护事务中完成 source activation。安装后的原生 `agent-session` 保留公开的 `create`、`list`、`inspect`、`fingerprint`、`checkpoint` 与 `gate` 命令面。core-only 和 Apple 投影继续与 Python 做差分。替换安装、升级、旧版本接管及兼容参数仍属于独立门禁路径。
 

@@ -398,9 +398,14 @@ class ReleaseGateTests(unittest.TestCase):
                 ).hexdigest(),
             )
             rendered_shell = (release / "install.sh").read_text(encoding="utf-8")
+            rendered_uninstall = (release / "uninstall.sh").read_text(encoding="utf-8")
             self.assertNotEqual(
                 rendered_shell,
                 (ROOT / "install.sh").read_text(encoding="utf-8"),
+            )
+            self.assertNotEqual(
+                rendered_uninstall,
+                (ROOT / "uninstall.sh").read_text(encoding="utf-8"),
             )
             self.assertIn(
                 f"AGENT_SKILLS_EMBEDDED_ASSET_BASE_URL={manifest['asset_base_url']}",
@@ -413,6 +418,8 @@ class ReleaseGateTests(unittest.TestCase):
             for native_record in manifest["native_artifacts"]:
                 self.assertIn(native_record["target"], rendered_shell)
                 self.assertIn(native_record["sha256"], rendered_shell)
+                self.assertIn(native_record["target"], rendered_uninstall)
+                self.assertIn(native_record["sha256"], rendered_uninstall)
 
             manifest["native_artifacts"][0]["sha256"] = "9" * 64
             (release / "release-manifest.json").write_bytes(

@@ -30,7 +30,12 @@ import run_release_gate as gate  # noqa: E402
 DEFAULT_PAGES_BASE_URL = "https://choshimwy.github.io/AgentDevelopmentSkills/"
 MAX_PUBLIC_FILE_BYTES = 2 * 1024 * 1024
 MAX_SITE_BYTES = 8 * 1024 * 1024
-PUBLIC_RELEASE_FILES = ("install.ps1", "install.sh", "release-manifest.json")
+PUBLIC_RELEASE_FILES = (
+    "install.ps1",
+    "install.sh",
+    "release-manifest.json",
+    "uninstall.sh",
+)
 SITE_FILES = {
     ".nojekyll",
     "index.html",
@@ -39,6 +44,7 @@ SITE_FILES = {
     "release-gate.json",
     "release-manifest.json",
     "release.json",
+    "uninstall.sh",
 }
 
 
@@ -119,6 +125,11 @@ def _landing_page(manifest: dict[str, Any], gate_report: dict[str, Any], base_ur
         + "install.sh | bash"
     )
     powershell_command = "iwr -useb " + base_url + "install.ps1 | iex"
+    uninstall_command = (
+        "curl -fsSL --proto '=https' --tlsv1.2 "
+        + base_url
+        + "uninstall.sh | bash -s -- --dry-run"
+    )
     html = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -148,6 +159,8 @@ def _landing_page(manifest: dict[str, Any], gate_report: dict[str, Any], base_ur
     <h2>Windows PowerShell</h2>
     <p>入口已提供；production manifest 未声明 Windows artifact 时会 fail-closed。</p>
     <pre><code>{escape(powershell_command)}</code></pre>
+    <h2>卸载预览</h2>
+    <pre><code>{escape(uninstall_command)}</code></pre>
     <h2>发布身份</h2>
     <dl>
       <dt>Channel</dt><dd><code>{channel}</code></dd>

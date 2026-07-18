@@ -49,7 +49,12 @@ _FIXED_METADATA_FILES = {
     "provenance.json", "python-artifacts.json", "release-manifest.json", "sbom.json",
 }
 _OPTIONAL_METADATA_FILES = {"native-artifacts.json"}
-_EXPECTED_BOOTSTRAP_FILES = {"bootstrap_install.py", "install.ps1", "install.sh"}
+_EXPECTED_BOOTSTRAP_FILES = {
+    "bootstrap_install.py",
+    "install.ps1",
+    "install.sh",
+    "uninstall.sh",
+}
 _FIXED_RELEASE_FILES = _FIXED_METADATA_FILES | _EXPECTED_BOOTSTRAP_FILES
 _MAX_RELEASE_FILES = 24
 _MAX_RELEASE_BYTES = 1024 * 1024 * 1024
@@ -72,7 +77,7 @@ def _expected_posix_bootstrap(
     try:
         text = source.decode("utf-8")
     except UnicodeDecodeError as error:
-        raise ContractError("source install.sh must be valid UTF-8") from error
+        raise ContractError("source POSIX bootstrap must be valid UTF-8") from error
     begin = text.find(_POSIX_METADATA_BEGIN)
     end = text.find(_POSIX_METADATA_END)
     if (
@@ -81,7 +86,7 @@ def _expected_posix_bootstrap(
         or text.find(_POSIX_METADATA_BEGIN, begin + 1) >= 0
         or text.find(_POSIX_METADATA_END, end + 1) >= 0
     ):
-        raise ContractError("source install.sh embedded metadata block is invalid")
+        raise ContractError("source POSIX bootstrap embedded metadata block is invalid")
     end += len(_POSIX_METADATA_END)
     source_artifact = manifest["artifacts"][0]
     expected = [
@@ -1084,12 +1089,13 @@ def _evaluate_release_gate_snapshot(
                 "bootstrap_install.py": bundle / "scripts/bootstrap_install.py",
                 "install.ps1": bundle / "install.ps1",
                 "install.sh": bundle / "install.sh",
+                "uninstall.sh": bundle / "uninstall.sh",
             }
             for standalone, source_path in bootstrap_sources.items():
                 if source_path.is_symlink() or not source_path.is_file():
                     raise ContractError(f"source bundle bootstrap is missing or unsafe: {standalone}")
                 expected = source_path.read_bytes()
-                if standalone == "install.sh" and native_index is not None:
+                if standalone in {"install.sh", "uninstall.sh"} and native_index is not None:
                     expected = _expected_posix_bootstrap(
                         expected,
                         manifest=manifest,

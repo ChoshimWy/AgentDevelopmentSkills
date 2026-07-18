@@ -99,6 +99,10 @@ class PagesDistributionTests(unittest.TestCase):
             pages.DEFAULT_PAGES_BASE_URL + "install.sh",
             (first / "index.html").read_text(encoding="utf-8"),
         )
+        self.assertIn(
+            pages.DEFAULT_PAGES_BASE_URL + "uninstall.sh",
+            (first / "index.html").read_text(encoding="utf-8"),
+        )
         self.assertEqual(
             json.loads((first / "release.json").read_text(encoding="utf-8"))["status"],
             "published",
