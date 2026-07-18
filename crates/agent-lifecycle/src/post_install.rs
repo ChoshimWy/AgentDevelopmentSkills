@@ -240,6 +240,7 @@ pub(super) fn check_global_instructions(
         let text = String::from_utf8(bytes).map_err(|_| {
             LifecycleError::Invalid(format!("AGENTS instruction fragment differs: {id}"))
         })?;
+        let text = packages::python_universal_newlines(&text);
         let normalized = format!("{}\n", packages::python_trim(&text));
         if bytes_sha256(normalized.as_bytes())
             != string_field(fragment, "sha256", "instruction fragment hash")?

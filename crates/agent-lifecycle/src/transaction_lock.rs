@@ -222,6 +222,41 @@ pub(super) fn inspect_existing_target(
     Ok((target_directory, target, contract_target))
 }
 
+pub(super) fn inspect_optional_target(target_root: &Path) -> Result<Option<Dir>, LifecycleError> {
+    reject_unexpanded_home(target_root)?;
+    let requested_target = absolute_path(target_root)?;
+    match std::fs::symlink_metadata(&requested_target) {
+        Ok(_) => {
+            let (target, _, _) = inspect_existing_target(&requested_target)?;
+            Ok(Some(target))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut existing = requested_target.as_path();
+            loop {
+                match std::fs::symlink_metadata(existing) {
+                    Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                        return invalid(format!(
+                            "lifecycle target must not traverse a symlink or non-directory: {}",
+                            requested_target.display()
+                        ));
+                    }
+                    Ok(_) => {
+                        open_absolute_directory_nofollow(existing)?;
+                        return Ok(None);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        existing = existing.parent().ok_or_else(|| {
+                            LifecycleError::Invalid("lifecycle target is invalid".to_owned())
+                        })?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 impl Drop for LifecycleLock {
     fn drop(&mut self) {
         if self.active && self.validate().is_ok() {

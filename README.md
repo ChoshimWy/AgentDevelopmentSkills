@@ -107,6 +107,9 @@ cargo run --locked -p agent-skills-rs -- \
 cargo run --locked -p agent-skills-rs -- \
   lock-validate /path/to/agent-skills.lock
 cargo run --locked -p agent-skills-rs -- \
+  lifecycle-install platforms /path/to/fresh-target \
+  --platform apple --schemas schemas --dry-run
+cargo run --locked -p agent-skills-rs -- \
   doctor-baseline /path/to/installed-root --schemas schemas
 cargo run --locked -p agent-skills-rs -- \
   doctor-report /path/to/installed-root --schemas schemas \
@@ -306,8 +309,13 @@ rebuilds Manifest Registry, dependency capability, instruction/rule, Skill,
 asset, binding, permission, side-effect, Install Plan v2, and persistent
 package Lockfile identities. Core-only, Apple, QA, Codex runtime-config, and
 previous-Lock lineage outputs are byte-for-byte differential-tested against
-Python. It still does not write an installation target or replace the
-production Python CLI.
+Python. The non-default `lifecycle-install` command now adds a read-only
+dry-run plus fresh-only staging, semantic verification, atomic publication,
+post-publication verification, rollback-on-failure, and cleanup. Core-only and
+Apple results and managed filesystem trees are differential-tested against
+Python. It deliberately rejects replacement installs, does not run source
+activation, and does not replace the production Python CLI; upgrades and
+activation remain separate approval-bound phases.
 
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path

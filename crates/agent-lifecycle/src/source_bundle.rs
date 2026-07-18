@@ -22,6 +22,7 @@ pub struct SourceInstallBundle {
     plan: Value,
     instructions: String,
     package_lock: Value,
+    package_roots: Vec<(String, PathBuf)>,
 }
 
 impl SourceInstallBundle {
@@ -41,6 +42,10 @@ impl SourceInstallBundle {
     #[must_use]
     pub fn package_lock(&self) -> &Value {
         &self.package_lock
+    }
+
+    pub(super) fn package_roots(&self) -> &[(String, PathBuf)] {
+        &self.package_roots
     }
 
     /// Emit the temporary Python/Rust differential projection.
@@ -277,6 +282,7 @@ pub fn compile_source_install_bundle(
         plan,
         instructions: instruction_content,
         package_lock,
+        package_roots: package_set.package_roots.clone(),
     })
 }
 

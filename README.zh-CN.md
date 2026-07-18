@@ -111,6 +111,9 @@ cargo run --locked -p agent-skills-rs -- \
 cargo run --locked -p agent-skills-rs -- \
   lock-validate /path/to/agent-skills.lock
 cargo run --locked -p agent-skills-rs -- \
+  lifecycle-install platforms /path/to/fresh-target \
+  --platform apple --schemas schemas --dry-run
+cargo run --locked -p agent-skills-rs -- \
   doctor-baseline /path/to/installed-root --schemas schemas
 cargo run --locked -p agent-skills-rs -- \
   doctor-report /path/to/installed-root --schemas schemas \
@@ -173,7 +176,7 @@ cargo run --locked -p agent-skills-rs -- \
 
 非默认的 `lifecycle-uninstall` 兼容命令现已接入原生卸载 guard：缺失目标不会被创建，执行与只读 dry-run 的 JSON、默认人类可读输出、canonical blocked report 及最终文件系统状态均已对照 Python 路径验证；这仍不代表 `uninstall.sh` 已完成生产切换。
 
-并行的 `install-selection` 兼容命令现已覆盖可安装源包目录、显式平台/Discipline/Runtime Config 选择、必需与可选依赖闭包、版本约束、确定性拓扑顺序和选择原因。后续的 `install-source-snapshot` 命令会通过有界、no-follow 遍历冻结声明的 Package 资产、Package/Provider Manifest、Instruction Fragment 与可安装 Skill 树，并复读源包检查并发变化；两者均已与 Python 完成差分验证。新增的非默认 `install-bundle` 命令会在冻结快照上独立重建 Manifest Registry、依赖能力、Instruction/rule、Skill、资产、Binding、权限、副作用、Install Plan v2 与持久化 Package Lockfile identity；core-only、Apple、QA、Codex Runtime Config 及 previous-Lock lineage 输出已与 Python 做逐字节差分。该路径仍不会写入安装目标，也未替换生产 Python CLI。
+并行的 `install-selection` 兼容命令现已覆盖可安装源包目录、显式平台/Discipline/Runtime Config 选择、必需与可选依赖闭包、版本约束、确定性拓扑顺序和选择原因。后续的 `install-source-snapshot` 命令会通过有界、no-follow 遍历冻结声明的 Package 资产、Package/Provider Manifest、Instruction Fragment 与可安装 Skill 树，并复读源包检查并发变化；两者均已与 Python 完成差分验证。新增的非默认 `install-bundle` 命令会在冻结快照上独立重建 Manifest Registry、依赖能力、Instruction/rule、Skill、资产、Binding、权限、副作用、Install Plan v2 与持久化 Package Lockfile identity；core-only、Apple、QA、Codex Runtime Config 及 previous-Lock lineage 输出已与 Python 做逐字节差分。非默认 `lifecycle-install` 现进一步提供只读 dry-run，以及仅限首次安装的 staging、语义复验、原子发布、发布后复验、失败回滚与清理；core-only 和 Apple 的结果及受管文件树已与 Python 差分。该入口会拒绝替换既有安装，不执行 source activation，也未替换生产 Python CLI；升级与激活仍属于后续独立审批阶段。
 
 ## 发布治理
 

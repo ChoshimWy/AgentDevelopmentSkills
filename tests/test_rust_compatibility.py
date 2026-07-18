@@ -1115,6 +1115,133 @@ name = "one"
             }),
         )
 
+    def test_native_source_install_dry_run_matches_python_without_writes(self) -> None:
+        expected = build_install_bundle(
+            ROOT / "platforms",
+            platforms=["apple"],
+            schema_root=ROOT / "schemas",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "missing-target"
+            result = self.run_rust(
+                "lifecycle-install",
+                str(ROOT / "platforms"),
+                str(target),
+                "--platform",
+                "apple",
+                "--schemas",
+                str(ROOT / "schemas"),
+                "--dry-run",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, dumps(expected.plan))
+            self.assertFalse(target.exists())
+
+    @unittest.skipIf(os.name == "nt", "Python source installation mode contract is POSIX-only")
+    def test_native_fresh_source_install_matches_python_filesystem(self) -> None:
+        def snapshot(root: Path) -> list[tuple[str, str, int, str | None]]:
+            records = []
+            for path in sorted(root.rglob("*")):
+                relative = path.relative_to(root).as_posix()
+                mode = path.stat().st_mode & 0o777
+                if path.is_symlink():
+                    records.append((relative, "symlink", mode, os.readlink(path)))
+                elif path.is_dir():
+                    records.append((relative, "directory", mode, None))
+                else:
+                    records.append((
+                        relative,
+                        "file",
+                        mode,
+                        hashlib.sha256(path.read_bytes()).hexdigest(),
+                    ))
+            return records
+
+        for platforms, core_only in (([], True), (["apple"], False)):
+            with self.subTest(platforms=platforms, core_only=core_only):
+                expected = build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=platforms,
+                    core_only=core_only,
+                    schema_root=ROOT / "schemas",
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    python_target = root / "python"
+                    native_target = root / "native"
+                    expected_result = install_bundle(expected, python_target)
+                    arguments = [
+                        "lifecycle-install",
+                        str(ROOT / "platforms"),
+                        str(native_target),
+                        "--schemas",
+                        str(ROOT / "schemas"),
+                    ]
+                    for platform in platforms:
+                        arguments.extend(("--platform", platform))
+                    if core_only:
+                        arguments.append("--core-only")
+                    result = self.run_rust(*arguments)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, dumps(expected_result))
+                    self.assertEqual(snapshot(native_target), snapshot(python_target))
+
+    def test_native_source_install_rejects_occupied_target_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "target"
+            target.mkdir()
+            unmanaged = target / "AGENTS.md"
+            unmanaged.write_text("unmanaged\n", encoding="utf-8")
+            result = self.run_rust(
+                "lifecycle-install",
+                str(ROOT / "platforms"),
+                str(target),
+                "--core-only",
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("refusing to overwrite", result.stderr)
+            self.assertEqual(unmanaged.read_text(encoding="utf-8"), "unmanaged\n")
+            self.assertEqual([path.name for path in target.iterdir()], ["AGENTS.md"])
+
+    @unittest.skipIf(os.name == "nt", "Python source installation mode contract is POSIX-only")
+    def test_native_fresh_install_normalizes_crlf_instruction_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            platforms = root / "platforms"
+            shutil.copytree(ROOT / "platforms" / "core", platforms / "core")
+            fragment = platforms / "core" / "agent-instructions" / "global.md"
+            content = fragment.read_text(encoding="utf-8")
+            fragment.write_bytes(content.replace("\n", "\r\n").encode("utf-8"))
+            expected = build_install_bundle(
+                platforms,
+                core_only=True,
+                schema_root=ROOT / "schemas",
+            )
+            python_target = root / "python"
+            native_target = root / "native"
+            expected_result = install_bundle(expected, python_target)
+            result = self.run_rust(
+                "lifecycle-install",
+                str(platforms),
+                str(native_target),
+                "--core-only",
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, dumps(expected_result))
+            self.assertEqual(
+                (native_target / "AGENTS.md").read_bytes(),
+                (python_target / "AGENTS.md").read_bytes(),
+            )
+            self.assertEqual(
+                (native_target / ".agent-skills" / "install-lock.json").read_bytes(),
+                (python_target / ".agent-skills" / "install-lock.json").read_bytes(),
+            )
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink support is required")
     def test_source_package_snapshot_rejects_symlink_assets_like_python(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
-use super::packages::python_trim;
+use super::packages::{python_trim, python_universal_newlines};
 use super::source_install::SourceInstallSelection;
 
 const MAX_SOURCE_TREE_ENTRIES: usize = 100_000;
@@ -22,6 +22,7 @@ const MAX_RETAINED_SOURCE_BYTES: usize = MAX_CONTRACT_JSON_BYTES;
 #[derive(Debug, Clone)]
 pub(super) struct SourceSkill {
     pub(super) name: String,
+    pub(super) relative_root: String,
     pub(super) files: Vec<Value>,
     pub(super) directories: Vec<Value>,
 }
@@ -249,6 +250,7 @@ fn load_source_package(
             let directories = directories_for_files(&files, retained_bytes)?;
             skills.push(SourceSkill {
                 name: name_text.to_owned(),
+                relative_root: format!("{skill_root}/{name_text}"),
                 files,
                 directories,
             });
@@ -277,13 +279,6 @@ fn load_source_package(
         skills,
         fragments,
     })
-}
-
-fn python_universal_newlines(value: &str) -> String {
-    if !value.contains('\r') {
-        return value.to_owned();
-    }
-    value.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn collect_package_files(

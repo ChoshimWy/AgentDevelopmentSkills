@@ -10,8 +10,9 @@ use agent_engine::{
 };
 use agent_lifecycle::{
     LifecycleError, LifecycleWorkspace, compile_source_install_bundle, inspect_doctor_baseline,
-    inspect_doctor_report_v1, inspect_uninstall_plan, render_codex_config,
-    resolve_source_install_selection, snapshot_source_packages,
+    inspect_doctor_report_v1, inspect_source_install, inspect_uninstall_plan,
+    install_source_bundle, render_codex_config, resolve_source_install_selection,
+    snapshot_source_packages,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
@@ -119,6 +120,23 @@ enum Command {
         schemas: PathBuf,
         #[arg(long)]
         previous: Option<PathBuf>,
+    },
+    /// Execute the fresh-only native source-install compatibility lifecycle.
+    LifecycleInstall {
+        root: PathBuf,
+        target_root: PathBuf,
+        #[arg(long = "platform")]
+        platforms: Vec<String>,
+        #[arg(long = "discipline")]
+        disciplines: Vec<String>,
+        #[arg(long = "runtime-config")]
+        runtime_configs: Vec<String>,
+        #[arg(long)]
+        core_only: bool,
+        #[arg(long, default_value = "schemas")]
+        schemas: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Emit the sorted automatic recipe capability closure for target platforms.
     RecipeCapabilities { targets: Vec<String> },
@@ -568,6 +586,32 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 "{}",
                 String::from_utf8(canonical_json(&bundle.compatibility_projection())?)?
             );
+        }
+        Command::LifecycleInstall {
+            root,
+            target_root,
+            platforms,
+            disciplines,
+            runtime_configs,
+            core_only,
+            schemas,
+            dry_run,
+        } => {
+            let selection = resolve_source_install_selection(
+                root,
+                &platforms,
+                &disciplines,
+                &runtime_configs,
+                core_only,
+            )?;
+            let packages = snapshot_source_packages(&selection)?;
+            let bundle = compile_source_install_bundle(&selection, &packages, schemas, None)?;
+            let result = if dry_run {
+                inspect_source_install(&bundle, &packages, target_root)?
+            } else {
+                install_source_bundle(&bundle, &packages, target_root)?
+            };
+            print!("{}", String::from_utf8(canonical_json(&result)?)?);
         }
         Command::RecipeCapabilities { targets } => {
             let targets = targets.into_iter().collect::<BTreeSet<_>>();

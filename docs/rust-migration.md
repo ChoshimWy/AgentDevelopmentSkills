@@ -199,8 +199,14 @@ contains:
   identities, bindings, permissions, side effects, Install Plan v2, and the
   persistent package Lockfile. Core-only, Apple, QA, Codex runtime-config, and
   previous-Lock lineage projections are byte-level differential-tested against
-  Python `build_install_bundle`. This boundary still does not mutate an
-  installation.
+  Python `build_install_bundle`. The non-default `lifecycle-install` command
+  now adds a read-only dry-run and a fresh-only transaction that reopens every
+  source through directory capabilities, stages Package/Skill trees, preserves
+  external state, verifies complete semantics, publishes all managed roots
+  atomically, verifies again, and rolls back on failure. Core-only and Apple
+  result/filesystem projections are differential-tested against Python
+  `install_bundle`. Replacement, upgrade, and source activation remain
+  separate approval-bound gates.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit
@@ -225,11 +231,10 @@ The Rust binary is not yet installed by the production bootstrap and is not a
 binary release artifact. The parallel CLI currently covers canonical JSON,
 hashing, the shared schema-version boundary, registry snapshots, targeted
 binding resolution, source package-selection, package-snapshot, and complete
-Install Bundle/Plan/Lock compatibility, an internal recipe-closure
-compatibility probe, repository
-discovery, policy resolution, and plan compilation. Package-lock resolution is
-also available through the
-parallel CLI, including local-registry,
+Install Bundle/Plan/Lock compatibility, fresh-only guarded source install, an
+internal recipe-closure compatibility probe, repository discovery, policy
+resolution, and plan compilation. Package-lock resolution is also available
+through the parallel CLI, including local-registry,
 relative-path, and pinned HTTPS sources, deterministic lineage, validation,
 diff, explanation, and plan freezing. Phase 4 now also exposes a deterministic
 fake-adapter runtime for semantic differential testing; it never invokes an

@@ -874,6 +874,7 @@ fn load_instruction_fragments(
         let text = String::from_utf8(bytes).map_err(|_| {
             LifecycleError::Invalid(format!("instruction fragment is not UTF-8: {path}"))
         })?;
+        let text = python_universal_newlines(&text);
         let content = format!("{}\n", python_trim(&text));
         let mut fragment = raw.as_object().cloned().ok_or_else(|| {
             LifecycleError::Invalid("instruction fragment must be an object".to_owned())
@@ -1502,6 +1503,13 @@ fn python_is_whitespace(character: char) -> bool {
 
 pub(super) fn python_trim(value: &str) -> &str {
     value.trim_matches(python_is_whitespace)
+}
+
+pub(super) fn python_universal_newlines(value: &str) -> String {
+    if !value.contains('\r') {
+        return value.to_owned();
+    }
+    value.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn python_trim_start(value: &str) -> &str {
