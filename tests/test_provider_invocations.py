@@ -16,7 +16,7 @@ from agent_workflow.adapters import (
     validate_provider_invocation,
     validate_provider_invocation_selection,
 )
-from agent_workflow.adapters.invocations import _ensure_record_size
+from agent_workflow.adapters.invocations import _ensure_record_size, _metadata_identity
 from agent_workflow.adapters.invocations import (
     _claim_provider_invocation_at as claim_provider_invocation,
 )
@@ -410,6 +410,18 @@ class ProviderInvocationTransportTests(unittest.TestCase):
         with mock.patch.object(canonical_json, "MAX_CONTRACT_JSON_BYTES", 4):
             with self.assertRaisesRegex(ValueError, "more than 4 bytes"):
                 canonical_json.loads(b"\xff\xff\xff\xff\xff")
+
+    def test_path_and_descriptor_metadata_share_a_stable_identity(self) -> None:
+        path = Path(self.temporary.name) / "metadata-identity.json"
+        path.write_bytes(b"{}")
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            self.assertEqual(
+                _metadata_identity(os.lstat(path)),
+                _metadata_identity(os.fstat(descriptor)),
+            )
+        finally:
+            os.close(descriptor)
 
     @unittest.skipIf(os.name == "nt", "Unix mode contract")
     def test_broad_root_and_lock_permissions_are_rejected(self) -> None:

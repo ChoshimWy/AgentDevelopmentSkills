@@ -795,6 +795,18 @@ def _nonempty(value: Any) -> bool:
 
 
 def _metadata_identity(value: os.stat_result) -> tuple[int, ...]:
+    if os.name == "nt":
+        # Windows path-based stat and descriptor-based fstat can expose
+        # different synthetic permission bits and ctime semantics for the same
+        # file.  The volume/file index pair is the stable object identity; the
+        # file type, size, and mtime still detect replacement or in-place drift.
+        return (
+            value.st_dev,
+            value.st_ino,
+            stat.S_IFMT(value.st_mode),
+            value.st_size,
+            value.st_mtime_ns,
+        )
     return (
         value.st_dev,
         value.st_ino,
