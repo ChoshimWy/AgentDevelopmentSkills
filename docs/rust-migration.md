@@ -171,10 +171,13 @@ contains:
   semantics, and `skills/.system`, and can commit or restore every preimage.
   The non-default `lifecycle-uninstall` compatibility command now drives this
   guard without creating a missing target; its success report and resulting
-  filesystem state match the Python source uninstaller. Dry-run,
-  human-readable output, canonical blocked reports, fresh-install activation,
-  and production command routing are not implemented yet; `uninstall.sh` still
-  uses the Python production path.
+  filesystem state match the Python source uninstaller on the supported POSIX
+  source-installer path. Windows keeps native unit coverage for target
+  spelling, ownership, and transaction recovery while the Python source
+  installer remains POSIX-mode only. Dry-run, human-readable output, canonical
+  blocked reports, fresh-install activation, and production command routing
+  are not implemented yet; `uninstall.sh` still uses the Python production
+  path.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit

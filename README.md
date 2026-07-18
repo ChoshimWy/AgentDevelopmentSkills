@@ -282,9 +282,12 @@ rollback, and drop-time recovery. Fresh-install activation and production
 command routing remain later lifecycle slices. The non-default
 `lifecycle-uninstall` compatibility command now drives this guard, rejects a
 missing target without creating it, and matches the successful Python JSON
-report and resulting filesystem state. It does not yet provide the production
-shell's dry-run, human-readable, or canonical blocked-report surfaces, and the
-source `uninstall.sh` has not switched to it.
+report and resulting filesystem state on the supported POSIX source-installer
+path. Windows keeps native unit coverage for target spelling, ownership, and
+transaction recovery while the Python source installer remains POSIX-mode
+only. It does not yet provide the production shell's dry-run, human-readable,
+or canonical blocked-report surfaces, and the source `uninstall.sh` has not
+switched to it.
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
 holds directory capabilities and opens contract files without following

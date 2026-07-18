@@ -916,7 +916,7 @@ fn invalid<T>(message: impl Into<String>) -> Result<T, LifecycleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LIFECYCLE_LOCK_DIRECTORY, LifecycleWorkspace};
+    use crate::{LIFECYCLE_LOCK_DIRECTORY, LifecycleLock, LifecycleWorkspace};
     use agent_contracts::{canonical_sha256, load_json};
     use agent_engine::resolve_package_lock;
     use cap_std::ambient_authority;
@@ -930,6 +930,13 @@ mod tests {
         "# 全局 Agent Instructions\n\n",
         "> 此文件由 `agent-skills install` 确定性生成；请在源 Fragment 中修改。\n\n"
     );
+
+    fn contract_target_path(target: &Path) -> PathBuf {
+        let lock = LifecycleLock::acquire_existing(target).expect("resolve contract target");
+        let contract_target = lock.contract_target().to_path_buf();
+        drop(lock);
+        contract_target
+    }
 
     struct Fixture {
         root: PathBuf,
@@ -1280,9 +1287,7 @@ mod tests {
             MANAGED_FILE_MODE,
         );
         let agents_path = serde_json::to_string(
-            target
-                .canonicalize()
-                .expect("canonical fixture target")
+            contract_target_path(&target)
                 .join("AGENTS.md")
                 .to_str()
                 .expect("UTF-8 fixture target"),
@@ -2599,9 +2604,7 @@ mod tests {
         write_activation_fixture(&fixture, &expected_hash);
         let config = format!(
             "# user config\nmodel_instructions_file = {:?}\nmodel = \"gpt\"\n[features]\nfast = true\n",
-            target
-                .canonicalize()
-                .expect("canonical target")
+            contract_target_path(&target)
                 .join("AGENTS.md")
                 .to_string_lossy()
         );
@@ -2666,9 +2669,7 @@ mod tests {
         let activation = write_activation_fixture(&fixture, &expected_hash);
         let config = format!(
             "model_instructions_file = {:?}\nmodel = \"gpt\"\n",
-            target
-                .canonicalize()
-                .expect("canonical target")
+            contract_target_path(&target)
                 .join("AGENTS.md")
                 .to_string_lossy()
         );
@@ -2717,9 +2718,7 @@ mod tests {
         let activation = write_activation_fixture(&fixture, &expected_hash);
         let config = format!(
             "model_instructions_file = {:?}\nmodel = \"gpt\"\n",
-            target
-                .canonicalize()
-                .expect("canonical target")
+            contract_target_path(&target)
                 .join("AGENTS.md")
                 .to_string_lossy()
         );
@@ -2782,9 +2781,7 @@ mod tests {
         let activation = write_activation_fixture(&fixture, &expected_hash);
         let config = format!(
             "model_instructions_file = {:?}\nmodel = \"gpt\"\n",
-            target
-                .canonicalize()
-                .expect("canonical target")
+            contract_target_path(&target)
                 .join("AGENTS.md")
                 .to_string_lossy()
         );

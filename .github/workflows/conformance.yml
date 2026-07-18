@@ -84,11 +84,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
-      - name: Check native workspace
-        run: |
-          cargo fmt --check
-          cargo test --workspace --locked
-          cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Check native formatting
+        run: cargo fmt --check
+      - name: Test native workspace
+        run: cargo test --workspace --locked
+      - name: Lint native workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Verify Python and Rust contract parity
         env:
           AGENT_SKILLS_RUST_COMPATIBILITY: "1"

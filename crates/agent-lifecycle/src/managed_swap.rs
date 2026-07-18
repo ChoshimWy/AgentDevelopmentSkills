@@ -571,13 +571,17 @@ fn preserve_system_skills(
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
             return invalid("uninstall recovery skills/.system is unsafe");
         }
-        Ok(_) => open_child_directory(
-            &backup_skills,
-            ".system",
-            Some(MANAGED_DIRECTORY_MODE),
-            "uninstall recovery skills/.system",
-        )?
-        .dir_metadata()?,
+        Ok(_) => {
+            let directory = open_child_directory(
+                &backup_skills,
+                ".system",
+                Some(MANAGED_DIRECTORY_MODE),
+                "uninstall recovery skills/.system",
+            )?;
+            let identity = directory.dir_metadata()?;
+            drop(directory);
+            identity
+        }
     };
     *state = Some(PreservedSystemSkills {
         identity: identity.clone(),
@@ -622,13 +626,14 @@ fn preserve_system_skills(
         ".system",
         "uninstall recovery system Skills source",
     )?;
-    let published = open_child_directory(
+    let published_directory = open_child_directory(
         &target_skills,
         ".system",
         Some(MANAGED_DIRECTORY_MODE),
         "preserved system Skills",
-    )?
-    .dir_metadata()?;
+    )?;
+    let published = published_directory.dir_metadata()?;
+    drop(published_directory);
     if !same_object_cap(&identity, &published) {
         return invalid("preserved system Skills identity changed after rename");
     }
@@ -655,6 +660,7 @@ fn recover_system_skills(
             if target_skills.entries()?.next().transpose()?.is_some() {
                 return invalid("empty preserved system Skills root is not empty");
             }
+            drop(target_skills);
             workspace.target_directory_cap().remove_dir("skills")?;
             require_absent(
                 workspace.target_directory_cap(),
@@ -685,13 +691,14 @@ fn recover_system_skills(
         return invalid("preserved system Skills root identity changed");
     }
     require_only_system_skills(&target_skills)?;
-    let current = open_child_directory(
+    let current_directory = open_child_directory(
         &target_skills,
         ".system",
         Some(MANAGED_DIRECTORY_MODE),
         "preserved system Skills",
-    )?
-    .dir_metadata()?;
+    )?;
+    let current = current_directory.dir_metadata()?;
+    drop(current_directory);
     if !same_object_cap(&system.identity, &current) {
         return invalid("preserved system Skills identity changed before recovery");
     }
@@ -717,16 +724,18 @@ fn recover_system_skills(
     system.phase = SystemSkillsPhase::TargetRootCreated {
         identity: current_root,
     };
-    let restored = open_child_directory(
+    let restored_directory = open_child_directory(
         &backup_skills,
         ".system",
         Some(MANAGED_DIRECTORY_MODE),
         "restored recovery system Skills",
-    )?
-    .dir_metadata()?;
+    )?;
+    let restored = restored_directory.dir_metadata()?;
+    drop(restored_directory);
     if !same_object_cap(&system.identity, &restored) {
         return invalid("restored recovery system Skills identity changed");
     }
+    drop(target_skills);
     workspace.target_directory_cap().remove_dir("skills")?;
     require_absent(
         workspace.target_directory_cap(),
