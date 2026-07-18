@@ -24,5 +24,8 @@ toml.workspace = true
 renamore.workspace = true
 winx.workspace = true
 
+[build-dependencies]
+sha2.workspace = true
+
 [lints]
 workspace = true

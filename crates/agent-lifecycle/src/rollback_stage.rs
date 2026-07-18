@@ -7,6 +7,7 @@ use super::{
 use agent_contracts::{MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256};
 use agent_engine::{install_plan_identity_hash, validate_install_plan, validate_package_lock};
 use cap_fs_ext::{FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt as _};
+use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -38,6 +39,33 @@ impl RollbackStageSnapshot {
                 LifecycleError::Invalid("staged rollback point fingerprint is invalid".to_owned())
             })
     }
+
+    pub(super) fn point(&self) -> &Value {
+        &self.point
+    }
+
+    pub(super) fn external_state(&self) -> &Value {
+        &self.source.external_state
+    }
+}
+
+pub(super) fn preview(
+    target: &Dir,
+    external_paths: &[String],
+) -> Result<(Value, Value), LifecycleError> {
+    let temporary = tempfile::Builder::new()
+        .prefix("agent-skills-rollback-preview-")
+        .tempdir()?;
+    let preview_stage = Dir::open_ambient_dir(temporary.path(), ambient_authority())?;
+    external_stage::create_directory(
+        &preview_stage,
+        OsStr::new(".agent-skills"),
+        Some(MANAGED_DIRECTORY_MODE),
+        "rollback preview metadata",
+    )?;
+    let snapshot = stage(target, &preview_stage, external_paths)?;
+    verify(target, &preview_stage, &snapshot, external_paths)?;
+    Ok((snapshot.point().clone(), snapshot.external_state().clone()))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

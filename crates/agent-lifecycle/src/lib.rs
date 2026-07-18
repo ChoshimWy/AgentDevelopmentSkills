@@ -38,6 +38,8 @@ mod staged_install;
 mod staged_tree;
 mod transaction_lock;
 mod transaction_workspace;
+mod upgrade_plan;
+mod upgrade_scope;
 
 pub use codex_config::render_codex_config;
 pub use doctor_report::inspect_doctor_report_v1;
@@ -56,6 +58,8 @@ pub use source_packages::{SourcePackageSet, snapshot_source_packages};
 pub use staged_install::ValidatedInstallPlan;
 pub use transaction_lock::{LifecycleLock, normalize_lifecycle_target};
 pub use transaction_workspace::LifecycleWorkspace;
+pub use upgrade_plan::compile_upgrade_plan;
+pub use upgrade_scope::{UpgradePlanningSnapshot, inspect_upgrade_planning_snapshot};
 
 use agent_contracts::{
     ContractError, MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256, parse_json,

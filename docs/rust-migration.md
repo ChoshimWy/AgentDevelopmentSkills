@@ -331,18 +331,26 @@ v1 and Upgrade Plan v1 natively. It rejects unknown fields, unstable command,
 selection, migration, or step ordering, stale attestations, malformed
 permission approvals, invalid external-handler/rollback identities, and
 self-consistent semantic tampering. The non-default `upgrade-plan-build`
-command now compiles the complete Plan from frozen, mutually anchored current
-and candidate Install Plans/Lockfiles, Conformance evidence, rollback point,
-and removals. The compiler currently accepts only rollback points whose
-external-state fingerprint proves an empty scope, rejects every migration,
-and rejects semantically changed Apple plans because frozen selection alone
-cannot prove the target has no Activation ownership. Source
-activation/deactivation upgrades fail closed and remain on Python until the
-Rust lifecycle emits a fingerprinted receipt binding target, trusted handler,
-exact paths, and Activation ownership. No-change, non-Apple changed, and
-non-activated partial-uninstall results are byte-differential-tested against
-Python, while `upgrade-evidence-validate` and `upgrade-plan-validate` retain
-negative contract coverage. Mutating upgrade/rollback execution still remains
+command now takes only candidate artifacts, evidence, target and removal
+intent, plus the frozen launcher when retained source Activation requires it.
+`agent-lifecycle` reads and rechecks current state through held directory
+capabilities while holding the target transaction lock, derives Activation
+ownership, selects the trusted activation/deactivation/preserve handler,
+previews and rechecks the exact rollback scope, and emits an opaque in-process
+receipt. That receipt binds target, action, current/candidate identities,
+removals, exact paths, external-state hash, rollback point and planned
+migrations. Its handler identity hashes the locked local Rust source closure,
+workspace Cargo lock, target build context and pinned toolchain declaration.
+The lifecycle compiler rejects unknown fields, altered receipts,
+ownership-policy drift, path/hash
+drift and unbound migrations. CLI callers cannot supply raw current locks,
+rollback points, migrations, handlers or external paths. Legacy Activation
+Lock v1 planning and changed Apple activation/deactivation are now covered;
+external-free results remain byte-differential-tested against Python, while
+native Activation uses semantic differential checks because Rust additionally
+owns `bin/agent-skills` and uses a native handler implementation hash.
+`upgrade-evidence-validate` and `upgrade-plan-validate` retain negative
+contract coverage. Mutating upgrade/rollback execution still remains
 behind the existing Python approval gate until the Rust executor binds these
 validated artifacts to the lifecycle transaction. Doctor,
 uninstall, and source activation already have native compatibility commands

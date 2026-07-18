@@ -378,16 +378,22 @@ validates Upgrade Conformance Evidence v1 and Upgrade Plan v1, including
 stable attestation semantics, exact selections/removals, permission approvals,
 external-handler identity, migration ordering, rollback identity, and
 self-consistent tampering. The non-default `upgrade-plan-build` command now
-reconstructs the complete approval contract from mutually anchored current
-and candidate Install Plans/Lockfiles, Conformance evidence, rollback identity,
-and removals without reading mutable host state. It deliberately accepts only
-rollback points that prove an empty external scope, rejects migrations, and
-rejects changed Apple plans because selection alone cannot prove the target
-has no Activation ownership. Source activation/deactivation upgrades remain
-on Python until the Rust lifecycle can generate a target- and ownership-bound
-external-scope receipt. No-change, changed non-Apple, and non-activated
-partial-uninstall outputs are byte-for-byte differential-tested against
-Python; `upgrade-evidence-validate` and `upgrade-plan-validate` retain negative
+accepts only the candidate Plan/Lock, Conformance evidence, target, removal
+request, and—when source Activation is retained—the frozen native launcher.
+The lifecycle crate opens the installed target through directory capabilities,
+loads and rechecks the current locks itself, derives Activation ownership,
+selects the only permitted activation/deactivation/preserve handler, freezes
+the exact external paths and rollback state, and issues a receipt bound to the
+locked local Rust source/dependency, target, and toolchain build identity for
+in-process compiler consumption. Raw current locks, rollback
+points, migrations, handlers, and external paths are no longer CLI inputs.
+Legacy Activation Lock v1 migration is planned from that receipt; changed
+Apple, preserve, and deactivation planning now fail closed on ownership or
+scope drift instead of being categorically rejected. External-free results
+remain byte-for-byte differential-tested against Python, while native
+Activation results are semantic-differential-tested because the Rust route
+also owns `bin/agent-skills` and has its own handler implementation hash.
+`upgrade-evidence-validate` and `upgrade-plan-validate` retain negative
 contract coverage. Mutating upgrade and rollback routing remains on the
 existing approval-bound path until the native executor passes the same gates.
 The installed native

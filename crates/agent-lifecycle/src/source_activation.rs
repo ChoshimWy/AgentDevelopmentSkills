@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) const ACTIVATION_HANDLER_ID: &str = "core.source-activation.apple-codex-v1";
 pub(super) const DEACTIVATION_HANDLER_ID: &str = "core.source-deactivation.apple-codex-v1";
+pub(super) const PRESERVE_HANDLER_ID: &str = "core.source-preserve.apple-codex-v1";
 
 static CONFIG_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
