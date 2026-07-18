@@ -79,7 +79,8 @@ contains:
 - an `agent-runtime` crate for deterministic fake-adapter execution, node
   lifecycle transitions, idempotent retry limits, attempt-scoped approvals,
   resource scheduling, append-only JSONL ledger replay, and package-Lock-bound
-  workflow execution;
+  workflow execution, plus Adapter Request/Result v1 identity freezing and
+  structured evidence validation;
 - schema-aligned capability-contract type validation shared by the Python
   baseline and native normalization path;
 - Python-to-Rust byte-level differential tests covering malicious provider
@@ -101,9 +102,11 @@ also available through the parallel CLI, including local-registry,
 relative-path, and pinned HTTPS sources, deterministic lineage, validation,
 diff, explanation, and plan freezing. Phase 4 now also exposes a deterministic
 fake-adapter runtime for semantic differential testing; it never invokes an
-external Provider or package code. Recorded Adapter Results, session/worktree
-orchestration, and transactional lifecycle operations remain the next Phase 4
-boundaries; production CLI parity remains a later phase gate.
+external Provider or package code. Adapter Request/Result v1 contracts are now
+available through the parallel CLI and are the validated foundation for the
+next Recorded Adapter execution increment. Recorded Result consumption,
+session/worktree orchestration, and transactional lifecycle operations remain
+the next Phase 4 boundaries; production CLI parity remains a later phase gate.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

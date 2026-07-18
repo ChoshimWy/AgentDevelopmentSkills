@@ -13,6 +13,11 @@ import unittest
 from copy import deepcopy
 
 from agent_workflow import __version__ as PYTHON_CORE_VERSION
+from agent_workflow.adapters import (
+    build_adapter_request,
+    validate_adapter_request,
+    validate_adapter_result,
+)
 from agent_workflow.canonical_json import dump, dumps, sha256
 from agent_workflow.canonical_json import (
     MAX_CANONICAL_INTEGER_DIGITS,
@@ -1748,6 +1753,204 @@ class RustCompatibilityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertIn("ids must be unique", result.stderr)
+
+    def test_adapter_request_and_result_contracts_match_python(self) -> None:
+        from tests.test_adapters import StructuredAdapterContractTests
+
+        fixture = StructuredAdapterContractTests()
+        fixture.setUp()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_path = root / "plan.json"
+            context_path = root / "context.json"
+            request_path = root / "request.json"
+            result_path = root / "result.json"
+            dump(fixture.plan, plan_path)
+            dump(fixture.context, context_path)
+
+            built = self.run_rust(
+                "adapter-request-build",
+                str(plan_path),
+                "apple-verify",
+                str(context_path),
+                "verify-invocation-1",
+            )
+            self.assertEqual(built.returncode, 0, built.stderr)
+            self.assertEqual(json.loads(built.stdout), fixture.request)
+            dump(fixture.request, request_path)
+            validated = self.run_rust(
+                "adapter-request-validate",
+                str(request_path),
+            )
+            self.assertEqual(validated.returncode, 0, validated.stderr)
+            self.assertEqual(json.loads(validated.stdout), fixture.request)
+
+            request_cases = []
+            tampered = deepcopy(fixture.request)
+            tampered["request_id"] = "adapter-request-tampered"
+            request_cases.append(tampered)
+            mismatched_checkpoints = deepcopy(fixture.request)
+            mismatched_checkpoints["checkpoints"]["CP0"] = "pending"
+            request_cases.append(mismatched_checkpoints)
+            invalid_binding = deepcopy(fixture.request)
+            invalid_binding["binding"]["mode"] = " "
+            request_cases.append(invalid_binding)
+            unknown_field = deepcopy(fixture.request)
+            unknown_field["unexpected"] = True
+            request_cases.append(unknown_field)
+            for index, request in enumerate(request_cases):
+                with self.subTest(request_case=index):
+                    with self.assertRaises(ContractError):
+                        validate_adapter_request(request)
+                    dump(request, request_path)
+                    rejected = self.run_rust(
+                        "adapter-request-validate",
+                        str(request_path),
+                    )
+                    self.assertEqual(rejected.returncode, 2)
+                    self.assertEqual(rejected.stdout, "")
+
+            base_result = fixture.result()
+            result_cases: list[tuple[dict, dict, bool]] = [
+                (fixture.request, base_result, True),
+            ]
+            unknown_result = deepcopy(base_result)
+            unknown_result["unexpected"] = True
+            result_cases.append((fixture.request, unknown_result, False))
+            invalid_hash = deepcopy(base_result)
+            invalid_hash["artifacts"][0]["sha256"] = "not-a-hash"
+            result_cases.append((fixture.request, invalid_hash, False))
+            duplicate_artifact = deepcopy(base_result)
+            duplicate_artifact["artifacts"].append(
+                deepcopy(duplicate_artifact["artifacts"][0])
+            )
+            result_cases.append((fixture.request, duplicate_artifact, False))
+            unknown_artifact = deepcopy(base_result)
+            unknown_artifact["evidence"][0]["artifact_ids"] = ["missing"]
+            result_cases.append((fixture.request, unknown_artifact, False))
+            empty_data = deepcopy(base_result)
+            empty_data["evidence"][0]["data"] = {}
+            result_cases.append((fixture.request, empty_data, False))
+            failed_without_evidence = deepcopy(base_result)
+            failed_without_evidence["status"] = "failed"
+            failed_without_evidence["failure_attribution"] = {
+                "category": "code",
+                "summary": "failure",
+            }
+            result_cases.append((fixture.request, failed_without_evidence, False))
+            failed_cleanup = deepcopy(base_result)
+            failed_cleanup["cleanup"] = [
+                {
+                    "resource": "device",
+                    "status": "failed",
+                    "detail": "release failed",
+                }
+            ]
+            result_cases.append((fixture.request, failed_cleanup, False))
+            incomplete_gap = deepcopy(base_result)
+            incomplete_gap["no_test_reason"] = "no target"
+            result_cases.append((fixture.request, incomplete_gap, False))
+            null_gap = deepcopy(base_result)
+            null_gap["no_test_reason"] = None
+            null_gap["suggested_validation"] = None
+            result_cases.append((fixture.request, null_gap, True))
+            no_evidence = deepcopy(base_result)
+            no_evidence["evidence"] = []
+            no_evidence["artifacts"] = []
+            result_cases.append((fixture.request, no_evidence, False))
+
+            auto_plan = deepcopy(fixture.plan)
+            auto_plan["nodes"][0]["capability"] = "verification.apple.auto"
+            auto_plan["nodes"][0]["binding"]["mode"] = "auto"
+            auto_request = build_adapter_request(
+                auto_plan,
+                "apple-verify",
+                context=fixture.context,
+                invocation_id="verify-auto-invocation-1",
+            )
+            auto_result = fixture.result()
+            for field in (
+                "request_id",
+                "invocation_id",
+                "plan_fingerprint",
+                "node_id",
+                "capability",
+                "provider",
+                "binding",
+            ):
+                auto_result[field] = auto_request[field]
+            missing_execution = deepcopy(auto_result)
+            result_cases.append((auto_request, missing_execution, False))
+            auto_result["evidence"][0]["data"] = {
+                "level": "unit",
+                "executed_validation": [
+                    {"kind": "quick-verify", "status": "passed"}
+                ],
+            }
+            result_cases.append((auto_request, auto_result, True))
+
+            review_plan = deepcopy(fixture.plan)
+            review_plan["nodes"][0]["capability"] = "review.independent"
+            review_plan["nodes"][0]["provider"] = "core"
+            review_request = build_adapter_request(
+                review_plan,
+                "apple-verify",
+                context=fixture.context,
+                invocation_id="review-invocation-1",
+            )
+            review_result = fixture.result()
+            for field in (
+                "request_id",
+                "invocation_id",
+                "plan_fingerprint",
+                "node_id",
+                "capability",
+                "provider",
+                "binding",
+            ):
+                review_result[field] = review_request[field]
+            review_result["artifacts"] = []
+            review_result["evidence"] = [
+                {
+                    "kind": "review",
+                    "status": "passed",
+                    "summary": "review passed",
+                    "data": {
+                        "blocking_issues": [],
+                        "implementation_actor": "builder-1",
+                        "reviewer_actor": "reviewer-1",
+                    },
+                    "artifact_ids": [],
+                }
+            ]
+            result_cases.append((review_request, review_result, True))
+            same_actor = deepcopy(review_result)
+            same_actor["evidence"][0]["data"]["reviewer_actor"] = "builder-1"
+            result_cases.append((review_request, same_actor, False))
+            unblocked_issue = deepcopy(review_result)
+            unblocked_issue["evidence"][0]["data"]["blocking_issues"] = ["P1"]
+            result_cases.append((review_request, unblocked_issue, False))
+
+            for index, (request, result, expected) in enumerate(result_cases):
+                with self.subTest(result_case=index):
+                    python_accepted = True
+                    try:
+                        validate_adapter_result(request, result)
+                    except ContractError:
+                        python_accepted = False
+                    self.assertEqual(python_accepted, expected)
+                    dump(request, request_path)
+                    dump(result, result_path)
+                    native = self.run_rust(
+                        "adapter-result-validate",
+                        str(request_path),
+                        str(result_path),
+                    )
+                    self.assertEqual(native.returncode == 0, expected, native.stderr)
+                    if expected:
+                        self.assertEqual(json.loads(native.stdout), result)
+                    else:
+                        self.assertEqual(native.stdout, "")
 
     def test_fake_runtime_semantics_resume_and_lock_match_python(self) -> None:
         registry = ManifestRegistry.from_directory(ROOT / "platforms")

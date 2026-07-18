@@ -5,6 +5,10 @@
 //! mirrors the Python conformance executor while Phase 4 is migrated
 //! incrementally.
 
+mod adapters;
+
+pub use adapters::{build_adapter_request, validate_adapter_request, validate_adapter_result};
+
 use agent_contracts::{canonical_json, canonical_sha256, parse_json};
 use agent_engine::validate_plan_package_lock;
 use cap_std::ambient_authority;

@@ -6,7 +6,9 @@ use agent_engine::{
     resolve_package_lock, resolve_policy, validate_package_lock,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
-use agent_runtime::execute_fake_plan;
+use agent_runtime::{
+    build_adapter_request, execute_fake_plan, validate_adapter_request, validate_adapter_result,
+};
 use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -142,6 +144,17 @@ enum Command {
         #[arg(long)]
         identity_seed: Option<String>,
     },
+    /// Freeze one workflow node into an Adapter Request v1.
+    AdapterRequestBuild {
+        plan: PathBuf,
+        node_id: String,
+        context: PathBuf,
+        invocation_id: String,
+    },
+    /// Validate one frozen Adapter Request v1.
+    AdapterRequestValidate { request: PathBuf },
+    /// Validate one Adapter Result v1 against its frozen request.
+    AdapterResultValidate { request: PathBuf, result: PathBuf },
 }
 
 #[allow(clippy::too_many_lines)]
@@ -349,6 +362,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 identity_seed.as_deref(),
             )?;
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::AdapterRequestBuild {
+            plan,
+            node_id,
+            context,
+            invocation_id,
+        } => {
+            let value = build_adapter_request(
+                &load_json(plan)?,
+                &node_id,
+                &load_json(context)?,
+                &invocation_id,
+            )?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::AdapterRequestValidate { request } => {
+            let value = load_json(request)?;
+            validate_adapter_request(&value)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::AdapterResultValidate { request, result } => {
+            let request = load_json(request)?;
+            let result = load_json(result)?;
+            validate_adapter_result(&request, &result)?;
+            print!("{}", String::from_utf8(canonical_json(&result)?)?);
         }
     }
     Ok(())
