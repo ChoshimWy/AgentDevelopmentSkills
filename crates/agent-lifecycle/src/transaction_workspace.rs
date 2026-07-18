@@ -1,6 +1,6 @@
 use super::{
     INSTALL_BACKUP_PREFIX, INSTALL_STAGE_PREFIX, LifecycleError, LifecycleLock,
-    open_child_directory, same_object_cap, staged_tree,
+    ValidatedInstallPlan, open_child_directory, same_object_cap, staged_install, staged_tree,
 };
 use cap_std::fs::Dir;
 use serde_json::Value;
@@ -18,15 +18,23 @@ static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 ///
 /// This is a transaction foundation rather than an install implementation. It
 /// creates two recovery-visible workspace directories, keeps their identities
-/// bound to the locked target, and can stage plan-recorded package/Skill trees.
-/// Production install/rollback commands are not yet routed through it.
+/// bound to the locked target, and can assemble a complete managed stage from
+/// one [`ValidatedInstallPlan`]. External preservation and managed-root swaps
+/// are not yet implemented, and production install/rollback commands are not
+/// routed through it.
 #[must_use = "the lifecycle workspace must be held for the full transaction"]
 pub struct LifecycleWorkspace {
     backup: WorkspaceEntry,
     lock: Option<LifecycleLock>,
     stage: WorkspaceEntry,
+    staged_install_identity: Option<StagedInstallIdentity>,
     target: PathBuf,
     target_directory: Dir,
+}
+
+struct StagedInstallIdentity {
+    install_plan_fingerprint: String,
+    package_lock_fingerprint: String,
 }
 
 impl LifecycleWorkspace {
@@ -74,6 +82,7 @@ impl LifecycleWorkspace {
                 backup,
                 lock: Some(lock),
                 stage,
+                staged_install_identity: None,
                 target,
                 target_directory,
             };
@@ -117,6 +126,93 @@ impl LifecycleWorkspace {
     pub fn backup_directory(&self) -> Result<&Dir, LifecycleError> {
         self.validate()?;
         self.backup.directory()
+    }
+
+    /// Create the complete managed staging layout and freeze its metadata.
+    ///
+    /// The supplied token owns an already validated Install Plan and persistent
+    /// package Lockfile. `instructions` must be the exact global `AGENTS.md`
+    /// bytes frozen by that plan. This operation creates all three managed roots
+    /// and writes canonical Lockfiles before any plan-bound package or Skill is
+    /// accepted.
+    ///
+    /// External `.system` Skills, Activation state, rollback points, and root
+    /// swaps are deliberately outside this API.
+    ///
+    /// # Errors
+    /// Fails closed if the workspace is not empty, the instructions differ from
+    /// the plan, or any managed directory/file cannot be created atomically.
+    pub fn stage_install_layout(
+        &mut self,
+        plan: &ValidatedInstallPlan,
+        instructions: &[u8],
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        if self.staged_install_identity.is_some() {
+            return invalid("lifecycle workspace already has a staged Install Plan");
+        }
+        staged_install::stage_layout(self.stage.directory()?, plan, instructions)?;
+        staged_install::validate_layout(self.stage.directory()?, plan)?;
+        self.staged_install_identity = Some(StagedInstallIdentity {
+            install_plan_fingerprint: plan.fingerprint().to_owned(),
+            package_lock_fingerprint: plan.package_lock_fingerprint().to_owned(),
+        });
+        self.validate()
+    }
+
+    /// Stage one package selected by the validated Install Plan.
+    ///
+    /// # Errors
+    /// Fails closed for an unknown package ID, unsafe source, duplicate
+    /// destination, or content that differs from the plan-owned record.
+    pub fn stage_plan_package(
+        &mut self,
+        plan: &ValidatedInstallPlan,
+        package_id: &str,
+        source: &Dir,
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        self.validate_staged_install_identity(plan)?;
+        staged_install::validate_layout(self.stage.directory()?, plan)?;
+        staged_install::stage_package(self.stage.directory()?, plan, package_id, source)?;
+        staged_install::validate_layout(self.stage.directory()?, plan)?;
+        self.validate()
+    }
+
+    /// Stage one Skill selected by the validated Install Plan.
+    ///
+    /// # Errors
+    /// Fails closed for an unknown Skill name, unsafe source, duplicate
+    /// destination, or content that differs from the plan-owned record.
+    pub fn stage_plan_skill(
+        &mut self,
+        plan: &ValidatedInstallPlan,
+        skill_name: &str,
+        source: &Dir,
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        self.validate_staged_install_identity(plan)?;
+        staged_install::validate_layout(self.stage.directory()?, plan)?;
+        staged_install::stage_skill(self.stage.directory()?, plan, skill_name, source)?;
+        staged_install::validate_layout(self.stage.directory()?, plan)?;
+        self.validate()
+    }
+
+    /// Verify the complete managed stage against one validated plan token.
+    ///
+    /// This is the native pre-swap gate for the managed roots only. It checks
+    /// exact root topology, canonical Lockfile bytes, all package/Skill trees,
+    /// Manifest-derived semantics, AGENTS composition, Bindings, permissions,
+    /// and plan/Lockfile identity.
+    ///
+    /// # Errors
+    /// Fails closed for missing, extra, replaced, or semantically inconsistent
+    /// staged content.
+    pub fn verify_staged_install(&self, plan: &ValidatedInstallPlan) -> Result<(), LifecycleError> {
+        self.validate()?;
+        self.validate_staged_install_identity(plan)?;
+        staged_install::verify(self.stage.directory()?, plan)?;
+        self.validate()
     }
 
     /// Copy and verify one caller-supplied package tree record.
@@ -247,6 +343,23 @@ impl LifecycleWorkspace {
             .take()
             .ok_or_else(|| LifecycleError::Invalid("lifecycle workspace lock is inactive".into()))?
             .release()
+    }
+
+    fn validate_staged_install_identity(
+        &self,
+        plan: &ValidatedInstallPlan,
+    ) -> Result<(), LifecycleError> {
+        let identity = self.staged_install_identity.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid(
+                "lifecycle workspace has no staged Install Plan layout".to_owned(),
+            )
+        })?;
+        if identity.install_plan_fingerprint != plan.fingerprint()
+            || identity.package_lock_fingerprint != plan.package_lock_fingerprint()
+        {
+            return invalid("validated Install Plan differs from staged workspace identity");
+        }
+        Ok(())
     }
 }
 

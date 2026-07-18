@@ -2,14 +2,17 @@
 //!
 //! Doctor inspection is non-mutating. The explicit [`LifecycleLock`] and
 //! [`LifecycleWorkspace`] APIs create the target/lock and temporary stage/backup
-//! foundations and can copy plan-recorded package/Skill trees into staging.
-//! They do not compose or swap a complete installation, upgrade, roll back, or
-//! remove managed content and are not yet wired into production commands.
+//! foundations. [`ValidatedInstallPlan`] binds a complete Install Plan to its
+//! persistent Lockfile; the workspace can then assemble and semantically verify
+//! all three managed roots before a swap. External `.system`/Activation state,
+//! rollback-point assembly, root swaps, upgrade/rollback, and removal remain
+//! outside this slice, which is not yet wired into production commands.
 
 mod doctor_report;
 mod packages;
 mod post_install;
 mod rollback;
+mod staged_install;
 mod staged_tree;
 mod transaction_lock;
 mod transaction_workspace;
@@ -17,6 +20,7 @@ mod transaction_workspace;
 pub use doctor_report::inspect_doctor_report_v1;
 #[cfg(test)]
 use doctor_report::validate_doctor_report_v1;
+pub use staged_install::ValidatedInstallPlan;
 pub use transaction_lock::LifecycleLock;
 pub use transaction_workspace::LifecycleWorkspace;
 
