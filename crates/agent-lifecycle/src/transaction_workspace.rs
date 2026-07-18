@@ -32,6 +32,7 @@ static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[must_use = "the lifecycle workspace must be held for the full transaction"]
 pub struct LifecycleWorkspace {
     backup: WorkspaceEntry,
+    contract_target: PathBuf,
     lock: Option<LifecycleLock>,
     stage: WorkspaceEntry,
     staged_external_state: Option<external_stage::ExternalStageSnapshot>,
@@ -57,6 +58,18 @@ impl LifecycleWorkspace {
         Self::from_lock(LifecycleLock::acquire(target_root)?)
     }
 
+    /// Acquire an existing target and create one stage/backup workspace pair.
+    ///
+    /// Unlike [`Self::begin`], this never creates the target root. Destructive
+    /// lifecycle commands should use this entry point.
+    ///
+    /// # Errors
+    /// Fails when the target is missing or unsafe, or when normal workspace
+    /// acquisition fails.
+    pub fn begin_existing(target_root: impl AsRef<Path>) -> Result<Self, LifecycleError> {
+        Self::from_lock(LifecycleLock::acquire_existing(target_root)?)
+    }
+
     /// Create a workspace under an already-held lifecycle lock.
     ///
     /// # Errors
@@ -64,6 +77,7 @@ impl LifecycleWorkspace {
     pub fn from_lock(lock: LifecycleLock) -> Result<Self, LifecycleError> {
         lock.validate()?;
         let target = lock.target().to_path_buf();
+        let contract_target = lock.contract_target().to_path_buf();
         let target_directory = lock.target_directory()?;
         for attempt in 0..WORKSPACE_ATTEMPTS {
             lock.validate()?;
@@ -90,6 +104,7 @@ impl LifecycleWorkspace {
             };
             let workspace = Self {
                 backup,
+                contract_target,
                 lock: Some(lock),
                 stage,
                 staged_external_state: None,
@@ -109,6 +124,12 @@ impl LifecycleWorkspace {
     #[must_use]
     pub fn target(&self) -> &Path {
         &self.target
+    }
+
+    /// Return the target spelling used by compatibility reports and config.
+    #[must_use]
+    pub fn contract_target(&self) -> &Path {
+        &self.contract_target
     }
 
     /// Return the stage directory path for diagnostics and recovery reporting.

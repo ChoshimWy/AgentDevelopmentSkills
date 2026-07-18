@@ -8,7 +8,9 @@ use agent_engine::{
     resolve_package_lock, resolve_policy, validate_compiled_plan, validate_package_lock,
     validate_plan_package_lock,
 };
-use agent_lifecycle::{inspect_doctor_baseline, inspect_doctor_report_v1, render_codex_config};
+use agent_lifecycle::{
+    LifecycleWorkspace, inspect_doctor_baseline, inspect_doctor_report_v1, render_codex_config,
+};
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
     attach_adapter_result, build_adapter_request, claim_provider_invocation,
@@ -164,6 +166,12 @@ enum Command {
         agents_path: PathBuf,
         #[arg(long)]
         existing_config: Option<PathBuf>,
+    },
+    /// Execute the guarded native full-uninstall compatibility path.
+    LifecycleUninstall {
+        target_root: PathBuf,
+        #[arg(long = "platform")]
+        platforms: Vec<String>,
     },
     /// Execute a deterministic native fake-adapter workflow runtime.
     RuntimeExecute {
@@ -624,6 +632,15 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             )?;
             let rendered = render_codex_config(existing.as_deref(), &shared, agents_path)?;
             std::io::stdout().write_all(&rendered)?;
+        }
+        Command::LifecycleUninstall {
+            target_root,
+            platforms,
+        } => {
+            let workspace = LifecycleWorkspace::begin_existing(target_root)?;
+            let published = workspace.publish_uninstall_for_platforms(&platforms)?;
+            let value = published.commit()?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
         Command::RuntimeExecute {
             plan,

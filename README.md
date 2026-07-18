@@ -112,6 +112,8 @@ cargo run --locked -p agent-skills-rs -- \
   doctor-report /path/to/installed-root --schemas schemas \
   --python-version 3.11.0
 cargo run --locked -p agent-skills-rs -- \
+  lifecycle-uninstall /path/to/installed-root --platform all
+cargo run --locked -p agent-skills-rs -- \
   runtime-execute /path/to/workflow-plan.json \
   --behaviors /path/to/fake-behaviors.json
 cargo run --locked -p agent-skills-rs -- \
@@ -277,8 +279,12 @@ managed and external rollback point, moves all managed roots into a private
 backup, removes only Activation-owned files, preserves local profiles,
 `config.toml` semantics, and `skills/.system`, and supports explicit commit,
 rollback, and drop-time recovery. Fresh-install activation and production
-command routing remain later lifecycle slices; the source `uninstall.sh` has
-not switched to the native guard yet.
+command routing remain later lifecycle slices. The non-default
+`lifecycle-uninstall` compatibility command now drives this guard, rejects a
+missing target without creating it, and matches the successful Python JSON
+report and resulting filesystem state. It does not yet provide the production
+shell's dry-run, human-readable, or canonical blocked-report surfaces, and the
+source `uninstall.sh` has not switched to it.
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
 holds directory capabilities and opens contract files without following

@@ -1342,6 +1342,11 @@ mod tests {
 
         let workspace =
             LifecycleWorkspace::begin(fixture.target()).expect("begin uninstall workspace");
+        let expected_target = workspace
+            .contract_target()
+            .to_str()
+            .expect("UTF-8 target")
+            .to_owned();
         let published = workspace.publish_uninstall().expect("publish uninstall");
         published.verify().expect("verify published uninstall");
         assert_eq!(
@@ -1370,8 +1375,20 @@ mod tests {
 
         let report = published.commit().expect("commit uninstall");
         assert_eq!(
-            report.get("status").and_then(Value::as_str),
-            Some("uninstalled")
+            report,
+            json!({
+                "activated_files": [],
+                "config_action": "preserved",
+                "legacy_links_restored": false,
+                "managed_roots": ["AGENTS.md", "skills", ".agent-skills"],
+                "preserved_profiles": ["readonly.config.toml"],
+                "preserved_system_skills": true,
+                "removed_packages": ["core"],
+                "schema_version": "1.0",
+                "selected_platforms": [],
+                "status": "uninstalled",
+                "target_root": expected_target,
+            })
         );
         assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
         assert!(
@@ -1418,6 +1435,39 @@ mod tests {
             std::fs::read(fixture.target().join("config.toml")).expect("read restored config"),
             b"model = \"local\"\n"
         );
+    }
+
+    #[test]
+    fn full_uninstall_rejects_invalid_platform_selections_before_root_moves() {
+        for (platforms, message) in [
+            (
+                vec!["all".to_owned(), "apple".to_owned()],
+                "--platform all cannot be combined with another platform",
+            ),
+            (
+                vec!["apple".to_owned(), "apple".to_owned()],
+                "selected platforms must be unique",
+            ),
+            (vec!["apple".to_owned()], "platform is not installed: apple"),
+        ] {
+            let fixture = Fixture::new();
+            materialize_current_install(&fixture);
+            let workspace =
+                LifecycleWorkspace::begin_existing(fixture.target()).expect("begin uninstall");
+            let error = workspace
+                .publish_uninstall_for_platforms(&platforms)
+                .expect_err("invalid platform selection must fail");
+            assert_eq!(error.to_string(), message);
+            assert!(fixture.target().join("AGENTS.md").is_file());
+            assert!(
+                fixture
+                    .target()
+                    .join(".agent-skills/install-lock.json")
+                    .is_file()
+            );
+            assert!(fixture.target().join("skills").is_dir());
+            assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        }
     }
 
     #[test]

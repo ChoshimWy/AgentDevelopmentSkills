@@ -1,8 +1,9 @@
 use super::{
     LifecycleError, LifecycleWorkspace, MANAGED_DIRECTORY_MODE, MANAGED_FILE_MODE,
-    ValidatedInstallPlan, external_stage, open_child_directory, open_child_file, same_object_cap,
-    source_activation,
+    ValidatedInstallPlan, external_stage, load_json_file, open_child_directory, open_child_file,
+    same_object_cap, source_activation,
 };
+use agent_engine::validate_install_plan;
 use cap_std::fs::{Dir, Metadata};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -83,6 +84,11 @@ struct RemovalRootMove {
     backed_up: bool,
     identity: Metadata,
     root: ManagedRoot,
+}
+
+struct UninstallSelection {
+    removed_packages: Vec<String>,
+    selected_platforms: Vec<String>,
 }
 
 struct PreservedSystemSkills {
@@ -222,7 +228,28 @@ impl LifecycleWorkspace {
     /// Activation ownership, unsupported activation paths, external drift,
     /// namespace collisions, or incomplete recovery.
     pub fn publish_uninstall(self) -> Result<PublishedUninstall, LifecycleError> {
-        self.publish_uninstall_with(|_, _| Ok(()), |_, _| Ok(()), |_, _| Ok(()))
+        self.publish_uninstall_for_platforms(&[])
+    }
+
+    /// Publish a full uninstall for the exact installed platform set.
+    ///
+    /// An empty selection or the single value `all` selects every installed
+    /// platform. Partial, duplicate, unknown, or mixed `all` selections fail
+    /// before any managed root is moved.
+    ///
+    /// # Errors
+    /// Fails under the same conditions as [`Self::publish_uninstall`], or when
+    /// the requested platform set does not exactly match the installed set.
+    pub fn publish_uninstall_for_platforms(
+        self,
+        requested_platforms: &[String],
+    ) -> Result<PublishedUninstall, LifecycleError> {
+        self.publish_uninstall_with(
+            requested_platforms,
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+            |_, _| Ok(()),
+        )
     }
 
     #[cfg(test)]
@@ -232,22 +259,31 @@ impl LifecycleWorkspace {
         handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
         system_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
     ) -> Result<PublishedUninstall, LifecycleError> {
-        self.publish_uninstall_with(root_hook, handler_hook, system_hook)
+        self.publish_uninstall_with(&[], root_hook, handler_hook, system_hook)
     }
 
     fn publish_uninstall_with(
         mut self,
+        requested_platforms: &[String],
         mut root_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
         mut handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
         mut system_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
     ) -> Result<PublishedUninstall, LifecycleError> {
         let target = self.target_directory()?;
-        let deactivation =
-            source_activation::SourceDeactivation::prepare_for_uninstall(&target, self.target())?;
+        let selection = inspect_uninstall_selection(&target, requested_platforms)?;
+        let target_root = self
+            .contract_target()
+            .to_str()
+            .ok_or_else(|| LifecycleError::Invalid("uninstall target is not valid UTF-8".into()))?
+            .to_owned();
+        let deactivation = source_activation::SourceDeactivation::prepare_for_uninstall(
+            &target,
+            self.contract_target(),
+        )?;
         let external_paths = deactivation
             .as_ref()
             .map_or(&[][..], |prepared| prepared.scope());
-        let rollback_fingerprint = self.stage_uninstall_rollback(external_paths)?;
+        self.stage_uninstall_rollback(external_paths)?;
         if let Some(prepared) = deactivation.as_ref() {
             prepared.revalidate(&target)?;
         }
@@ -302,13 +338,15 @@ impl LifecycleWorkspace {
                 .get("config_action")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!("missing")),
-            "handler": deactivation_result.get("handler").cloned().unwrap_or(Value::Null),
             "legacy_links_restored": false,
             "managed_roots": MANAGED_ROOTS.iter().map(|root| root.name).collect::<Vec<_>>(),
             "preserved_profiles": preserved_profiles,
             "preserved_system_skills": system_skills.is_some(),
-            "rollback_point": rollback_fingerprint,
+            "removed_packages": selection.removed_packages,
+            "schema_version": "1.0",
+            "selected_platforms": selection.selected_platforms,
             "status": "published",
+            "target_root": target_root,
         });
         Ok(PublishedUninstall {
             deactivation,
@@ -319,6 +357,89 @@ impl LifecycleWorkspace {
             workspace: Some(self),
         })
     }
+}
+
+fn inspect_uninstall_selection(
+    target: &Dir,
+    requested_platforms: &[String],
+) -> Result<UninstallSelection, LifecycleError> {
+    let managed = open_child_directory(
+        target,
+        ".agent-skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "managed metadata directory",
+    )?;
+    let install_lock = load_json_file(
+        &managed,
+        "install-lock.json",
+        MANAGED_FILE_MODE,
+        "source Install Lock",
+    )?;
+    validate_install_plan(&install_lock)?;
+    if install_lock.get("status").and_then(Value::as_str) != Some("installed") {
+        return invalid("source uninstall requires an installed Install Lock");
+    }
+    let installed = string_array(&install_lock, "selected_platforms")?;
+    let removed_packages = install_lock
+        .get("selected_packages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| LifecycleError::Invalid("selected_packages must be an array".into()))?
+        .iter()
+        .map(|value| {
+            value
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    LifecycleError::Invalid("selected package id must be a string".into())
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let selected_platforms = if requested_platforms.is_empty()
+        || requested_platforms == ["all".to_owned()]
+    {
+        installed.clone()
+    } else {
+        if requested_platforms.iter().any(|value| value == "all") {
+            return invalid("--platform all cannot be combined with another platform");
+        }
+        let requested = requested_platforms.iter().cloned().collect::<BTreeSet<_>>();
+        if requested.len() != requested_platforms.len() {
+            return invalid("selected platforms must be unique");
+        }
+        let installed_set = installed.iter().cloned().collect::<BTreeSet<_>>();
+        let unknown = requested
+            .difference(&installed_set)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unknown.is_empty() {
+            return invalid(format!("platform is not installed: {}", unknown.join(", ")));
+        }
+        if requested != installed_set {
+            return invalid(
+                "partial platform uninstall is not available in the current source installer; select all installed platforms",
+            );
+        }
+        requested.into_iter().collect()
+    };
+    Ok(UninstallSelection {
+        removed_packages,
+        selected_platforms,
+    })
+}
+
+fn string_array(value: &Value, key: &str) -> Result<Vec<String>, LifecycleError> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| LifecycleError::Invalid(format!("{key} must be an array")))?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| LifecycleError::Invalid(format!("{key} entries must be strings")))
+        })
+        .collect()
 }
 
 fn capture_removal_roots(
@@ -929,7 +1050,7 @@ impl PublishedInstall {
             let scratch_path = workspace.handler_scratch_path();
             let prepared = source_activation::SourceActivation::prepare(
                 &target,
-                workspace.target(),
+                workspace.contract_target(),
                 session_launcher,
             )?;
             workspace.require_rollback_external_paths(prepared.scope())?;
@@ -961,8 +1082,10 @@ impl PublishedInstall {
             workspace.verify_published_install(&self.plan)?;
             let target = workspace.target_directory()?;
             let scratch = workspace.handler_scratch_directory()?;
-            let prepared =
-                source_activation::SourceDeactivation::prepare(&target, workspace.target())?;
+            let prepared = source_activation::SourceDeactivation::prepare(
+                &target,
+                workspace.contract_target(),
+            )?;
             workspace.require_rollback_external_paths(prepared.scope())?;
             prepared.revalidate(&target)?;
             (prepared, target, scratch)

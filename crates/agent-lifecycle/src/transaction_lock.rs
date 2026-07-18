@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 #[must_use = "the lifecycle lock guard must be held for the full transaction"]
 pub struct LifecycleLock {
     active: bool,
+    contract_target: PathBuf,
     identity: cap_std::fs::Metadata,
     lock_directory: Option<Dir>,
     target: PathBuf,
@@ -34,7 +35,31 @@ impl LifecycleLock {
         reject_unexpanded_home(target_root.as_ref())?;
         let requested_target = absolute_path(target_root.as_ref())?;
         let target_directory = open_or_create_directory(&requested_target)?;
-        let target = canonical_path_for_directory(&requested_target, &target_directory)?;
+        Self::acquire_opened_target(&requested_target, target_directory)
+    }
+
+    /// Acquire the lifecycle lock without creating a missing target.
+    ///
+    /// Destructive lifecycle commands use this entry point so a misspelled or
+    /// concurrently removed target cannot be recreated as an empty directory.
+    ///
+    /// # Errors
+    /// Fails when the target does not already exist as a real directory, when
+    /// it traverses a symlink, or when normal lifecycle lock acquisition fails.
+    pub fn acquire_existing(target_root: impl AsRef<Path>) -> Result<Self, LifecycleError> {
+        reject_unexpanded_home(target_root.as_ref())?;
+        let requested_target = absolute_path(target_root.as_ref())?;
+        let target_directory = open_absolute_directory_nofollow(&requested_target)?;
+        Self::acquire_opened_target(&requested_target, target_directory)
+    }
+
+    fn acquire_opened_target(
+        requested_target: &Path,
+        target_directory: Dir,
+    ) -> Result<Self, LifecycleError> {
+        let target = canonical_path_for_directory(requested_target, &target_directory)?;
+        let contract_target =
+            contract_path_for_directory(requested_target, &target, &target_directory);
         match create_lock_directory(&target_directory) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -81,6 +106,7 @@ impl LifecycleLock {
         canonical_path_for_directory(&target, &target_directory)?;
         Ok(Self {
             active: true,
+            contract_target,
             identity: current,
             lock_directory: Some(lock),
             target,
@@ -92,6 +118,12 @@ impl LifecycleLock {
     #[must_use]
     pub fn target(&self) -> &Path {
         &self.target
+    }
+
+    /// Return the target spelling exposed through Python-compatible contracts.
+    #[must_use]
+    pub fn contract_target(&self) -> &Path {
+        &self.contract_target
     }
 
     pub(super) fn target_directory(&self) -> Result<Dir, LifecycleError> {
@@ -261,6 +293,76 @@ fn canonical_path_for_directory(path: &Path, expected: &Dir) -> Result<PathBuf, 
     Ok(canonical)
 }
 
+#[cfg(not(windows))]
+fn contract_path_for_directory(_requested: &Path, canonical: &Path, _expected: &Dir) -> PathBuf {
+    canonical.to_path_buf()
+}
+
+#[cfg(windows)]
+fn contract_path_for_directory(requested: &Path, canonical: &Path, expected: &Dir) -> PathBuf {
+    if has_explicit_verbatim_prefix(requested) {
+        return canonical.to_path_buf();
+    }
+    let candidate = strip_verbatim_prefix(canonical);
+    if candidate == canonical {
+        return candidate;
+    }
+    let Ok(candidate_directory) = open_absolute_directory_nofollow(&candidate) else {
+        return canonical.to_path_buf();
+    };
+    let Ok(candidate_identity) = candidate_directory.dir_metadata() else {
+        return canonical.to_path_buf();
+    };
+    if same_object_cap(expected, &candidate_identity) {
+        candidate
+    } else {
+        canonical.to_path_buf()
+    }
+}
+
+#[cfg(windows)]
+fn has_explicit_verbatim_prefix(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(
+                prefix.kind(),
+                Prefix::Verbatim(_)
+                    | Prefix::VerbatimDisk(_)
+                    | Prefix::VerbatimUNC(_, _)
+            )
+    )
+}
+
+#[cfg(windows)]
+pub(super) fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path.to_path_buf();
+    };
+    let mut normalized = match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:", char::from(drive))),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut value = vec![u16::from(b'\\'), u16::from(b'\\')];
+            value.extend(server.encode_wide());
+            value.push(u16::from(b'\\'));
+            value.extend(share.encode_wide());
+            PathBuf::from(OsString::from_wide(&value))
+        }
+        _ => return path.to_path_buf(),
+    };
+    for component in components {
+        normalized.push(component.as_os_str());
+    }
+    normalized
+}
+
 fn reject_unexpanded_home(path: &Path) -> Result<(), LifecycleError> {
     if path
         .components()
@@ -320,6 +422,32 @@ mod tests {
             .find(|check| check.get("id").and_then(Value::as_str) == Some(check_id))?
             .get("status")?
             .as_str()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn contract_target_matches_python_for_normal_and_explicit_verbatim_inputs() {
+        let root = temporary_path("windows-contract-target");
+        std::fs::create_dir(&root).expect("create Windows contract target");
+        let canonical = std::fs::canonicalize(&root).expect("canonical Windows target");
+        assert!(!has_explicit_verbatim_prefix(&root));
+        assert!(has_explicit_verbatim_prefix(&canonical));
+        assert!(has_explicit_verbatim_prefix(&PathBuf::from(
+            r"\\?\UNC\server\share\agent"
+        )));
+
+        let normal = LifecycleLock::acquire_existing(&root).expect("acquire normal target");
+        assert_eq!(normal.target(), canonical);
+        assert_eq!(normal.contract_target(), strip_verbatim_prefix(&canonical));
+        drop(normal);
+
+        let explicit =
+            LifecycleLock::acquire_existing(&canonical).expect("acquire explicit verbatim target");
+        assert_eq!(explicit.target(), canonical);
+        assert_eq!(explicit.contract_target(), canonical);
+        drop(explicit);
+
+        std::fs::remove_dir_all(&root).expect("remove Windows contract target");
     }
 
     #[cfg(unix)]
@@ -409,6 +537,24 @@ mod tests {
         assert_eq!(check_status(&report, "recovery.residue"), Some("passed"));
         std::fs::remove_dir_all(root.parent().and_then(Path::parent).unwrap_or(&root))
             .expect("remove lifecycle lock root");
+    }
+
+    #[test]
+    fn existing_only_lock_never_creates_a_missing_target() {
+        let root = temporary_path("existing-only").join("missing/target");
+        let error = LifecycleLock::acquire_existing(&root)
+            .err()
+            .expect("missing destructive target must fail");
+        assert!(
+            matches!(
+                &error,
+                LifecycleError::Io(source)
+                    if source.kind() == std::io::ErrorKind::NotFound
+            ),
+            "{error}"
+        );
+        assert!(!root.exists());
+        assert!(!root.parent().expect("target parent").exists());
     }
 
     #[test]

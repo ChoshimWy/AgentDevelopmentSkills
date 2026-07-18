@@ -306,6 +306,149 @@ name = "one"
             self.assertEqual(result.returncode, 2)
             self.assertIn("shared Codex config has more than", result.stderr)
 
+    def test_full_uninstall_report_and_filesystem_match_python(self) -> None:
+        def snapshot(root: Path) -> list[tuple[str, str, int, str | None]]:
+            records: list[tuple[str, str, int, str | None]] = []
+            for path in sorted(root.rglob("*")):
+                relative = path.relative_to(root).as_posix()
+                mode = path.lstat().st_mode & 0o777
+                if path.is_symlink():
+                    records.append((relative, "symlink", mode, os.readlink(path)))
+                elif path.is_dir():
+                    records.append((relative, "directory", mode, None))
+                else:
+                    records.append(
+                        (
+                            relative,
+                            "file",
+                            mode,
+                            hashlib.sha256(path.read_bytes()).hexdigest(),
+                        )
+                    )
+            return records
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python_target = root / "python" / ".codex"
+            rust_target = root / "rust" / ".codex"
+            for target in (python_target, rust_target):
+                installed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "scripts/install_local.py"),
+                        "--target-root",
+                        str(target),
+                        "--platform",
+                        "apple",
+                        "--json",
+                    ],
+                    cwd=ROOT,
+                    encoding="utf-8",
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+
+            source = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/uninstall_local.py"),
+                    "--target-root",
+                    str(python_target),
+                    "--platform",
+                    "all",
+                    "--json",
+                ],
+                cwd=ROOT,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            native = self.run_rust(
+                "lifecycle-uninstall",
+                str(rust_target),
+                "--platform",
+                "all",
+            )
+            self.assertEqual(source.returncode, 0, source.stderr)
+            self.assertEqual(native.returncode, 0, native.stderr)
+            source_report = json.loads(source.stdout)
+            native_report = json.loads(native.stdout)
+            source_report["target_root"] = "<target>"
+            native_report["target_root"] = "<target>"
+            self.assertEqual(native_report, source_report)
+            self.assertEqual(snapshot(rust_target), snapshot(python_target))
+
+            missing = root / "missing" / ".codex"
+            blocked = self.run_rust("lifecycle-uninstall", str(missing))
+            self.assertEqual(blocked.returncode, 2)
+            self.assertEqual(blocked.stdout, "")
+            self.assertFalse(missing.exists())
+            self.assertFalse(missing.parent.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows verbatim path contract")
+    def test_full_uninstall_explicit_verbatim_path_matches_python(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python_plain = root / "python" / ".codex"
+            rust_plain = root / "rust" / ".codex"
+            python_target = Path("\\\\?\\" + str(python_plain))
+            rust_target = Path("\\\\?\\" + str(rust_plain))
+            for target in (python_target, rust_target):
+                installed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "scripts/install_local.py"),
+                        "--target-root",
+                        str(target),
+                        "--platform",
+                        "apple",
+                        "--json",
+                    ],
+                    cwd=ROOT,
+                    encoding="utf-8",
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+
+            source = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/uninstall_local.py"),
+                    "--target-root",
+                    str(python_target),
+                    "--platform",
+                    "all",
+                    "--json",
+                ],
+                cwd=ROOT,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            native = self.run_rust(
+                "lifecycle-uninstall",
+                str(rust_target),
+                "--platform",
+                "all",
+            )
+            self.assertEqual(source.returncode, 0, source.stderr)
+            self.assertEqual(native.returncode, 0, native.stderr)
+            source_report = json.loads(source.stdout)
+            native_report = json.loads(native.stdout)
+            self.assertTrue(source_report["target_root"].startswith("\\\\?\\"))
+            self.assertTrue(native_report["target_root"].startswith("\\\\?\\"))
+            source_report["target_root"] = "<target>"
+            native_report["target_root"] = "<target>"
+            self.assertEqual(native_report, source_report)
+            self.assertFalse(python_plain.joinpath("AGENTS.md").exists())
+            self.assertFalse(rust_plain.joinpath("AGENTS.md").exists())
+            self.assertEqual(
+                python_plain.joinpath("config.toml").read_bytes(),
+                rust_plain.joinpath("config.toml").read_bytes(),
+            )
+
     def test_tracked_json_corpus_matches_python(self) -> None:
         tracked = subprocess.run(
             ["git", "ls-files", "-z", "--", "*.json"],

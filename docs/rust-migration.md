@@ -169,8 +169,12 @@ contains:
   rollback point, moves all managed roots into a private backup, validates the
   supported Activation ownership set, preserves profiles, Codex config
   semantics, and `skills/.system`, and can commit or restore every preimage.
-  Fresh-install activation and production command routing are not implemented
-  yet; `uninstall.sh` still uses the Python production path.
+  The non-default `lifecycle-uninstall` compatibility command now drives this
+  guard without creating a missing target; its success report and resulting
+  filesystem state match the Python source uninstaller. Dry-run,
+  human-readable output, canonical blocked reports, fresh-install activation,
+  and production command routing are not implemented yet; `uninstall.sh` still
+  uses the Python production path.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit
@@ -209,8 +213,10 @@ working/committed source identity, exact Worktree creation/compensation,
 context refresh/checkpoint semantics, locked Registry lifecycle operations,
 Manifest-driven native Session creation with bootstrap-only and trusted-root
 gates, and Final Gate Adapter/Ledger/artifact revalidation with passed-state
-persistence. Host-specific live Provider execution and production CLI parity
-remain later phase gates.
+persistence. The parallel CLI also exposes guarded full uninstall through
+`lifecycle-uninstall`; this remains a compatibility route rather than a
+bootstrap-installed default command. Host-specific live Provider execution
+and production CLI parity remain later phase gates.
 
 The native and Python lanes now also expose the same Provider Invocation v1
 transport. `prepare` freezes the Adapter Request together with the node's

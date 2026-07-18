@@ -166,6 +166,7 @@ pub(super) struct SourceDeactivation {
     activation_lock: Vec<u8>,
     config: ConfigDeactivation,
     records: Vec<ActivationRecord>,
+    reported_paths: Vec<String>,
     scope: Vec<String>,
 }
 
@@ -437,6 +438,7 @@ impl SourceDeactivation {
         let lock = parse_json(&activation_lock)?;
         let (_, values) = validate_activation_lock_contract(&lock)?;
         let mut records = Vec::with_capacity(values.len());
+        let mut reported_paths = Vec::with_capacity(values.len());
         for value in values {
             let path = value
                 .get("path")
@@ -454,6 +456,7 @@ impl SourceDeactivation {
                 .ok_or_else(|| invalid_error("source activation Lock hash is invalid"))?
                 .to_owned();
             verify_activation_file(target, &path, mode, &sha256)?;
+            reported_paths.push(path.clone());
             records.push(ActivationRecord { mode, path, sha256 });
         }
         records.sort_by(|left, right| left.path.cmp(&right.path));
@@ -469,6 +472,7 @@ impl SourceDeactivation {
             activation_lock,
             config,
             records,
+            reported_paths,
             scope,
         })
     }
@@ -612,7 +616,7 @@ impl SourceDeactivation {
         Ok(json!({
             "config_action": config_action,
             "handler": DEACTIVATION_HANDLER_ID,
-            "removed_files": self.records.iter().map(|record| record.path.clone()).collect::<Vec<_>>(),
+            "removed_files": self.reported_paths,
         }))
     }
 
@@ -1989,6 +1993,54 @@ mod tests {
                 "model_instructions_file = \"nested\"\n",
             )
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_contract_target_matches_normal_and_explicit_verbatim_config() {
+        let target_path = std::env::temp_dir().join(format!(
+            "agent-source-config-deactivation-{}-{}",
+            std::process::id(),
+            TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&target_path).expect("create config target");
+        let operational_path = target_path.canonicalize().expect("canonical config target");
+        let visible_path = crate::transaction_lock::strip_verbatim_prefix(&operational_path);
+        assert_ne!(
+            operational_path, visible_path,
+            "Windows canonical paths should retain a verbatim operational form"
+        );
+        let target = Dir::open_ambient_dir(&operational_path, ambient_authority())
+            .expect("open config target");
+        for contract_path in [&visible_path, &operational_path] {
+            let instructions = contract_path
+                .join("AGENTS.md")
+                .to_string_lossy()
+                .replace('\\', "\\\\");
+            std::fs::write(
+                target_path.join("config.toml"),
+                format!("model_instructions_file = \"{instructions}\"\nmodel = \"local\"\n"),
+            )
+            .expect("write managed config");
+            let prepared = prepare_config_deactivation(&target, contract_path)
+                .expect("prepare config deactivation");
+            let ConfigDeactivation::Replace {
+                candidate,
+                original,
+            } = prepared
+            else {
+                panic!("contract-matching managed config must be removed");
+            };
+            assert_eq!(candidate, b"model = \"local\"\n");
+            assert!(
+                std::str::from_utf8(&original.bytes)
+                    .expect("config UTF-8")
+                    .contains("model_instructions_file")
+            );
+        }
+
+        drop(target);
+        std::fs::remove_dir_all(&target_path).expect("remove config target");
     }
 
     #[test]
