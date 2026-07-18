@@ -2778,6 +2778,216 @@ class RustCompatibilityTests(unittest.TestCase):
                 )
                 git(cas_repo, "branch", "-D", "agent/python-cas")
 
+    def test_manifest_driven_session_creation_matches_python_closure(
+        self,
+    ) -> None:
+        from agent_workflow.worktree_sessions.cli import (
+            _capability_closure,
+            _platform_contexts,
+            _validate_platform_selection,
+        )
+        from tests.test_worktree_sessions import git, make_repo
+
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = make_repo(parent)
+            base = git(root, "rev-parse", "HEAD")
+            worktrees = parent / "worktrees"
+            manifest_root = ROOT / "platforms"
+            selected = _validate_platform_selection(["apple"], manifest_root)
+            expected_contexts = _platform_contexts(selected, manifest_root)
+            expected_closure = _capability_closure(
+                expected_contexts,
+                manifest_root,
+            )
+
+            created = self.run_rust(
+                "session-create-manifest",
+                str(root),
+                "manifest-session",
+                "--project-id",
+                "project",
+                "--created-at",
+                "2026-07-18T00:00:00+00:00",
+                "--platform",
+                "apple",
+                "--manifest-root",
+                str(manifest_root),
+                "--base-ref",
+                base,
+                "--worktree-root",
+                str(worktrees),
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            value = json.loads(created.stdout)
+            session = value["session"]
+            self.assertEqual(["apple"], session["selected_platforms"])
+            self.assertEqual(expected_contexts, session["platform_contexts"])
+            self.assertEqual(expected_closure, session["capability_closure"])
+            self.assertEqual("active", session["lifecycle"]["state"])
+            self.assertEqual(
+                SessionRegistry(root).load("manifest-session"),
+                session,
+            )
+            remove_created_session_worktree(
+                session["repositories"][0],
+                source_repository=root,
+            )
+
+            duplicate = self.run_rust(
+                "session-create-manifest",
+                str(root),
+                "duplicate-platform",
+                "--project-id",
+                "project",
+                "--created-at",
+                "2026-07-18T00:00:00+00:00",
+                "--platform",
+                "apple",
+                "--platform",
+                "apple",
+                "--manifest-root",
+                str(manifest_root),
+                "--base-ref",
+                base,
+                "--worktree-root",
+                str(worktrees),
+            )
+            self.assertEqual(2, duplicate.returncode)
+            self.assertIn("selected platforms must be unique", duplicate.stderr)
+            self.assertFalse((worktrees / "duplicate-platform").exists())
+            self.assertEqual(
+                "",
+                git(root, "branch", "--list", "agent/duplicate-platform"),
+            )
+
+            invalid_platform = self.run_rust(
+                "session-create-manifest",
+                str(root),
+                "invalid-platform",
+                "--project-id",
+                "project",
+                "--created-at",
+                "2026-07-18T00:00:00+00:00",
+                "--platform",
+                "../apple",
+                "--manifest-root",
+                str(manifest_root),
+                "--base-ref",
+                base,
+                "--worktree-root",
+                str(worktrees),
+            )
+            self.assertEqual(2, invalid_platform.returncode)
+            self.assertIn("invalid platform id", invalid_platform.stderr)
+            self.assertFalse((worktrees / "invalid-platform").exists())
+            with self.assertRaisesRegex(ContractError, "invalid platform id"):
+                _validate_platform_selection(["../apple"], manifest_root)
+
+            missing_root = self.run_rust(
+                "session-create-manifest",
+                str(root),
+                "missing-root",
+                "--project-id",
+                "project",
+                "--created-at",
+                "2026-07-18T00:00:00+00:00",
+                "--platform",
+                "apple",
+                "--base-ref",
+                base,
+                "--worktree-root",
+                str(worktrees),
+            )
+            self.assertEqual(2, missing_root.returncode)
+            self.assertIn("explicit trusted Manifest root", missing_root.stderr)
+            self.assertFalse((worktrees / "missing-root").exists())
+
+            bootstrap_only = self.run_rust(
+                "session-create-manifest",
+                str(root),
+                "android-bootstrap",
+                "--project-id",
+                "project",
+                "--created-at",
+                "2026-07-18T00:00:00+00:00",
+                "--platform",
+                "android",
+                "--manifest-root",
+                str(manifest_root),
+                "--base-ref",
+                base,
+                "--worktree-root",
+                str(worktrees),
+            )
+            self.assertEqual(2, bootstrap_only.returncode)
+            self.assertIn(
+                "bootstrap_required: platform Provider is not implemented: android",
+                bootstrap_only.stderr,
+            )
+            self.assertFalse((worktrees / "android-bootstrap").exists())
+
+            invalid_context = self.run_rust(
+                "session-create-manifest",
+                str(root),
+                "invalid-manifest-context",
+                "--project-id",
+                "",
+                "--created-at",
+                "2026-07-18T00:00:00+00:00",
+                "--base-ref",
+                base,
+                "--worktree-root",
+                str(worktrees),
+            )
+            self.assertEqual(2, invalid_context.returncode)
+            self.assertIn(
+                "session context input project_id is required",
+                invalid_context.stderr,
+            )
+            self.assertFalse(
+                (worktrees / "invalid-manifest-context").exists()
+            )
+            self.assertEqual(
+                "",
+                git(
+                    root,
+                    "branch",
+                    "--list",
+                    "agent/invalid-manifest-context",
+                ),
+            )
+
+            if os.name != "nt":
+                manifest_link = parent / "manifest-link"
+                manifest_link.symlink_to(
+                    manifest_root,
+                    target_is_directory=True,
+                )
+                unsafe_root = self.run_rust(
+                    "session-create-manifest",
+                    str(root),
+                    "unsafe-root",
+                    "--project-id",
+                    "project",
+                    "--created-at",
+                    "2026-07-18T00:00:00+00:00",
+                    "--platform",
+                    "apple",
+                    "--manifest-root",
+                    str(manifest_link),
+                    "--base-ref",
+                    base,
+                    "--worktree-root",
+                    str(worktrees),
+                )
+                self.assertEqual(2, unsafe_root.returncode)
+                self.assertIn(
+                    "explicit trusted Manifest root",
+                    unsafe_root.stderr,
+                )
+                self.assertFalse((worktrees / "unsafe-root").exists())
+
     def test_session_registry_checkpoint_matches_python_without_committing(
         self,
     ) -> None:

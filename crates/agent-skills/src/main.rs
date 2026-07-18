@@ -7,11 +7,11 @@ use agent_engine::{
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
-    attach_adapter_result, build_adapter_request, create_session_worktree, evaluate_session_gate,
-    execute_fake_plan, execute_recorded_plan, freeze_checkpoint, inspect_repository,
-    new_session_context, refresh_session_source_identity, registry_assert_available,
-    registry_attach_and_gate, registry_checkpoint, registry_create, registry_create_active,
-    registry_list, registry_load, registry_transition, registry_write,
+    attach_adapter_result, build_adapter_request, compile_session_manifest_selection,
+    create_session_worktree, evaluate_session_gate, execute_fake_plan, execute_recorded_plan,
+    freeze_checkpoint, inspect_repository, new_session_context, refresh_session_source_identity,
+    registry_assert_available, registry_attach_and_gate, registry_checkpoint, registry_create,
+    registry_create_active, registry_list, registry_load, registry_transition, registry_write,
     remove_created_session_worktree, repository_patch, session_source_identity,
     transition_session_context, validate_adapter_request, validate_adapter_result,
     validate_worktree_session_context, worktree_status,
@@ -230,6 +230,29 @@ enum Command {
         repository: PathBuf,
         name: String,
         context_input: PathBuf,
+        #[arg(long)]
+        base_ref: Option<String>,
+        #[arg(long)]
+        base_source: Option<String>,
+        #[arg(long)]
+        worktree_root: Option<PathBuf>,
+        #[arg(long)]
+        branch: Option<String>,
+    },
+    /// Create one Session from a trusted Manifest-driven Provider closure.
+    SessionCreateManifest {
+        repository: PathBuf,
+        name: String,
+        #[arg(long)]
+        project_id: String,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        created_at: String,
+        #[arg(long = "platform")]
+        platforms: Vec<String>,
+        #[arg(long)]
+        manifest_root: Option<PathBuf>,
         #[arg(long)]
         base_ref: Option<String>,
         #[arg(long)]
@@ -662,6 +685,64 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "repositories".to_owned(),
                     Value::Array(vec![record.clone()]),
                 );
+                let context = new_session_context(&input)?;
+                registry_create_active(&repository, &context)
+            })();
+            if let Err(error) = registration {
+                if let Err(cleanup_error) = remove_created_session_worktree(&record, &repository) {
+                    return Err(format!(
+                        "session registration failed ({error}); exact Worktree compensation was blocked ({cleanup_error})"
+                    )
+                    .into());
+                }
+                return Err(error.into());
+            }
+            let session = registration?;
+            let value = json!({
+                "notice": notice,
+                "operation": "create",
+                "schema_version": "1.0",
+                "session": session,
+            });
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionCreateManifest {
+            repository,
+            name,
+            project_id,
+            session_id,
+            created_at,
+            platforms,
+            manifest_root,
+            base_ref,
+            base_source,
+            worktree_root,
+            branch,
+        } => {
+            let selection =
+                compile_session_manifest_selection(manifest_root.as_deref(), &platforms)?;
+            let session_id = session_id.unwrap_or_else(|| name.clone());
+            registry_assert_available(&repository, &session_id)?;
+            let (record, notice) = create_session_worktree(
+                &repository,
+                &name,
+                "primary",
+                base_ref.as_deref(),
+                base_source.as_deref(),
+                worktree_root.as_deref(),
+                branch.as_deref(),
+            )?;
+            let registration = (|| -> Result<Value, agent_runtime::RuntimeError> {
+                let input = json!({
+                    "capability_closure": selection["capability_closure"],
+                    "created_at": created_at,
+                    "dependencies": [],
+                    "platform_contexts": selection["platform_contexts"],
+                    "project_id": project_id,
+                    "repositories": [record.clone()],
+                    "selected_platforms": selection["selected_platforms"],
+                    "session_id": session_id,
+                });
                 let context = new_session_context(&input)?;
                 registry_create_active(&repository, &context)
             })();

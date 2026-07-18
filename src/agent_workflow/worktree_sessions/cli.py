@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
-from ..canonical_json import dumps, load
+from ..canonical_json import dumps, load, sha256
 from ..contracts import validate_manifest
 from ..models import ContractError
 from ..registry import ManifestRegistry
@@ -36,12 +37,17 @@ def _validate_platform_selection(selected: list[str], root: Path | None) -> list
     values = sorted(set(selected))
     if len(values) != len(selected):
         raise ContractError("selected platforms must be unique")
+    if any(re.fullmatch(r"[a-z][a-z0-9-]{0,63}", value) is None for value in values):
+        raise ContractError("selected platforms contain an invalid platform id")
     if not values:
         return []
     if root is None or not root.is_dir() or root.is_symlink():
         raise ContractError("platform selection requires an explicit trusted Manifest root")
     for platform_id in values:
-        manifest_path = root / platform_id / "manifest.json"
+        platform_directory = root / platform_id
+        manifest_path = platform_directory / "manifest.json"
+        if platform_directory.is_symlink() or not platform_directory.is_dir():
+            raise ContractError(f"bootstrap_required: platform Manifest is unavailable: {platform_id}")
         if manifest_path.is_symlink() or not manifest_path.is_file():
             raise ContractError(f"bootstrap_required: platform Manifest is unavailable: {platform_id}")
         manifest = load(manifest_path)
@@ -60,7 +66,25 @@ def _platform_contexts(selected: list[str], root: Path | None) -> dict[str, dict
     registry = ManifestRegistry.from_directory(root)
     contexts: dict[str, dict[str, Any]] = {}
     for platform_id in selected:
-        manifest = load(root / platform_id / "manifest.json")
+        platform_directory = root / platform_id
+        manifest_path = platform_directory / "manifest.json"
+        if (
+            platform_directory.is_symlink()
+            or not platform_directory.is_dir()
+            or manifest_path.is_symlink()
+            or not manifest_path.is_file()
+            or platform_directory.resolve().parent != root.resolve()
+            or manifest_path.resolve().parent != platform_directory.resolve()
+        ):
+            raise ContractError(f"bootstrap_required: platform Manifest is unavailable: {platform_id}")
+        manifest = load(manifest_path)
+        registered_platform = registry.by_id(platform_id)
+        if (
+            registered_platform is None
+            or registered_platform.path != manifest_path.resolve()
+            or registered_platform.digest != sha256(manifest)
+        ):
+            raise ContractError(f"bootstrap_required: invalid platform package: {platform_id}")
         provider_relative = manifest["installation"].get("provider_manifest")
         provider_contract = manifest.get("provider_contract")
         if not isinstance(provider_relative, str) or not isinstance(provider_contract, dict):
@@ -69,11 +93,20 @@ def _platform_contexts(selected: list[str], root: Path | None) -> dict[str, dict
         if registered is None:
             raise ContractError(f"bootstrap_required: platform Provider Manifest is unavailable: {platform_id}")
         provider = registered.value
-        if provider.get("id") != provider_contract.get("package_id") or provider.get("role") != "provider":
+        if (
+            provider.get("id") != provider_contract.get("package_id")
+            or provider.get("role") != "provider"
+            or platform_id not in provider.get("targets", [])
+        ):
             raise ContractError(f"bootstrap_required: platform Provider identity is invalid: {platform_id}")
         bindings = provider.get("bindings")
         if not isinstance(bindings, dict) or not bindings:
             raise ContractError(f"bootstrap_required: platform Provider binding closure is empty: {platform_id}")
+        declared = {capability["id"] for capability in provider.get("capabilities", [])}
+        if set(bindings) != declared:
+            raise ContractError(
+                f"bootstrap_required: platform Provider bindings differ from declared capabilities: {platform_id}"
+            )
         contexts[platform_id] = {
             "bindings": bindings,
             "context": {},
@@ -85,11 +118,12 @@ def _platform_contexts(selected: list[str], root: Path | None) -> dict[str, dict
 def _capability_closure(
     platform_contexts: dict[str, dict[str, Any]], root: Path | None
 ) -> dict[str, dict[str, Any]]:
-    closure = {
-        capability: {"binding": binding, "provider_id": context["provider_id"]}
-        for context in platform_contexts.values()
-        for capability, binding in context["bindings"].items()
-    }
+    closure: dict[str, dict[str, Any]] = {}
+    for context in platform_contexts.values():
+        for capability, binding in context["bindings"].items():
+            if capability in closure:
+                raise ContractError(f"ambiguous platform capability binding: {capability}")
+            closure[capability] = {"binding": binding, "provider_id": context["provider_id"]}
     if root is None:
         return closure
     registry = ManifestRegistry.from_directory(root)

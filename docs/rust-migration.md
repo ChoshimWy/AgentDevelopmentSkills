@@ -83,8 +83,9 @@ contains:
   structured evidence validation and recorded-result consumption, bounded Git
   Worktree inspection, repository/session source identities, Session Context
   validation, exact Worktree creation/compensation, checkpoint transitions, a
-  locked persistent Session Registry, and Final Gate evidence revalidation and
-  passed-state persistence;
+  locked persistent Session Registry, Manifest-driven platform/Provider
+  closure compilation and Session creation, and Final Gate evidence
+  revalidation and passed-state persistence;
 - schema-aligned capability-contract type validation shared by the Python
   baseline and native normalization path;
 - Python-to-Rust byte-level differential tests covering malicious provider
@@ -113,9 +114,10 @@ status semantics matching the Python baseline. Native Worktree/Session support
 now covers staged/unstaged/untracked patch identity, Gitlink rejection,
 working/committed source identity, exact Worktree creation/compensation,
 context refresh/checkpoint semantics, locked Registry lifecycle operations,
-and Final Gate Adapter/Ledger/artifact revalidation with passed-state
-persistence. Manifest-driven native Session creation, external Provider
-invocation, and production CLI parity remain later phase gates.
+Manifest-driven native Session creation with bootstrap-only and trusted-root
+gates, and Final Gate Adapter/Ledger/artifact revalidation with passed-state
+persistence. External Provider invocation and production CLI parity remain
+later phase gates.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

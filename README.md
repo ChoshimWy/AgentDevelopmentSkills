@@ -128,6 +128,10 @@ cargo run --locked -p agent-skills-rs -- \
   session-create /path/to/repository feature \
   /path/to/session-context-input.json --base-ref HEAD
 cargo run --locked -p agent-skills-rs -- \
+  session-create-manifest /path/to/repository feature \
+  --project-id project --created-at 2026-07-18T00:00:00+00:00 \
+  --platform apple --manifest-root /path/to/platforms --base-ref HEAD
+cargo run --locked -p agent-skills-rs -- \
   session-registry-checkpoint /path/to/repository session-id
 cargo run --locked -p agent-skills-rs -- \
   session-registry-gate /path/to/repository session-id \
@@ -148,10 +152,11 @@ those recorded results through the same ledger, resource, resume, and
 final-status contracts. The next native increment now covers bounded Git
 Worktree inspection, `repository-patch-v1`, `session-source-v1`, Session
 Context validation, exact Worktree creation/compensation, checkpoint
-transitions, the locked persistent Session Registry, and Final Gate evidence
-revalidation/persistence. It does not invoke external providers, execute
-package code, create commits, change staging, switch the production CLI, or
-make installation changes.
+transitions, the locked persistent Session Registry, trusted Manifest-driven
+platform/Provider closure compilation and Session creation, and Final Gate
+evidence revalidation/persistence. It does not invoke external providers,
+execute package code, create commits, change staging, switch the production
+CLI, or make installation changes.
 
 ## Release governance
 

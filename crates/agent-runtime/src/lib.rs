@@ -9,6 +9,7 @@
 mod adapters;
 mod gate;
 mod git_workspace;
+mod session_manifests;
 mod session_registry;
 mod sessions;
 
@@ -18,6 +19,7 @@ pub use git_workspace::{
     create_session_worktree, inspect_repository, remove_created_session_worktree, repository_patch,
     resolve_commit, resolve_worktree, session_source_identity, worktree_status,
 };
+pub use session_manifests::compile_session_manifest_selection;
 pub use session_registry::{
     registry_assert_available, registry_attach_and_gate, registry_checkpoint, registry_create,
     registry_create_active, registry_evaluate_and_gate, registry_list, registry_load,

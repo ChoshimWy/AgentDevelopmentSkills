@@ -132,13 +132,17 @@ cargo run --locked -p agent-skills-rs -- \
   session-create /path/to/repository feature \
   /path/to/session-context-input.json --base-ref HEAD
 cargo run --locked -p agent-skills-rs -- \
+  session-create-manifest /path/to/repository feature \
+  --project-id project --created-at 2026-07-18T00:00:00+00:00 \
+  --platform apple --manifest-root /path/to/platforms --base-ref HEAD
+cargo run --locked -p agent-skills-rs -- \
   session-registry-checkpoint /path/to/repository session-id
 cargo run --locked -p agent-skills-rs -- \
   session-registry-gate /path/to/repository session-id \
   /path/to/adapter-pairs.json /path/to/run-ledger.json /path/to/artifacts
 ```
 
-迁移顺序和切换门禁见 [Rust 迁移计划](docs/rust-migration.md)。当前原生路径已覆盖 canonical contracts、只读 Manifest Registry、仓库发现、策略解析、计划编译，以及 Package Lock 的解析、验证、差异、解释与锁定计划绑定检查。Phase 4 已迁移确定性 fake-adapter Runtime、Adapter Request/Result v1 冻结与验证合同、Recorded Result 消费，以及带输出上限的 Git Worktree 检查、`repository-patch-v1`、`session-source-v1`、Session Context、精确 Worktree 创建/失败补偿、checkpoint、带文件锁的持久化 Session Registry 和 Final Gate 证据复验/持久化；它不会调用外部 Provider、执行 package 代码、创建 Commit、改变 staging、切换生产 CLI 或修改安装目标。在所有相关差分测试和发布门禁通过前，Python CLI 仍是生产入口。
+迁移顺序和切换门禁见 [Rust 迁移计划](docs/rust-migration.md)。当前原生路径已覆盖 canonical contracts、只读 Manifest Registry、仓库发现、策略解析、计划编译，以及 Package Lock 的解析、验证、差异、解释与锁定计划绑定检查。Phase 4 已迁移确定性 fake-adapter Runtime、Adapter Request/Result v1 冻结与验证合同、Recorded Result 消费，以及带输出上限的 Git Worktree 检查、`repository-patch-v1`、`session-source-v1`、Session Context、精确 Worktree 创建/失败补偿、checkpoint、带文件锁的持久化 Session Registry、基于受信 Manifest 的平台/Provider 能力闭包编译与 Session 创建，以及 Final Gate 证据复验/持久化；它不会调用外部 Provider、执行 package 代码、创建 Commit、改变 staging、切换生产 CLI 或修改安装目标。在所有相关差分测试和发布门禁通过前，Python CLI 仍是生产入口。
 
 ## 发布治理
 
