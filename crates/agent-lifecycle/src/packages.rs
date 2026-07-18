@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
-const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(super) const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_PACKAGE_TREE_ENTRIES: usize = 100_000;
 
 pub(super) struct PackageInspection {
@@ -28,12 +28,12 @@ struct ExpectedFile {
 }
 
 #[derive(Clone)]
-struct InstalledPackage {
-    fragments: Vec<Value>,
-    id: String,
-    manifest: Value,
-    provider: Option<Value>,
-    files: Vec<Value>,
+pub(super) struct SemanticPackage {
+    pub(super) fragments: Vec<Value>,
+    pub(super) id: String,
+    pub(super) manifest: Value,
+    pub(super) provider: Option<Value>,
+    pub(super) files: Vec<Value>,
 }
 
 struct CheckedPackage {
@@ -211,7 +211,7 @@ pub(super) fn check_package_integrity(
         let fragments = load_instruction_fragments(&root, record, &package.id, &package.manifest)?;
         let declared_files = validate_installation_roots(record, &package.id, &package.manifest)?;
         validate_package_tree(&root, record, &package.id)?;
-        installed.push(InstalledPackage {
+        installed.push(SemanticPackage {
             fragments,
             id: package.id,
             manifest: package.manifest,
@@ -221,7 +221,7 @@ pub(super) fn check_package_integrity(
     }
     ManifestRegistry::new(registry_entries, CORE_VERSION)?;
 
-    let semantics = derive_installed_semantics(&installed, install_packages)?;
+    let semantics = derive_package_semantics(&installed, install_packages)?;
     *retained_semantics = Some(semantics.clone());
     validate_semantics(
         install_lock,
@@ -367,7 +367,7 @@ pub(super) fn derive_rollback_package_semantics(
             "files_sha256",
             &format!("rollback point package differs from Install Lock: {package_id}"),
         )?;
-        installed.push(InstalledPackage {
+        installed.push(SemanticPackage {
             fragments,
             id: package_id,
             manifest,
@@ -375,7 +375,7 @@ pub(super) fn derive_rollback_package_semantics(
             files,
         });
     }
-    derive_installed_semantics(&installed, records)
+    derive_package_semantics(&installed, records)
 }
 
 fn revalidate_package_paths(
@@ -1137,8 +1137,8 @@ fn selected_identity(
 }
 
 #[allow(clippy::too_many_lines)]
-fn derive_installed_semantics(
-    packages: &[InstalledPackage],
+pub(super) fn derive_package_semantics(
+    packages: &[SemanticPackage],
     package_records: &[Value],
 ) -> Result<Value, LifecycleError> {
     let package_ids = packages
@@ -1283,7 +1283,7 @@ struct ResolvedRule {
     scope: String,
 }
 
-fn compose_instructions(packages: &[InstalledPackage]) -> Result<Value, LifecycleError> {
+fn compose_instructions(packages: &[SemanticPackage]) -> Result<Value, LifecycleError> {
     let positions = packages
         .iter()
         .enumerate()
@@ -1538,7 +1538,7 @@ fn bytes_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn derive_skills(package: &InstalledPackage) -> Result<Vec<Value>, LifecycleError> {
+fn derive_skills(package: &SemanticPackage) -> Result<Vec<Value>, LifecycleError> {
     let installation = object_field(&package.manifest, "installation", "package installation")?;
     let skill_roots = installation
         .get("skill_roots")
@@ -1673,7 +1673,7 @@ fn capability_effects<'a>(
 fn validate_binding_target(
     capability_id: &str,
     normalized: &Value,
-    packages: &[InstalledPackage],
+    packages: &[SemanticPackage],
     skill_names: &BTreeSet<String>,
 ) -> Result<(), LifecycleError> {
     let kind = normalized
@@ -1895,7 +1895,7 @@ mod tests {
             parse_rule_marker("<!-- rule: alpha.one effect=deny -->"),
             None
         );
-        let package = InstalledPackage {
+        let package = SemanticPackage {
             fragments: vec![
                 json!({
                     "content": "Zulu\n",

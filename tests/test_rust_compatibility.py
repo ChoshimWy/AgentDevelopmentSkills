@@ -1033,6 +1033,88 @@ name = "one"
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, dumps({"packages": packages}))
 
+    def test_source_install_bundle_matches_python(self) -> None:
+        cases = (
+            (["apple"], [], [], False),
+            ([], ["qa"], [], False),
+            ([], [], ["codex"], False),
+            ([], [], [], True),
+        )
+        for platforms, disciplines, runtime_configs, core_only in cases:
+            with self.subTest(
+                platforms=platforms,
+                disciplines=disciplines,
+                runtime_configs=runtime_configs,
+                core_only=core_only,
+            ):
+                expected = build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=platforms,
+                    disciplines=disciplines,
+                    runtime_configs=runtime_configs,
+                    core_only=core_only,
+                    schema_root=ROOT / "schemas",
+                )
+                arguments = [
+                    "install-bundle",
+                    str(ROOT / "platforms"),
+                    "--schemas",
+                    str(ROOT / "schemas"),
+                ]
+                for platform in platforms:
+                    arguments.extend(("--platform", platform))
+                for discipline in disciplines:
+                    arguments.extend(("--discipline", discipline))
+                for runtime_config in runtime_configs:
+                    arguments.extend(("--runtime-config", runtime_config))
+                if core_only:
+                    arguments.append("--core-only")
+                result = self.run_rust(*arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.stdout,
+                    dumps({
+                        "instructions": expected.instructions,
+                        "package_lock": expected.package_lock,
+                        "plan": expected.plan,
+                    }),
+                )
+
+    def test_source_install_bundle_previous_lock_matches_python(self) -> None:
+        initial = build_install_bundle(
+            ROOT / "platforms",
+            platforms=["apple"],
+            schema_root=ROOT / "schemas",
+        )
+        expected = build_install_bundle(
+            ROOT / "platforms",
+            platforms=["apple"],
+            previous_lock=initial.package_lock,
+            schema_root=ROOT / "schemas",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            previous = Path(directory) / "agent-skills.lock"
+            dump(initial.package_lock, previous)
+            result = self.run_rust(
+                "install-bundle",
+                str(ROOT / "platforms"),
+                "--platform",
+                "apple",
+                "--schemas",
+                str(ROOT / "schemas"),
+                "--previous",
+                str(previous),
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            dumps({
+                "instructions": expected.instructions,
+                "package_lock": expected.package_lock,
+                "plan": expected.plan,
+            }),
+        )
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink support is required")
     def test_source_package_snapshot_rejects_symlink_assets_like_python(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1066,6 +1148,35 @@ name = "one"
             shutil.copytree(ROOT / "platforms" / "core", platforms / "core")
             manifest_path = platforms / "core" / "manifest.json"
             manifest_path.chmod(0o600)
+            package = _load_package((platforms / "core").resolve(), "core")
+            expected = {
+                "packages": [{
+                    "directories": list(package.directories),
+                    "files": list(package.files),
+                    "fragments": list(package.fragments),
+                    "id": package.package_id,
+                    "manifest": package.manifest,
+                    "manifest_sha256": package.manifest_digest,
+                    "provider": package.provider,
+                    "provider_manifest_sha256": package.provider_digest,
+                    "skills": [],
+                }]
+            }
+            native = self.run_rust(
+                "install-source-snapshot",
+                str(platforms),
+                "--core-only",
+            )
+            self.assertEqual(native.returncode, 0, native.stderr)
+            self.assertEqual(native.stdout, dumps(expected))
+
+    def test_source_package_snapshot_normalizes_crlf_fragments_like_python(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            platforms = Path(directory) / "platforms"
+            shutil.copytree(ROOT / "platforms" / "core", platforms / "core")
+            fragment = platforms / "core" / "agent-instructions" / "global.md"
+            content = fragment.read_text(encoding="utf-8")
+            fragment.write_bytes(content.replace("\n", "\r\n").encode("utf-8"))
             package = _load_package((platforms / "core").resolve(), "core")
             expected = {
                 "packages": [{

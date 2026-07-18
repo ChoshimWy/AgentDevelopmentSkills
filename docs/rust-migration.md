@@ -193,8 +193,14 @@ contains:
   executable modes, excludes source caches, applies aggregate 100,000-entry and
   64 MiB retained-content limits before collection, re-reads each package to
   detect mutation, and is byte-level differential-tested against Python
-  `_load_package`. This boundary does not yet compose instructions, compile a
-  complete Install Plan/Lockfile, or mutate an installation.
+  `_load_package`. The non-default `install-bundle` command now consumes this
+  frozen boundary and independently rebuilds Manifest Registry validation,
+  dependency capability checks, instruction/rule composition, Skill and asset
+  identities, bindings, permissions, side effects, Install Plan v2, and the
+  persistent package Lockfile. Core-only, Apple, QA, Codex runtime-config, and
+  previous-Lock lineage projections are byte-level differential-tested against
+  Python `build_install_bundle`. This boundary still does not mutate an
+  installation.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit
@@ -218,8 +224,9 @@ contains:
 The Rust binary is not yet installed by the production bootstrap and is not a
 binary release artifact. The parallel CLI currently covers canonical JSON,
 hashing, the shared schema-version boundary, registry snapshots, targeted
-binding resolution, source package-selection and package-snapshot
-compatibility, an internal recipe-closure compatibility probe, repository
+binding resolution, source package-selection, package-snapshot, and complete
+Install Bundle/Plan/Lock compatibility, an internal recipe-closure
+compatibility probe, repository
 discovery, policy resolution, and plan compilation. Package-lock resolution is
 also available through the
 parallel CLI, including local-registry,

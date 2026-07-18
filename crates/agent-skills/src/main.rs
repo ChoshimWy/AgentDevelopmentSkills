@@ -9,9 +9,9 @@ use agent_engine::{
     validate_plan_package_lock,
 };
 use agent_lifecycle::{
-    LifecycleError, LifecycleWorkspace, inspect_doctor_baseline, inspect_doctor_report_v1,
-    inspect_uninstall_plan, render_codex_config, resolve_source_install_selection,
-    snapshot_source_packages,
+    LifecycleError, LifecycleWorkspace, compile_source_install_bundle, inspect_doctor_baseline,
+    inspect_doctor_report_v1, inspect_uninstall_plan, render_codex_config,
+    resolve_source_install_selection, snapshot_source_packages,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
@@ -103,6 +103,22 @@ enum Command {
         runtime_configs: Vec<String>,
         #[arg(long)]
         core_only: bool,
+    },
+    /// Compile source packages into Install Plan v2 and package Lockfile contracts.
+    InstallBundle {
+        root: PathBuf,
+        #[arg(long = "platform")]
+        platforms: Vec<String>,
+        #[arg(long = "discipline")]
+        disciplines: Vec<String>,
+        #[arg(long = "runtime-config")]
+        runtime_configs: Vec<String>,
+        #[arg(long)]
+        core_only: bool,
+        #[arg(long, default_value = "schemas")]
+        schemas: PathBuf,
+        #[arg(long)]
+        previous: Option<PathBuf>,
     },
     /// Emit the sorted automatic recipe capability closure for target platforms.
     RecipeCapabilities { targets: Vec<String> },
@@ -526,6 +542,31 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             print!(
                 "{}",
                 String::from_utf8(canonical_json(&packages.compatibility_projection())?)?
+            );
+        }
+        Command::InstallBundle {
+            root,
+            platforms,
+            disciplines,
+            runtime_configs,
+            core_only,
+            schemas,
+            previous,
+        } => {
+            let selection = resolve_source_install_selection(
+                root,
+                &platforms,
+                &disciplines,
+                &runtime_configs,
+                core_only,
+            )?;
+            let packages = snapshot_source_packages(&selection)?;
+            let previous = previous.map(load_json).transpose()?;
+            let bundle =
+                compile_source_install_bundle(&selection, &packages, schemas, previous.as_ref())?;
+            print!(
+                "{}",
+                String::from_utf8(canonical_json(&bundle.compatibility_projection())?)?
             );
         }
         Command::RecipeCapabilities { targets } => {

@@ -30,6 +30,7 @@ mod post_install;
 mod rollback;
 mod rollback_stage;
 mod source_activation;
+mod source_bundle;
 mod source_install;
 mod source_packages;
 mod staged_install;
@@ -42,6 +43,7 @@ pub use doctor_report::inspect_doctor_report_v1;
 #[cfg(test)]
 use doctor_report::validate_doctor_report_v1;
 pub use managed_swap::{PublishedInstall, PublishedUninstall, inspect_uninstall_plan};
+pub use source_bundle::{SourceInstallBundle, compile_source_install_bundle};
 pub use source_install::{SourceInstallSelection, resolve_source_install_selection};
 pub use source_packages::{SourcePackageSet, snapshot_source_packages};
 pub use staged_install::ValidatedInstallPlan;

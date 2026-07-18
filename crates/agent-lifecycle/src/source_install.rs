@@ -86,6 +86,17 @@ impl SourceInstallSelection {
         &self.selected_runtime_configs
     }
 
+    pub(super) fn resolved_dependencies(&self) -> Vec<Value> {
+        self.dependencies
+            .iter()
+            .map(PackageDependency::compatibility_projection)
+            .collect()
+    }
+
+    pub(super) fn selection_reasons(&self, package_id: &str) -> Option<&[String]> {
+        self.selection_reasons.get(package_id).map(Vec::as_slice)
+    }
+
     /// Emit the temporary compatibility projection used by differential tests.
     ///
     /// This projection is not a persisted contract and has no schema version.

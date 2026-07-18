@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use super::packages::python_trim;
 use super::source_install::SourceInstallSelection;
@@ -67,6 +67,7 @@ impl SourcePackage {
 #[derive(Debug, Clone)]
 pub struct SourcePackageSet {
     pub(super) packages: Vec<SourcePackage>,
+    pub(super) package_roots: Vec<(String, PathBuf)>,
 }
 
 impl SourcePackageSet {
@@ -122,7 +123,10 @@ pub fn snapshot_source_packages(
         }
         packages.push(package);
     }
-    Ok(SourcePackageSet { packages })
+    Ok(SourcePackageSet {
+        packages,
+        package_roots: selection.package_roots().to_vec(),
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -197,6 +201,7 @@ fn load_source_package(
         let text = String::from_utf8(bytes).map_err(|_| {
             LifecycleError::Invalid(format!("instruction fragment is not UTF-8: {path}"))
         })?;
+        let text = python_universal_newlines(&text);
         let content = format!("{}\n", python_trim(&text));
         let mut fragment = raw.clone();
         fragment.insert("content".to_owned(), Value::String(content.clone()));
@@ -272,6 +277,13 @@ fn load_source_package(
         skills,
         fragments,
     })
+}
+
+fn python_universal_newlines(value: &str) -> String {
+    if !value.contains('\r') {
+        return value.to_owned();
+    }
+    value.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn collect_package_files(

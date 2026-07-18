@@ -301,7 +301,13 @@ differential parity. The follow-on `install-source-snapshot` command freezes
 declared package assets, Package/Provider Manifests, instruction Fragments,
 and installable Skill trees through bounded no-follow traversal and source
 mutation revalidation. Both are differential-tested against Python. This lane
-does not yet compose a complete Install Bundle/Plan/Lock or install files.
+now feeds the non-default `install-bundle` command, which independently
+rebuilds Manifest Registry, dependency capability, instruction/rule, Skill,
+asset, binding, permission, side-effect, Install Plan v2, and persistent
+package Lockfile identities. Core-only, Apple, QA, Codex runtime-config, and
+previous-Lock lineage outputs are byte-for-byte differential-tested against
+Python. It still does not write an installation target or replace the
+production Python CLI.
 
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
