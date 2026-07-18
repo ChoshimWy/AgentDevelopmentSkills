@@ -434,7 +434,7 @@ fn project_array_fields(
         .collect()
 }
 
-fn child_bytes_equal(
+pub(super) fn child_bytes_equal(
     parent: &Dir,
     name: &str,
     mode: u32,

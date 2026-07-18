@@ -1384,6 +1384,7 @@ class RustCompatibilityTests(unittest.TestCase):
             "filesystem.layout",
             "install.lock",
             "lock.persistent",
+            "recovery.rollback-point",
             "environment.core",
             "schema.inventory",
             "package.integrity",
@@ -1717,6 +1718,225 @@ class RustCompatibilityTests(unittest.TestCase):
             actual.pop("fingerprint")
             self.assertEqual(actual, expected)
             self.assertEqual(filesystem_identity(target), before)
+
+        from agent_workflow.installation import _write_rollback_point
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["apple", "desktop"],
+                ),
+                target,
+            )
+            point = _write_rollback_point(
+                target,
+                target / ".agent-skills/rollback-point",
+            )
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            actual = json.loads(result.stdout)
+            actual.pop("fingerprint")
+            self.assertEqual(actual, expected)
+            rollback_details = next(
+                check["details"]
+                for check in actual["checks"]
+                if check["id"] == "recovery.rollback-point"
+            )
+            self.assertEqual(rollback_details, {
+                "available": True,
+                "package_lock_hash": point["package_lock_hash"],
+                "point_id": point["point_id"],
+            })
+            self.assertEqual(filesystem_identity(target), before)
+
+            managed = target / ".agent-skills"
+            managed.chmod(0o700)
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            actual = json.loads(result.stdout)
+            actual.pop("fingerprint")
+            expected_by_id = {
+                check["id"]: check
+                for check in expected["checks"]
+            }
+            actual_by_id = {
+                check["id"]: check
+                for check in actual["checks"]
+            }
+            self.assertEqual(
+                actual_by_id["recovery.rollback-point"],
+                expected_by_id["recovery.rollback-point"],
+            )
+            self.assertEqual(
+                actual_by_id["filesystem.layout"]["status"],
+                "failed",
+            )
+            self.assertEqual(
+                actual_by_id["recovery.rollback-point"]["status"],
+                "passed",
+            )
+            self.assertEqual(filesystem_identity(target), before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["apple", "desktop"],
+                ),
+                target,
+            )
+            activated = target / "bin/managed-tool"
+            activated.parent.mkdir()
+            activated.write_bytes(b"managed\n")
+            activated.chmod(0o755)
+            activation_lock = {
+                "files": [{
+                    "mode": 0o755,
+                    "path": "bin/managed-tool",
+                    "sha256": hashlib.sha256(
+                        activated.read_bytes()
+                    ).hexdigest(),
+                }],
+                "manager": "agent-development-skills",
+                "schema_version": "1.0",
+            }
+            dump(
+                activation_lock,
+                target / ".agent-skills/activation-lock.json",
+            )
+            _write_rollback_point(
+                target,
+                target / ".agent-skills/rollback-point",
+                external_paths=[
+                    "bin/managed-tool",
+                    "config/missing.json",
+                ],
+            )
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            actual = json.loads(result.stdout)
+            actual.pop("fingerprint")
+            self.assertEqual(actual, expected)
+            self.assertEqual(filesystem_identity(target), before)
+
+            snapshot = (
+                target
+                / ".agent-skills/rollback-point"
+                / "external-files/bin/managed-tool"
+            )
+            snapshot.write_bytes(b"tampered\n")
+            assert_doctor_failure(
+                target,
+                "recovery.rollback-point",
+                "external snapshot file differs from state: "
+                "bin/managed-tool",
+            )
+
+        for mutation in (
+            "unknown-entry",
+            "agents-content",
+            "package-content",
+            "external-state",
+            "snapshot-contract",
+            "external-state-symlink",
+        ):
+            with self.subTest(
+                rollback_mutation=mutation
+            ), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory) / "codex"
+                install_bundle(
+                    build_install_bundle(
+                        ROOT / "platforms",
+                        platforms=["apple", "desktop"],
+                    ),
+                    target,
+                )
+                rollback_root = target / ".agent-skills/rollback-point"
+                _write_rollback_point(target, rollback_root)
+                if mutation == "unknown-entry":
+                    (rollback_root / "unknown").write_text(
+                        "unexpected\n",
+                        encoding="utf-8",
+                    )
+                    message = (
+                        "rollback point contains missing or unknown entries"
+                    )
+                elif mutation == "agents-content":
+                    agents = rollback_root / "AGENTS.md"
+                    agents.write_bytes(
+                        agents.read_bytes() + b"\n# tampered\n"
+                    )
+                    message = (
+                        "rollback point AGENTS.md differs from Install Lock"
+                    )
+                elif mutation == "package-content":
+                    manifest = (
+                        rollback_root / "packages/core/manifest.json"
+                    )
+                    manifest.write_bytes(
+                        manifest.read_bytes() + b"\n"
+                    )
+                    message = (
+                        "rollback point package differs from Install Lock: "
+                        "core"
+                    )
+                elif mutation == "external-state":
+                    dump({}, rollback_root / "external-state.json")
+                    message = (
+                        "rollback point external state shape is invalid"
+                    )
+                elif mutation == "snapshot-contract":
+                    point_path = rollback_root / "rollback-point.json"
+                    point = json.loads(
+                        point_path.read_text(encoding="utf-8")
+                    )
+                    point["snapshot_sha256"] = "0" * 64
+                    point["fingerprint"] = sha256({
+                        key: value
+                        for key, value in point.items()
+                        if key != "fingerprint"
+                    })
+                    dump(point, point_path)
+                    message = (
+                        "rollback point snapshot digest is invalid"
+                    )
+                else:
+                    state = rollback_root / "external-state.json"
+                    real_state = target / "real-external-state.json"
+                    state.rename(real_state)
+                    state.symlink_to(real_state)
+                    message = (
+                        "rollback point external state is missing or unsafe"
+                    )
+                assert_doctor_failure(
+                    target,
+                    "recovery.rollback-point",
+                    message,
+                )
 
         for mutation in (
             "skill-content",

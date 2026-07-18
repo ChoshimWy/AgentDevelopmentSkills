@@ -244,6 +244,139 @@ pub(super) fn check_package_integrity(
     })
 }
 
+#[allow(clippy::too_many_lines)]
+pub(super) fn derive_rollback_package_semantics(
+    packages_root: &Dir,
+    install_lock: &Value,
+) -> Result<Value, LifecycleError> {
+    let records = array_field(install_lock, "packages", "Install Lock packages")?;
+    let expected_ids = records
+        .iter()
+        .map(|record| string_field(record, "id", "Install Lock package id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut actual_ids = packages_root
+        .entries()?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    actual_ids.sort();
+    let mut sorted_expected = expected_ids.clone();
+    sorted_expected.sort_unstable();
+    if actual_ids != sorted_expected {
+        return invalid("rollback point package set differs from Install Lock");
+    }
+
+    let mut checked = Vec::with_capacity(records.len());
+    let mut registry_entries = Vec::new();
+    for record in records {
+        let package_id = string_field(record, "id", "Install Lock package id")?;
+        let root = open_child_directory(
+            packages_root,
+            package_id,
+            Some(u32_field(record, "root_mode", "package root mode")?),
+            &format!("rollback point package {package_id}"),
+        )
+        .map_err(|_| {
+            LifecycleError::Invalid(format!(
+                "rollback point package is missing or unsafe: {package_id}"
+            ))
+        })?;
+        validate_recorded_tree(
+            &root,
+            record,
+            "files_sha256",
+            &format!("rollback point package differs from Install Lock: {package_id}"),
+        )?;
+        let manifest = load_recorded_json(&root, record, "manifest.json", "installed Manifest")?;
+        validate_manifest_syntax(&manifest)?;
+        let manifest_digest = canonical_sha256(&manifest)?;
+        if manifest.get("id").and_then(Value::as_str) != Some(package_id)
+            || record.get("manifest_sha256").and_then(Value::as_str)
+                != Some(manifest_digest.as_str())
+        {
+            return invalid(format!(
+                "rollback point package differs from Install Lock: {package_id}"
+            ));
+        }
+        registry_entries.push(RegisteredManifest {
+            path: PathBuf::from(package_id).join("manifest.json"),
+            value: manifest.clone(),
+            digest: manifest_digest,
+        });
+
+        let provider_relative = manifest
+            .get("installation")
+            .and_then(Value::as_object)
+            .and_then(|installation| installation.get("provider_manifest"));
+        let provider = match record
+            .get("provider_manifest_sha256")
+            .unwrap_or(&Value::Null)
+        {
+            Value::Null => {
+                if provider_relative.is_some_and(|value| !value.is_null()) {
+                    return invalid(format!(
+                        "package unexpectedly declares a Provider: {package_id}"
+                    ));
+                }
+                None
+            }
+            Value::String(expected_digest) => {
+                let relative = provider_relative.and_then(Value::as_str).ok_or_else(|| {
+                    LifecycleError::Invalid(format!(
+                        "installed Provider Manifest differs: {package_id}"
+                    ))
+                })?;
+                let value =
+                    load_recorded_json(&root, record, relative, "installed Provider Manifest")?;
+                validate_manifest_syntax(&value)?;
+                let digest = canonical_sha256(&value)?;
+                if digest != *expected_digest {
+                    return invalid(format!("installed Provider Manifest differs: {package_id}"));
+                }
+                registry_entries.push(RegisteredManifest {
+                    path: PathBuf::from(package_id).join(canonical_relative_path(
+                        relative,
+                        "installed Provider Manifest",
+                    )?),
+                    value: value.clone(),
+                    digest,
+                });
+                Some(value)
+            }
+            _ => return invalid("package provider Manifest digest is invalid"),
+        };
+        checked.push((package_id.to_owned(), record, root, manifest, provider));
+    }
+    ManifestRegistry::new(registry_entries, CORE_VERSION)?;
+
+    let mut installed = Vec::with_capacity(checked.len());
+    for (package_id, record, root, manifest, provider) in checked {
+        if provider
+            .as_ref()
+            .is_some_and(|value| value.get("role").and_then(Value::as_str) != Some("provider"))
+        {
+            return invalid(format!(
+                "installation provider is not a provider manifest: {package_id}"
+            ));
+        }
+        let fragments = load_instruction_fragments(&root, record, &package_id, &manifest)?;
+        let files = validate_installation_roots(record, &package_id, &manifest)?;
+        validate_recorded_tree(
+            &root,
+            record,
+            "files_sha256",
+            &format!("rollback point package differs from Install Lock: {package_id}"),
+        )?;
+        installed.push(InstalledPackage {
+            fragments,
+            id: package_id,
+            manifest,
+            provider,
+            files,
+        });
+    }
+    derive_installed_semantics(&installed, records)
+}
+
 fn revalidate_package_paths(
     target: &Dir,
     original_packages: &cap_std::fs::Metadata,

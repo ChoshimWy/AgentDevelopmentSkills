@@ -193,8 +193,11 @@ side-effect semantics against both Lockfiles. The projection now also verifies
 installed Skill identities and trees, the unique global `AGENTS.md` content,
 fragment order and rule trace, frozen Capability Bindings and Provider
 closure, and permission profiles and per-Capability grants against rebuilt
-installed Manifest semantics. Rollback-point validation, full Doctor Report
-v1 emission, and mutating lifecycle transactions remain on the Python path.
+installed Manifest semantics. Persistent rollback points are now checked
+read-only as complete snapshots, including their own Lock pair, package,
+Skill, AGENTS, external-state, Activation, semantic, and snapshot-digest
+anchors. Full Doctor Report v1 emission and mutating lifecycle transactions
+remain on the Python path.
 It holds directory capabilities and opens contract files without following
 symlinks; it does not repair, install, upgrade, roll back, uninstall, or
 otherwise write the target. Failed projected checks keep canonical JSON on

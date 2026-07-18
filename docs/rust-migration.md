@@ -99,12 +99,16 @@ contains:
   both Lockfiles. It now also verifies installed Skill identities and trees,
   global `AGENTS.md` content, canonical fragment order and rule trace,
   Capability Binding digests and Provider closure, and permission profiles and
-  per-Capability grants against rebuilt installed Manifest semantics. It holds
-  directory capabilities and opens contract files without following symlinks,
-  and it never repairs or writes the inspected installation. Activation and
-  installed-package tree mode parity are POSIX-only for now; Windows-native
-  Doctor verifies the Lock contract, no-follow paths, and content hashes
-  without treating POSIX mode bits as an ACL guarantee;
+  per-Capability grants against rebuilt installed Manifest semantics.
+  Persistent rollback points are validated as complete read-only snapshots:
+  their own Lock pair, packages, Skills, AGENTS composition, external state,
+  optional Activation ownership, semantic closure, and full tree digest must
+  agree. It holds directory capabilities and opens contract files without
+  following symlinks, and it never repairs or writes the inspected
+  installation. Activation and installed-package tree mode parity are
+  POSIX-only for now; Windows-native Doctor verifies the Lock contract,
+  no-follow paths, and content hashes without treating POSIX mode bits as an
+  ACL guarantee;
 - schema-aligned capability-contract type validation shared by the Python
   baseline and native normalization path;
 - Python-to-Rust byte-level differential tests covering malicious provider
@@ -169,10 +173,11 @@ it writes canonical JSON to stdout and exits with status 2 whenever any
 projected check fails, matching the production Doctor shell contract.
 Skill/AGENTS/Binding/permission integrity is now included in that native
 projection and covered by healthy-install, cross-Lock, semantic-forgery, and
-content-tamper differential cases. Rollback-point validation, full Doctor
-Report v1 emission, and every mutating lifecycle transaction remain on the
-Python production path until their own differential, tamper, concurrency,
-rollback, and independent-review gates pass.
+content-tamper differential cases. Rollback-point validation is also projected
+with healthy internal/external snapshots and contract, content, symlink, and
+snapshot-digest tamper cases. Full Doctor Report v1 emission and every mutating
+lifecycle transaction remain on the Python production path until their own
+differential, tamper, concurrency, rollback, and independent-review gates pass.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

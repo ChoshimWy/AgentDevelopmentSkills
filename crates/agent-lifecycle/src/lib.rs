@@ -5,6 +5,7 @@
 
 mod packages;
 mod post_install;
+mod rollback;
 
 use agent_contracts::{
     ContractError, MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256, parse_json,
@@ -124,8 +125,10 @@ impl BaselineState {
 /// Lockfile, Core runtime identity, Schema inventory, and Activation integrity
 /// checks, plus installed package/Manifest and Skill integrity, global AGENTS
 /// composition, Capability Binding and Provider closure freezing, and
-/// permission freezing against rebuilt package semantics. It is intentionally
-/// a compatibility probe rather than a new public artifact schema.
+/// permission freezing against rebuilt package semantics. A persistent
+/// rollback point, when present, is verified as a complete read-only snapshot.
+/// This is intentionally a compatibility probe rather than a new public
+/// artifact schema.
 ///
 /// Target and managed directories are held as directory capabilities. Contract
 /// files are opened without following symlinks and their identities are checked
@@ -277,6 +280,32 @@ pub fn inspect_doctor_baseline(
             "lock",
             "skipped",
             "Persistent Lockfile check requires a valid Install Lock",
+            json!({}),
+        );
+    }
+
+    if let Some(target_directory) = target_directory.as_ref() {
+        match rollback::check_rollback_point(target_directory) {
+            Ok(details) => state.record(
+                "recovery.rollback-point",
+                "recovery",
+                "passed",
+                "Persistent rollback point is absent or valid",
+                details,
+            ),
+            Err(error) => state.failed(
+                "recovery.rollback-point",
+                "recovery",
+                "Persistent rollback point is absent or valid",
+                error,
+            ),
+        }
+    } else {
+        state.record(
+            "recovery.rollback-point",
+            "recovery",
+            "skipped",
+            "Rollback point verification requires a safe install target",
             json!({}),
         );
     }
