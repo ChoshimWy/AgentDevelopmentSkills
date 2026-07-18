@@ -1,3 +1,5 @@
+#![cfg(not(windows))]
+
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
