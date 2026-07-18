@@ -112,7 +112,12 @@ contains:
   A `LifecycleWorkspace` now adds unique POSIX mode-`0700` stage/backup
   directories under the held lock, capability-bound access, recursive
   no-follow cleanup, crash visibility, and explicit incomplete-recovery backup
-  preservation. It does not yet stage or swap managed content.
+  preservation. The workspace can now copy and revalidate tree-local,
+  Install-Plan-shaped package and Skill records using bounded canonical paths,
+  atomic destination creation, canonical POSIX modes, and no-follow source
+  traversal. It does not yet prove record membership in a complete validated
+  plan, compose `AGENTS.md` or Lockfiles, preserve external roots, or swap
+  managed content.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit

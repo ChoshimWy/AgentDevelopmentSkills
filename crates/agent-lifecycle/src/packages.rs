@@ -4,6 +4,7 @@ use super::{
 };
 use agent_contracts::{canonical_sha256, json_integer, parse_json};
 use agent_registry::{ManifestRegistry, RegisteredManifest, validate_manifest_syntax};
+use cap_fs_ext::MetadataExt as _;
 use cap_std::fs::Dir;
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
@@ -508,6 +509,37 @@ pub(super) fn validate_recorded_tree(
     digest_field: &str,
     difference_message: &str,
 ) -> Result<(), LifecycleError> {
+    validate_recorded_tree_with_metadata_policy(
+        root,
+        record,
+        digest_field,
+        difference_message,
+        true,
+    )
+}
+
+pub(super) fn validate_recorded_tree_strict(
+    root: &Dir,
+    record: &Value,
+    digest_field: &str,
+    difference_message: &str,
+) -> Result<(), LifecycleError> {
+    validate_recorded_tree_with_metadata_policy(
+        root,
+        record,
+        digest_field,
+        difference_message,
+        false,
+    )
+}
+
+fn validate_recorded_tree_with_metadata_policy(
+    root: &Dir,
+    record: &Value,
+    digest_field: &str,
+    difference_message: &str,
+    ignore_os_metadata: bool,
+) -> Result<(), LifecycleError> {
     let expected_files = array_field(record, "files", "package files")?
         .iter()
         .map(|entry| {
@@ -531,7 +563,8 @@ pub(super) fn validate_recorded_tree(
         .collect::<Result<BTreeMap<_, _>, LifecycleError>>()?;
     let mut seen_files = BTreeSet::new();
     let mut seen_directories = BTreeSet::new();
-    let mut entry_count = 0_usize;
+    let mut file_entry_count = 0_usize;
+    let mut directory_entry_count = 0_usize;
     walk_package_tree(
         root,
         "",
@@ -539,7 +572,9 @@ pub(super) fn validate_recorded_tree(
         &expected_directories,
         &mut seen_files,
         &mut seen_directories,
-        &mut entry_count,
+        &mut file_entry_count,
+        &mut directory_entry_count,
+        ignore_os_metadata,
     )
     .map_err(|error| match &error {
         LifecycleError::Invalid(message)
@@ -576,10 +611,12 @@ fn walk_package_tree(
     expected_directories: &BTreeMap<String, u32>,
     seen_files: &mut BTreeSet<String>,
     seen_directories: &mut BTreeSet<String>,
-    entry_count: &mut usize,
+    file_entry_count: &mut usize,
+    directory_entry_count: &mut usize,
+    ignore_os_metadata: bool,
 ) -> Result<(), LifecycleError> {
     let mut pending = BTreeSet::new();
-    for name in package_entry_names(directory)? {
+    for name in tree_entry_names(directory, ignore_os_metadata)? {
         let name = name
             .to_str()
             .ok_or_else(|| LifecycleError::Invalid("install tree path is not UTF-8".to_owned()))?;
@@ -591,14 +628,6 @@ fn walk_package_tree(
         pending.insert(relative);
     }
     while let Some(relative) = pending.pop_first() {
-        *entry_count = entry_count.checked_add(1).ok_or_else(|| {
-            LifecycleError::Invalid("package tree entry counter overflow".to_owned())
-        })?;
-        if *entry_count > MAX_PACKAGE_TREE_ENTRIES {
-            return invalid(format!(
-                "package tree exceeds maximum of {MAX_PACKAGE_TREE_ENTRIES} entries"
-            ));
-        }
         let (parent, name) = open_relative_parent(directory, &relative, "installed package entry")?;
         let metadata = parent.symlink_metadata(&name)?;
         if metadata.file_type().is_symlink() {
@@ -607,6 +636,7 @@ fn walk_package_tree(
             ));
         }
         if metadata.is_dir() {
+            increment_tree_entry_count(directory_entry_count, "directory")?;
             let mode = expected_directories
                 .get(&relative)
                 .copied()
@@ -616,13 +646,19 @@ fn walk_package_tree(
             let child =
                 open_child_directory(&parent, &name, Some(mode), "installed package directory")?;
             seen_directories.insert(relative.clone());
-            for child_name in package_entry_names(&child)? {
+            for child_name in tree_entry_names(&child, ignore_os_metadata)? {
                 let child_name = child_name.to_str().ok_or_else(|| {
                     LifecycleError::Invalid("install tree path is not UTF-8".to_owned())
                 })?;
                 pending.insert(format!("{relative}/{child_name}"));
             }
         } else if metadata.is_file() {
+            increment_tree_entry_count(file_entry_count, "file")?;
+            if !ignore_os_metadata && metadata.nlink() != 1 {
+                return invalid(format!(
+                    "install tree file has an unsafe hard-link alias: {relative}"
+                ));
+            }
             let expected = expected_files.get(&relative).ok_or_else(|| {
                 LifecycleError::Invalid(format!("unknown package file: {relative}"))
             })?;
@@ -636,6 +672,18 @@ fn walk_package_tree(
                 "install tree contains unsupported entry: {relative}"
             ));
         }
+    }
+    Ok(())
+}
+
+fn increment_tree_entry_count(counter: &mut usize, kind: &str) -> Result<(), LifecycleError> {
+    *counter = counter
+        .checked_add(1)
+        .ok_or_else(|| LifecycleError::Invalid("package tree entry counter overflow".to_owned()))?;
+    if *counter > MAX_PACKAGE_TREE_ENTRIES {
+        return invalid(format!(
+            "package tree exceeds maximum of {MAX_PACKAGE_TREE_ENTRIES} {kind} entries"
+        ));
     }
     Ok(())
 }
@@ -657,10 +705,17 @@ fn open_relative_parent(
 }
 
 fn package_entry_names(directory: &Dir) -> Result<Vec<std::ffi::OsString>, LifecycleError> {
+    tree_entry_names(directory, true)
+}
+
+fn tree_entry_names(
+    directory: &Dir,
+    ignore_os_metadata: bool,
+) -> Result<Vec<std::ffi::OsString>, LifecycleError> {
     let mut names = Vec::new();
     for entry in directory.entries()? {
         let entry = entry?;
-        if super::ignored_os_metadata(directory, &entry.file_name())? {
+        if ignore_os_metadata && super::ignored_os_metadata(directory, &entry.file_name())? {
             continue;
         }
         names.push(entry.file_name());
@@ -1901,6 +1956,17 @@ mod tests {
         let (permission, _) = capability_effects(&manifest_empty, &capability, "implementation")
             .expect("manifest permission preserves Python truthiness boundary");
         assert_eq!(permission, "");
+    }
+
+    #[test]
+    fn file_and_directory_walk_limits_are_independent() {
+        let mut files = MAX_PACKAGE_TREE_ENTRIES - 1;
+        let mut directories = MAX_PACKAGE_TREE_ENTRIES - 1;
+        increment_tree_entry_count(&mut files, "file").expect("accept maximum file count");
+        increment_tree_entry_count(&mut directories, "directory")
+            .expect("accept maximum directory count independently");
+        assert!(increment_tree_entry_count(&mut files, "file").is_err());
+        assert!(increment_tree_entry_count(&mut directories, "directory").is_err());
     }
 
     #[test]

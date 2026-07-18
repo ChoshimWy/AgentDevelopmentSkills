@@ -211,8 +211,11 @@ cleanup; it is not yet wired into production install or upgrade commands.
 The companion `LifecycleWorkspace` now creates a unique POSIX mode-`0700`
 stage/backup pair under that lock, holds both directory capabilities, exposes
 them for later native staging, removes symlink-safe temporary trees, and can
-preserve an incomplete-recovery backup. It still does not copy or swap managed
-content.
+preserve an incomplete-recovery backup. It can also copy and revalidate
+tree-local, Install-Plan-shaped package and Skill records with canonical POSIX
+modes, bounded paths, atomic destinations, and no-follow source traversal. This
+API does not yet prove membership in a complete validated plan, compose
+`AGENTS.md` or Lockfiles, preserve external roots, or swap managed content.
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
 holds directory capabilities and opens contract files without following

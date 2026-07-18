@@ -1,8 +1,9 @@
 use super::{
     INSTALL_BACKUP_PREFIX, INSTALL_STAGE_PREFIX, LifecycleError, LifecycleLock,
-    open_child_directory, same_object_cap,
+    open_child_directory, same_object_cap, staged_tree,
 };
 use cap_std::fs::Dir;
+use serde_json::Value;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher as _;
 use std::path::{Path, PathBuf};
@@ -16,9 +17,9 @@ static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Staging and backup directories held under one exclusive lifecycle lock.
 ///
 /// This is a transaction foundation rather than an install implementation. It
-/// creates only the two recovery-visible workspace directories and keeps their
-/// identities bound to the locked target. Production install/rollback commands
-/// are not yet routed through it.
+/// creates two recovery-visible workspace directories, keeps their identities
+/// bound to the locked target, and can stage plan-recorded package/Skill trees.
+/// Production install/rollback commands are not yet routed through it.
 #[must_use = "the lifecycle workspace must be held for the full transaction"]
 pub struct LifecycleWorkspace {
     backup: WorkspaceEntry,
@@ -116,6 +117,61 @@ impl LifecycleWorkspace {
     pub fn backup_directory(&self) -> Result<&Dir, LifecycleError> {
         self.validate()?;
         self.backup.directory()
+    }
+
+    /// Copy and verify one caller-supplied package tree record.
+    ///
+    /// The destination is derived from `record.id` under
+    /// `.agent-skills/packages`; source paths are opened relative to the
+    /// supplied directory capability and symlinks are never followed. This
+    /// validates the tree-local Install Plan shape and identity, but does not
+    /// prove record membership in a complete validated plan.
+    ///
+    /// # Errors
+    /// Fails closed when the workspace, record, source, or staged copy differs
+    /// from the recorded tree identity.
+    pub fn stage_package_tree(
+        &mut self,
+        source: &Dir,
+        record: &Value,
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        staged_tree::stage_package(self.stage.directory()?, source, record)?;
+        self.validate()
+    }
+
+    /// Copy and verify one caller-supplied Skill tree record.
+    ///
+    /// The destination is derived from `record.name` under `skills`; source
+    /// paths are capability-relative and symlinks are never followed. This
+    /// validates the tree-local Install Plan shape and identity, but does not
+    /// prove record membership in a complete validated plan.
+    ///
+    /// # Errors
+    /// Fails closed when the workspace, record, source, or staged copy differs
+    /// from the recorded tree identity.
+    pub fn stage_skill_tree(&mut self, source: &Dir, record: &Value) -> Result<(), LifecycleError> {
+        self.validate()?;
+        staged_tree::stage_skill(self.stage.directory()?, source, record)?;
+        self.validate()
+    }
+
+    /// Revalidate one previously staged package tree against its record.
+    ///
+    /// # Errors
+    /// Fails if the workspace or staged package identity changed.
+    pub fn verify_staged_package_tree(&self, record: &Value) -> Result<(), LifecycleError> {
+        self.validate()?;
+        staged_tree::verify_package(self.stage.directory()?, record)
+    }
+
+    /// Revalidate one previously staged Skill tree against its record.
+    ///
+    /// # Errors
+    /// Fails if the workspace or staged Skill identity changed.
+    pub fn verify_staged_skill_tree(&self, record: &Value) -> Result<(), LifecycleError> {
+        self.validate()?;
+        staged_tree::verify_skill(self.stage.directory()?, record)
     }
 
     /// Prove the lock, target, stage, and backup identities are still bound.

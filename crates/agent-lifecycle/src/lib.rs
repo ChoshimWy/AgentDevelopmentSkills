@@ -1,14 +1,16 @@
 //! Lifecycle diagnostics and transaction foundations for the native migration.
 //!
 //! Doctor inspection is non-mutating. The explicit [`LifecycleLock`] and
-//! [`LifecycleWorkspace`] APIs create only the target/lock and temporary
-//! stage/backup foundations; they do not install, upgrade, roll back, or remove
-//! managed content and are not yet wired into production commands.
+//! [`LifecycleWorkspace`] APIs create the target/lock and temporary stage/backup
+//! foundations and can copy plan-recorded package/Skill trees into staging.
+//! They do not compose or swap a complete installation, upgrade, roll back, or
+//! remove managed content and are not yet wired into production commands.
 
 mod doctor_report;
 mod packages;
 mod post_install;
 mod rollback;
+mod staged_tree;
 mod transaction_lock;
 mod transaction_workspace;
 
@@ -1305,20 +1307,20 @@ fn ignored_os_metadata(parent: &Dir, name: &std::ffi::OsStr) -> Result<bool, Lif
 }
 
 #[cfg(unix)]
-fn configure_nofollow(options: &mut OpenOptions) {
+pub(crate) fn configure_nofollow(options: &mut OpenOptions) {
     use cap_std::fs::OpenOptionsExt as _;
     options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
 }
 
 #[cfg(windows)]
-fn configure_nofollow(options: &mut OpenOptions) {
+pub(crate) fn configure_nofollow(options: &mut OpenOptions) {
     use cap_std::fs::OpenOptionsExt as _;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
 }
 
 #[cfg(not(any(unix, windows)))]
-fn configure_nofollow(_options: &mut OpenOptions) {}
+pub(crate) fn configure_nofollow(_options: &mut OpenOptions) {}
 
 #[cfg(unix)]
 fn require_cap_mode(
