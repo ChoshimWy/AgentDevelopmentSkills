@@ -268,18 +268,22 @@ Its config rewrite uses TOML 1.0 parsing while preserving every unrelated byte
 and the original POSIX mode. The source-activation prerequisite that overlays
 the Codex shared config is also available as a native, non-executing TOML
 renderer with differential parity against the installed source script. The
-same guard can now run source activation for replacement transactions backed
-by an exact rollback point: it freezes assets from the newly published package
-snapshot, refuses unmanaged conflicts, creates only missing profiles, uses
-private no-replace publication, writes the Activation Lock last, and can
-restore every external preimage. The session launcher remains an explicit
-caller-supplied payload until release packaging binds a verified native
-executable. A separate `PublishedUninstall` guard now freezes a complete
+same guard can now run source activation for replacement and fresh-install
+transactions backed by an exact rollback point. Replacement activation freezes
+assets from the newly published package snapshot. Fresh activation derives the
+same scope before publication by reading package assets from the managed stage
+and unmanaged config, profile, and destination preimages from the target. Both
+paths refuse unmanaged conflicts, create only missing profiles, use private
+no-replace publication, and write the Activation Lock last. A fresh failure
+removes the new managed roots before restoring every frozen external preimage.
+The session launcher remains an explicit caller-supplied payload until release
+packaging binds a verified native executable. A separate `PublishedUninstall`
+guard now freezes a complete
 managed and external rollback point, moves all managed roots into a private
 backup, removes only Activation-owned files, preserves local profiles,
 `config.toml` semantics, and `skills/.system`, and supports explicit commit,
-rollback, and drop-time recovery. Fresh-install activation and production
-command routing remain later lifecycle slices. The non-default
+rollback, and drop-time recovery. Production command routing remains a later
+lifecycle slice. The non-default
 `lifecycle-uninstall` compatibility command now drives this guard, rejects a
 missing target without creating it, and matches the successful Python JSON
 report and resulting filesystem state on the supported POSIX source-installer

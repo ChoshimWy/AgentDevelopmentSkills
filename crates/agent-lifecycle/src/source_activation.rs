@@ -133,7 +133,7 @@ const SESSION_DESTINATION: &str = "bin/agent-session";
 
 #[derive(Debug)]
 pub(super) struct SourceActivation {
-    activation_lock: FileSnapshot,
+    activation_lock: Option<FileSnapshot>,
     candidate_lock: Vec<u8>,
     candidates: Vec<ActivationCandidate>,
     config: ActivationCandidate,
@@ -216,24 +216,70 @@ impl SourceActivation {
         let lock = parse_json(&activation_lock.bytes)?;
         let (version, values) = validate_activation_lock_contract(&lock)?;
         let current = load_current_activation_preimages(target, values)?;
-        let mut source_assets = Vec::new();
-        let candidate_values =
-            load_activation_candidate_values(target, session_launcher, &mut source_assets)?;
-        let (mut candidates, mut retired) =
-            reconcile_activation_candidates(target, candidate_values, current)?;
-        let (mut profiles, mut created_profile_paths) =
-            prepare_activation_profiles(target, &mut source_assets)?;
-        let config = prepare_activation_config(target, target_path, &mut source_assets)?;
-        candidates.sort_by(|left, right| left.path.cmp(&right.path));
-        profiles.sort_by(|left, right| left.path.cmp(&right.path));
-        retired.sort_by(|left, right| left.path.cmp(&right.path));
-        created_profile_paths.sort();
-        let candidate_lock = encode_activation_lock(&candidates)?;
         let migration = if version == "1.0" {
             Some(activation_migration_report(&lock)?)
         } else {
             None
         };
+        Self::prepare_from(
+            target,
+            target,
+            target_path,
+            session_launcher,
+            Some(activation_lock),
+            current,
+            migration,
+        )
+    }
+
+    pub(super) fn prepare_fresh(
+        source: &Dir,
+        destination: &Dir,
+        target_path: &Path,
+        session_launcher: &[u8],
+    ) -> Result<Self, LifecycleError> {
+        require_bounded_session_launcher(session_launcher)?;
+        let managed = open_child_directory(
+            source,
+            ".agent-skills",
+            Some(MANAGED_DIRECTORY_MODE),
+            "staged managed metadata directory",
+        )?;
+        require_activation_lock_absent(&managed)?;
+        Self::prepare_from(
+            source,
+            destination,
+            target_path,
+            session_launcher,
+            None,
+            BTreeMap::new(),
+            None,
+        )
+    }
+
+    fn prepare_from(
+        source: &Dir,
+        destination: &Dir,
+        target_path: &Path,
+        session_launcher: &[u8],
+        activation_lock: Option<FileSnapshot>,
+        current: BTreeMap<String, (ActivationRecord, FileSnapshot)>,
+        migration: Option<Value>,
+    ) -> Result<Self, LifecycleError> {
+        let mut source_assets = Vec::new();
+        let candidate_values =
+            load_activation_candidate_values(source, session_launcher, &mut source_assets)?;
+        let (mut candidates, mut retired) =
+            reconcile_activation_candidates(destination, candidate_values, current)?;
+        let (mut profiles, mut created_profile_paths) =
+            prepare_activation_profiles(source, destination, &mut source_assets)?;
+        let config =
+            prepare_activation_config(source, destination, target_path, &mut source_assets)?;
+        candidates.sort_by(|left, right| left.path.cmp(&right.path));
+        profiles.sort_by(|left, right| left.path.cmp(&right.path));
+        retired.sort_by(|left, right| left.path.cmp(&right.path));
+        created_profile_paths.sort();
+        let candidate_lock = encode_activation_lock(&candidates)?;
         let scope = activation_scope(&candidates, &profiles, &retired, &config);
         let prepared = Self {
             activation_lock,
@@ -247,7 +293,7 @@ impl SourceActivation {
             scope,
             source_assets,
         };
-        prepared.revalidate(target)?;
+        prepared.revalidate_from(source, destination)?;
         Ok(prepared)
     }
 
@@ -256,37 +302,49 @@ impl SourceActivation {
     }
 
     pub(super) fn revalidate(&self, target: &Dir) -> Result<(), LifecycleError> {
-        for source in &self.source_assets {
-            let current = read_installed_asset(target, &source.package, &source.source)?;
+        self.revalidate_from(target, target)
+    }
+
+    pub(super) fn revalidate_from(
+        &self,
+        source: &Dir,
+        destination: &Dir,
+    ) -> Result<(), LifecycleError> {
+        for asset in &self.source_assets {
+            let current = read_installed_asset(source, &asset.package, &asset.source)?;
             verify_snapshot_equality(
                 &current,
-                &source.snapshot,
+                &asset.snapshot,
                 "installed source activation asset",
             )?;
         }
         for candidate in &self.candidates {
-            verify_candidate_preimage(target, candidate)?;
+            verify_candidate_preimage(destination, candidate)?;
         }
         for profile in &self.profiles {
-            verify_candidate_preimage(target, profile)?;
+            verify_candidate_preimage(destination, profile)?;
         }
         for record in &self.retired {
-            verify_activation_file(target, &record.path, record.mode, &record.sha256)?;
+            verify_activation_file(destination, &record.path, record.mode, &record.sha256)?;
         }
-        verify_candidate_preimage(target, &self.config)?;
+        verify_candidate_preimage(destination, &self.config)?;
         let managed = open_child_directory(
-            target,
+            source,
             ".agent-skills",
             Some(MANAGED_DIRECTORY_MODE),
             "managed metadata directory",
         )?;
-        let current = read_required_file(
-            &managed,
-            EXTERNAL_ACTIVATION_LOCK,
-            Some(MANAGED_FILE_MODE),
-            "source activation Lock",
-        )?;
-        verify_snapshot_equality(&current, &self.activation_lock, "source activation Lock")
+        if let Some(expected) = self.activation_lock.as_ref() {
+            let current = read_required_file(
+                &managed,
+                EXTERNAL_ACTIVATION_LOCK,
+                Some(MANAGED_FILE_MODE),
+                "source activation Lock",
+            )?;
+            verify_snapshot_equality(&current, expected, "source activation Lock")
+        } else {
+            require_activation_lock_absent(&managed)
+        }
     }
 
     pub(super) fn apply_with_hook(
@@ -345,7 +403,7 @@ impl SourceActivation {
             bytes: self.candidate_lock.clone(),
             mode: MANAGED_FILE_MODE,
             path: format!(".agent-skills/{EXTERNAL_ACTIVATION_LOCK}"),
-            preimage: Some(self.activation_lock.clone()),
+            preimage: self.activation_lock.clone(),
             preimage_must_match_candidate: false,
         };
         publish_activation_candidate(target, target_path, scratch, scratch_path, &lock_candidate)?;
@@ -770,20 +828,21 @@ fn reconcile_activation_candidates(
 }
 
 fn prepare_activation_profiles(
-    target: &Dir,
+    source_root: &Dir,
+    destination: &Dir,
     source_assets: &mut Vec<SourceAssetSnapshot>,
 ) -> Result<(Vec<ActivationCandidate>, Vec<String>), LifecycleError> {
     let mut profiles = Vec::with_capacity(PROFILE_NAMES.len());
     let mut created = Vec::new();
     for name in PROFILE_NAMES {
         let source = format!("assets/codex/profiles/{name}");
-        let snapshot = read_installed_asset(target, "codex", &source)?;
+        let snapshot = read_installed_asset(source_root, "codex", &source)?;
         source_assets.push(SourceAssetSnapshot {
             package: "codex".to_owned(),
             snapshot: snapshot.clone(),
             source,
         });
-        let preimage = read_optional_relative_file(target, name, None, "Codex profile")?;
+        let preimage = read_optional_relative_file(destination, name, None, "Codex profile")?;
         if preimage.is_none() {
             created.push((*name).to_owned());
         }
@@ -799,17 +858,18 @@ fn prepare_activation_profiles(
 }
 
 fn prepare_activation_config(
-    target: &Dir,
+    source: &Dir,
+    destination: &Dir,
     target_path: &Path,
     source_assets: &mut Vec<SourceAssetSnapshot>,
 ) -> Result<ActivationCandidate, LifecycleError> {
-    let shared = read_installed_asset(target, "codex", SHARED_CONFIG_SOURCE)?;
+    let shared = read_installed_asset(source, "codex", SHARED_CONFIG_SOURCE)?;
     source_assets.push(SourceAssetSnapshot {
         package: "codex".to_owned(),
         snapshot: shared.clone(),
         source: SHARED_CONFIG_SOURCE.to_owned(),
     });
-    let preimage = read_optional_file(target, "config.toml", None, "config.toml")?;
+    let preimage = read_optional_file(destination, "config.toml", None, "config.toml")?;
     let agents_path = target_path
         .join("AGENTS.md")
         .to_str()
@@ -1446,6 +1506,14 @@ fn verify_candidate_preimage(
         ));
     }
     Ok(())
+}
+
+fn require_activation_lock_absent(managed: &Dir) -> Result<(), LifecycleError> {
+    match managed.symlink_metadata(EXTERNAL_ACTIVATION_LOCK) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => invalid("fresh source activation requires an absent Activation Lock"),
+    }
 }
 
 fn verify_snapshot_equality(
@@ -2199,6 +2267,95 @@ mod tests {
         drop(scratch);
         drop(target);
         std::fs::remove_dir_all(&target_path).expect("remove activation fixture");
+    }
+
+    #[test]
+    fn fresh_source_activation_reads_stage_assets_and_destination_preimages_separately() {
+        let (source_path, source, scratch) = activation_fixture();
+        std::fs::remove_file(source_path.join(".agent-skills/activation-lock.json"))
+            .expect("remove source Activation Lock");
+        let destination_path = source_path.with_extension("fresh-target");
+        std::fs::create_dir(&destination_path).expect("create fresh destination");
+        std::fs::create_dir(destination_path.join(".agent-skills"))
+            .expect("create published managed metadata");
+        set_mode(&destination_path, MANAGED_DIRECTORY_MODE);
+        set_mode(
+            &destination_path.join(".agent-skills"),
+            MANAGED_DIRECTORY_MODE,
+        );
+        write_fixture_file(
+            &destination_path,
+            "readonly.config.toml",
+            b"# fresh user profile\n",
+            0o600,
+        );
+        write_fixture_file(
+            &destination_path,
+            "config.toml",
+            b"model = \"fresh-local\"\n",
+            0o600,
+        );
+        let destination_path = destination_path
+            .canonicalize()
+            .expect("canonical fresh destination");
+        let destination = Dir::open_ambient_dir(&destination_path, ambient_authority())
+            .expect("open fresh destination");
+
+        let prepared = SourceActivation::prepare_fresh(
+            &source,
+            &destination,
+            &destination_path,
+            b"fresh native session launcher\n",
+        )
+        .expect("prepare fresh source activation");
+        assert!(prepared.scope().contains(&"config.toml".to_owned()));
+        assert!(prepared.scope().contains(&"bin/agent-session".to_owned()));
+        assert!(prepared.migration.is_none());
+        std::fs::rename(
+            source_path.join(".agent-skills/packages"),
+            destination_path.join(".agent-skills/packages"),
+        )
+        .expect("publish staged package assets");
+        let result = prepared
+            .apply_with_hook(
+                &destination,
+                &destination_path,
+                &scratch,
+                &source_path.join(".scratch"),
+                |_, _| Ok(()),
+            )
+            .expect("apply fresh source activation");
+
+        assert_eq!(
+            result.get("migration"),
+            Some(&Value::Null),
+            "fresh activation must not report a Lock migration"
+        );
+        assert_eq!(
+            std::fs::read(destination_path.join("bin/agent-session"))
+                .expect("read fresh session launcher"),
+            b"fresh native session launcher\n"
+        );
+        assert_eq!(
+            std::fs::read(destination_path.join("readonly.config.toml"))
+                .expect("read preserved fresh profile"),
+            b"# fresh user profile\n"
+        );
+        let config = std::fs::read_to_string(destination_path.join("config.toml"))
+            .expect("read fresh config");
+        assert!(config.contains("model = \"fresh-local\""));
+        assert!(config.contains("model_instructions_file"));
+        assert!(
+            destination_path
+                .join(".agent-skills/activation-lock.json")
+                .is_file()
+        );
+
+        drop(destination);
+        drop(scratch);
+        drop(source);
+        std::fs::remove_dir_all(&destination_path).expect("remove fresh destination");
+        std::fs::remove_dir_all(&source_path).expect("remove activation source");
     }
 
     #[test]

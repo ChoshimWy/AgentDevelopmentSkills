@@ -63,7 +63,37 @@ pub(super) fn stage(
     external_paths: &[String],
 ) -> Result<RollbackStageSnapshot, LifecycleError> {
     let normalized = normalize_external_paths(external_paths)?;
-    let source = inspect_source_install(target, &normalized)?;
+    let snapshot = stage_from(target, target, stage, &normalized)?;
+    verify(target, stage, &snapshot, &normalized)?;
+    Ok(snapshot)
+}
+
+pub(super) fn stage_fresh(
+    managed_source: &Dir,
+    external_source: &Dir,
+    stage: &Dir,
+    external_paths: &[String],
+) -> Result<RollbackStageSnapshot, LifecycleError> {
+    let normalized = normalize_external_paths(external_paths)?;
+    let snapshot = stage_from(managed_source, external_source, stage, &normalized)?;
+    verify_fresh(
+        managed_source,
+        external_source,
+        stage,
+        &snapshot,
+        &normalized,
+    )?;
+    Ok(snapshot)
+}
+
+#[allow(clippy::too_many_lines)]
+fn stage_from(
+    managed_source: &Dir,
+    external_source: &Dir,
+    stage: &Dir,
+    external_paths: &[String],
+) -> Result<RollbackStageSnapshot, LifecycleError> {
+    let source = inspect_split_source_install(managed_source, external_source, external_paths)?;
     let managed = open_child_directory(
         stage,
         ".agent-skills",
@@ -127,7 +157,7 @@ pub(super) fn stage(
     }
 
     let source_managed = open_child_directory(
-        target,
+        managed_source,
         ".agent-skills",
         Some(MANAGED_DIRECTORY_MODE),
         "source managed metadata",
@@ -152,7 +182,7 @@ pub(super) fn stage(
         staged_tree::stage_package_at(&packages_root, &package, record)?;
     }
     let source_skills = open_child_directory(
-        target,
+        managed_source,
         "skills",
         Some(MANAGED_DIRECTORY_MODE),
         "source Skills root",
@@ -171,7 +201,7 @@ pub(super) fn stage(
         staged_tree::stage_skill_at(&skills_root, &skill, record)?;
     }
 
-    copy_external_files(target, &external_files, &source.external_state)?;
+    copy_external_files(external_source, &external_files, &source.external_state)?;
     external_stage::write_independent_file(
         &root,
         EXTERNAL_STATE_FILE,
@@ -206,9 +236,7 @@ pub(super) fn stage(
         "staged rollback point contract",
     )?;
     rollback::validate_rollback_point_root(&root)?;
-    let snapshot = RollbackStageSnapshot { point, source };
-    verify(target, stage, &snapshot, &normalized)?;
-    Ok(snapshot)
+    Ok(RollbackStageSnapshot { point, source })
 }
 
 pub(super) fn verify(
@@ -249,6 +277,28 @@ pub(super) fn verify(
     Ok(())
 }
 
+pub(super) fn verify_fresh(
+    managed_source: &Dir,
+    external_source: &Dir,
+    stage: &Dir,
+    expected: &RollbackStageSnapshot,
+    external_paths: &[String],
+) -> Result<(), LifecycleError> {
+    let normalized = normalize_external_paths(external_paths)?;
+    if inspect_split_source_install(managed_source, external_source, &normalized)?
+        != expected.source
+    {
+        return invalid("fresh rollback point source state changed after staging");
+    }
+    verify_staged(stage, expected)?;
+    if inspect_split_source_install(managed_source, external_source, &normalized)?
+        != expected.source
+    {
+        return invalid("fresh rollback point source state changed while verifying");
+    }
+    Ok(())
+}
+
 pub(super) fn verify_published(
     target: &Dir,
     expected: &RollbackStageSnapshot,
@@ -266,6 +316,19 @@ pub(super) fn verify_published_external_preimage(
         return invalid("published external state differs from frozen rollback preimage");
     }
     verify_staged(target, expected)
+}
+
+pub(super) fn verify_staged_external_preimage(
+    target: &Dir,
+    stage: &Dir,
+    expected: &RollbackStageSnapshot,
+    external_paths: &[String],
+) -> Result<(), LifecycleError> {
+    let normalized = normalize_external_paths(external_paths)?;
+    if inspect_external_state(target, &normalized)? != expected.source.external_state {
+        return invalid("restored external state differs from frozen rollback preimage");
+    }
+    verify_staged(stage, expected)
 }
 
 pub(super) fn verify_staged(
@@ -304,6 +367,20 @@ fn inspect_source_install(
     let managed = inspect_managed_install(target)?;
     check_activation(target)?;
     let external_state = inspect_external_state(target, external_paths)?;
+    Ok(SourceInstallSnapshot {
+        external_state,
+        managed,
+    })
+}
+
+fn inspect_split_source_install(
+    managed_source: &Dir,
+    external_source: &Dir,
+    external_paths: &[String],
+) -> Result<SourceInstallSnapshot, LifecycleError> {
+    let managed = inspect_managed_install(managed_source)?;
+    check_activation(managed_source)?;
+    let external_state = inspect_external_state(external_source, external_paths)?;
     Ok(SourceInstallSnapshot {
         external_state,
         managed,

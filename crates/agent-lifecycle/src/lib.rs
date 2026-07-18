@@ -12,12 +12,14 @@
 //! recovery, its internal mutation boundary restores validated external
 //! rollback preimages through a private quarantine. The approved external scope
 //! must remain quiescent without concurrently writable handles. The first
-//! trusted handlers perform source deactivation and replacement-transaction
-//! source activation with exact rollback-scope and Activation ownership
-//! checks. [`PublishedUninstall`] adds rollback-backed full managed removal
-//! while preserving local profiles, config semantics, and `skills/.system`.
-//! Fresh-install activation and production command routing remain outside this
-//! slice.
+//! trusted handlers perform source deactivation plus replacement and
+//! fresh-install source activation with exact rollback-scope and Activation
+//! ownership checks. Fresh activation freezes package assets from the stage
+//! and unmanaged preimages from the target before publication, then removes
+//! the new managed roots and restores those preimages on failure.
+//! [`PublishedUninstall`] adds rollback-backed full managed removal while
+//! preserving local profiles, config semantics, and `skills/.system`.
+//! Production command routing remains outside this slice.
 
 mod codex_config;
 mod doctor_report;

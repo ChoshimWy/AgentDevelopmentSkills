@@ -159,12 +159,15 @@ contains:
   byte-preserving TOML 1.0 removal of only the managed root assignment, removes
   the Activation Lock last, and supports both guarded commit and full external
   rollback. Replacement transactions with an exact rollback point can now run
-  source activation through the same guard. It freezes static assets from the
-  newly published package snapshot, rejects unmanaged conflicts, preserves
-  existing profiles, publishes through private no-replace quarantine, renders
-  Codex config natively, and writes the Activation Lock last. The session
-  launcher is still explicit caller input until release packaging binds a
-  verified native executable. Full managed uninstall now runs behind a
+  source activation through the same guard. Fresh-install activation freezes
+  the same exact rollback scope before publication by reading verified assets
+  from the stage and unmanaged destination, profile, and config preimages from
+  the target. Both paths reject unmanaged conflicts, preserve existing
+  profiles, publish through private no-replace quarantine, render Codex config
+  natively, and write the Activation Lock last. Fresh rollback first removes
+  the new managed roots and then restores the frozen external preimages. The
+  session launcher is still explicit caller input until release packaging
+  binds a verified native executable. Full managed uninstall now runs behind a
   `PublishedUninstall` RAII guard: it freezes a complete managed/external
   rollback point, moves all managed roots into a private backup, validates the
   supported Activation ownership set, preserves profiles, Codex config
@@ -176,8 +179,8 @@ contains:
   spelling, ownership, and transaction recovery while the Python source
   installer remains POSIX-mode only. The command now also provides a read-only
   dry-run, Python-compatible human output, and canonical blocked JSON.
-  Fresh-install activation and production command routing are not implemented
-  yet; `uninstall.sh` still uses the Python production path.
+  Production command routing is not implemented yet; `uninstall.sh` still uses
+  the Python production path.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit

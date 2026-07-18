@@ -235,6 +235,15 @@ impl LifecycleWorkspace {
             if present != 0 && present != MANAGED_ROOTS.len() {
                 return invalid("target managed roots are incomplete");
             }
+            if self.has_fresh_rollback_point() && present != 0 {
+                return invalid(
+                    "fresh source activation cannot replace an existing managed installation",
+                );
+            }
+            if present == 0 && self.has_staged_rollback_point() && !self.has_fresh_rollback_point()
+            {
+                return invalid("replacement rollback source disappeared before publication");
+            }
             if present != 0 && !self.has_staged_rollback_point() {
                 return invalid(
                     "replacing an existing installation requires a verified rollback point",
@@ -1149,11 +1158,20 @@ impl PublishedInstall {
             let target_path = workspace.target().to_path_buf();
             let scratch = workspace.handler_scratch_directory()?;
             let scratch_path = workspace.handler_scratch_path();
-            let prepared = source_activation::SourceActivation::prepare(
-                &target,
-                workspace.contract_target(),
-                session_launcher,
-            )?;
+            let prepared = if workspace.has_fresh_rollback_point() {
+                source_activation::SourceActivation::prepare_fresh(
+                    &target,
+                    &target,
+                    workspace.contract_target(),
+                    session_launcher,
+                )?
+            } else {
+                source_activation::SourceActivation::prepare(
+                    &target,
+                    workspace.contract_target(),
+                    session_launcher,
+                )?
+            };
             workspace.require_rollback_external_paths(prepared.scope())?;
             prepared.revalidate(&target)?;
             (prepared, target, target_path, scratch, scratch_path)
@@ -1169,6 +1187,15 @@ impl PublishedInstall {
         )?;
         self.external_mutation_state = ExternalMutationState::ActivationApplied;
         Ok(result)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_source_activation_with_test_hook(
+        &mut self,
+        session_launcher: &[u8],
+        handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<Value, LifecycleError> {
+        self.apply_source_activation_with(session_launcher, handler_hook)
     }
 
     fn apply_source_deactivation_with(
@@ -1291,6 +1318,11 @@ impl PublishedInstall {
         workspace: &LifecycleWorkspace,
         plan: &ValidatedInstallPlan,
     ) -> Result<(), LifecycleError> {
+        if workspace.has_fresh_rollback_point()
+            && self.external_mutation_state != ExternalMutationState::ActivationApplied
+        {
+            return invalid("fresh source activation must complete before commit");
+        }
         match self.external_mutation_state {
             ExternalMutationState::Preserved => workspace.verify_published_install(plan),
             ExternalMutationState::ActivationApplied => workspace
@@ -1614,7 +1646,17 @@ fn recover_roots_with_hook(
     }
 
     errors.extend(unpublish_new_roots(workspace, roots, &mut hook));
-    if !errors.is_empty() || !has_previous {
+    if !errors.is_empty() {
+        return errors;
+    }
+    if !has_previous {
+        if restore_external {
+            if let Err(error) = restore_staged_external_state(workspace) {
+                errors.push(format!("restore external lifecycle state: {error}"));
+            } else if let Err(error) = workspace.verify_fresh_recovery() {
+                errors.push(format!("verify fresh lifecycle recovery: {error}"));
+            }
+        }
         return errors;
     }
     if complete_backup && let Err(error) = workspace.verify_recovery_backup() {

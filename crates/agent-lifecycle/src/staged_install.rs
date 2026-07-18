@@ -925,6 +925,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    type FixtureAsset<'a> = (&'a str, &'a [u8], u32);
+    type FixturePackageSpec<'a> = (&'a str, &'a str, Vec<FixtureAsset<'a>>);
     const INSTRUCTIONS: &str = concat!(
         "<!-- agent-development-skills:managed instructions-v1 -->\n",
         "# 全局 Agent Instructions\n\n",
@@ -955,6 +957,153 @@ mod tests {
 
         fn with_codex_runtime() -> Self {
             Self::with_options("0.1.0", true)
+        }
+
+        #[allow(clippy::too_many_lines)]
+        fn with_source_activation_runtime() -> Self {
+            let mut fixture = Self::with_options("0.1.0", false);
+            let package_specs: [FixturePackageSpec<'_>; 5] = [
+                (
+                    "apple",
+                    "discipline",
+                    vec![
+                        (
+                            "config/codex/templates/agents/builder.toml",
+                            b"# builder\n",
+                            0o644,
+                        ),
+                        (
+                            "config/codex/templates/agents/docs_researcher.toml",
+                            b"# docs researcher\n",
+                            0o644,
+                        ),
+                        (
+                            "config/codex/templates/agents/tester.toml",
+                            b"# tester\n",
+                            0o644,
+                        ),
+                        (
+                            "config/codex/templates/codex_verify.example.sh",
+                            b"#!/bin/sh\nexit 0\n",
+                            0o755,
+                        ),
+                        (
+                            "config/codex/templates/ui-smoke.example.yml",
+                            b"version: 1\n",
+                            0o644,
+                        ),
+                        ("tools/digest-xcodebuild-log.sh", b"#!/bin/sh\ncat\n", 0o755),
+                    ],
+                ),
+                (
+                    "codex",
+                    "runtime-config",
+                    vec![
+                        (
+                            "assets/codex/codex.shared.toml",
+                            b"[features]\nmanaged = true\n",
+                            0o644,
+                        ),
+                        (
+                            "assets/codex/profiles/budget.config.toml",
+                            b"# budget\n",
+                            0o644,
+                        ),
+                        (
+                            "assets/codex/profiles/daily.config.toml",
+                            b"# daily\n",
+                            0o644,
+                        ),
+                        ("assets/codex/profiles/deep.config.toml", b"# deep\n", 0o644),
+                        (
+                            "assets/codex/profiles/extreme.config.toml",
+                            b"# extreme\n",
+                            0o644,
+                        ),
+                        (
+                            "assets/codex/profiles/interactive-fast.config.toml",
+                            b"# interactive\n",
+                            0o644,
+                        ),
+                        (
+                            "assets/codex/profiles/readonly.config.toml",
+                            b"# readonly\n",
+                            0o644,
+                        ),
+                    ],
+                ),
+                (
+                    "design",
+                    "discipline",
+                    vec![(
+                        "assets/codex/agents/design_researcher.toml",
+                        b"# design researcher\n",
+                        0o644,
+                    )],
+                ),
+                (
+                    "review",
+                    "discipline",
+                    vec![("assets/codex/agents/reviewer.toml", b"# reviewer\n", 0o644)],
+                ),
+                (
+                    "workflow",
+                    "discipline",
+                    vec![
+                        ("assets/codex/agents/explorer.toml", b"# explorer\n", 0o644),
+                        ("assets/codex/agents/pm.toml", b"# pm\n", 0o644),
+                        ("assets/codex/agents/reporter.toml", b"# reporter\n", 0o644),
+                    ],
+                ),
+            ];
+            let mut plan = fixture.token.install_plan.clone();
+            for (id, kind, files) in package_specs {
+                let (assets, package, selected) =
+                    create_fixture_package(&fixture.root, id, kind, &files);
+                plan["assets"]
+                    .as_array_mut()
+                    .expect("plan assets")
+                    .extend(assets);
+                plan["packages"]
+                    .as_array_mut()
+                    .expect("plan packages")
+                    .push(package);
+                plan["selected_packages"]
+                    .as_array_mut()
+                    .expect("selected packages")
+                    .push(selected);
+            }
+            plan["selected_disciplines"] = json!(["apple", "design", "review", "workflow"]);
+            plan["selected_runtime_configs"] = json!(["codex"]);
+            let assets = plan["assets"].clone();
+            let packages = plan["packages"].as_array().expect("plan packages");
+            plan["asset_summary"] = json!({
+                "content_sha256": canonical_sha256(&assets).expect("hash activation assets"),
+                "file_count": assets.as_array().expect("activation assets").len(),
+                "package_count": packages.len(),
+                "skill_count": 0,
+            });
+            plan["package_lock_hash"] = Value::Null;
+            refresh_plan_fingerprint(&mut plan);
+            validate_install_plan(&plan).expect("validate activation plan");
+            let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .canonicalize()
+                .expect("canonical repository");
+            let package_lock = resolve_package_lock(
+                &plan,
+                repository.join("schemas"),
+                None,
+                None,
+                &fixture.root,
+                None,
+            )
+            .expect("resolve activation package Lock");
+            plan["package_lock_hash"] = package_lock["fingerprint"].clone();
+            refresh_plan_fingerprint(&mut plan);
+            fixture.token =
+                ValidatedInstallPlan::new(plan, package_lock).expect("bind activation plan");
+            fixture
         }
 
         #[allow(clippy::too_many_lines)]
@@ -1139,6 +1288,111 @@ mod tests {
         }
     }
 
+    fn create_fixture_package(
+        root: &Path,
+        id: &str,
+        kind: &str,
+        source_files: &[FixtureAsset<'_>],
+    ) -> (Vec<Value>, Value, Value) {
+        let package_root = root.join(id);
+        std::fs::create_dir(&package_root).expect("create activation package");
+        let manifest = json!({
+            "bindings": {},
+            "capabilities": [],
+            "detection": {"medium": [], "strong": [], "weak": []},
+            "id": id,
+            "installation": {
+                "asset_roots": [],
+                "instruction_fragments": [],
+                "skill_roots": [],
+            },
+            "kind": kind,
+            "package_requires": [],
+            "schema_version": "1.0",
+            "version": "0.1.0",
+        });
+        let manifest_bytes = canonical_json(&manifest).expect("encode activation Manifest");
+        std::fs::write(package_root.join("manifest.json"), &manifest_bytes)
+            .expect("write activation Manifest");
+        set_mode(&package_root, MANAGED_DIRECTORY_MODE);
+        set_mode(&package_root.join("manifest.json"), MANAGED_FILE_MODE);
+
+        let mut directories = std::collections::BTreeSet::new();
+        let mut file_records = vec![json!({
+            "mode": MANAGED_FILE_MODE,
+            "path": "manifest.json",
+            "sha256": bytes_sha256(&manifest_bytes),
+        })];
+        for (relative, bytes, mode) in source_files {
+            let destination = package_root.join(relative);
+            std::fs::create_dir_all(destination.parent().expect("activation asset parent"))
+                .expect("create activation asset parents");
+            std::fs::write(&destination, bytes).expect("write activation asset");
+            set_mode(&destination, *mode);
+            let mut parent = Path::new(relative).parent();
+            while let Some(path) = parent {
+                if path.as_os_str().is_empty() {
+                    break;
+                }
+                directories.insert(path.to_string_lossy().replace('\\', "/"));
+                set_mode(&package_root.join(path), MANAGED_DIRECTORY_MODE);
+                parent = path.parent();
+            }
+            file_records.push(json!({
+                "mode": mode,
+                "path": relative,
+                "sha256": bytes_sha256(bytes),
+            }));
+        }
+        file_records.sort_by(|left, right| {
+            left.get("path")
+                .and_then(Value::as_str)
+                .cmp(&right.get("path").and_then(Value::as_str))
+        });
+        let directory_records = directories
+            .into_iter()
+            .map(|path| json!({"mode": MANAGED_DIRECTORY_MODE, "path": path}))
+            .collect::<Vec<_>>();
+        let files = Value::Array(file_records);
+        let files_sha256 = canonical_sha256(&files).expect("hash activation package files");
+        let assets = files
+            .as_array()
+            .expect("activation package file records")
+            .iter()
+            .map(|record| {
+                json!({
+                    "mode": record["mode"],
+                    "package": id,
+                    "path": record["path"],
+                    "sha256": record["sha256"],
+                })
+            })
+            .collect::<Vec<_>>();
+        (
+            assets,
+            json!({
+                "directories": directory_records,
+                "file_count": files.as_array().expect("files").len(),
+                "files": files,
+                "files_sha256": files_sha256,
+                "id": id,
+                "manifest_sha256": canonical_sha256(&manifest).expect("hash activation Manifest"),
+                "provider_manifest_sha256": Value::Null,
+                "root_mode": MANAGED_DIRECTORY_MODE,
+            }),
+            json!({
+                "core_compatibility": format!("=={}", env!("CARGO_PKG_VERSION")),
+                "id": id,
+                "kind": kind,
+                "provider_compatibility": Value::Null,
+                "provider_version": Value::Null,
+                "selection_reasons": [format!("{kind}:{id}")],
+                "source_sha256": files_sha256,
+                "version": "0.1.0",
+            }),
+        )
+    }
+
     fn stage_complete_managed_layout(fixture: &Fixture) -> (Dir, LifecycleWorkspace) {
         let source = fixture.source_directory();
         let mut workspace =
@@ -1149,6 +1403,26 @@ mod tests {
         workspace
             .stage_plan_package(&fixture.token, "core", &source)
             .expect("stage plan package");
+        for package in fixture
+            .token
+            .install_plan
+            .get("packages")
+            .and_then(Value::as_array)
+            .expect("plan packages")
+        {
+            let id = package
+                .get("id")
+                .and_then(Value::as_str)
+                .expect("package id");
+            if id == "core" {
+                continue;
+            }
+            let package_source = Dir::open_ambient_dir(fixture.root.join(id), ambient_authority())
+                .expect("open fixture package source");
+            workspace
+                .stage_plan_package(&fixture.token, id, &package_source)
+                .expect("stage fixture package");
+        }
         (source, workspace)
     }
 
@@ -2516,6 +2790,331 @@ mod tests {
             .expect("commit published install");
         assert!(!stage.exists());
         assert!(!backup.exists());
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn fresh_source_activation_publishes_and_commits_under_one_rollback_contract() {
+        let fixture = Fixture::with_source_activation_runtime();
+        std::fs::create_dir_all(fixture.target()).expect("create activation target");
+        std::fs::write(
+            fixture.target().join("config.toml"),
+            b"model = \"fresh-local\"\n",
+        )
+        .expect("write fresh config");
+        std::fs::write(
+            fixture.target().join("readonly.config.toml"),
+            b"# user readonly\n",
+        )
+        .expect("write user profile");
+        set_mode(&fixture.target(), MANAGED_DIRECTORY_MODE);
+        set_mode(&fixture.target().join("config.toml"), 0o600);
+        set_mode(&fixture.target().join("readonly.config.toml"), 0o600);
+
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage fresh external state");
+        workspace
+            .stage_fresh_source_activation(&fixture.token, b"native session launcher\n")
+            .expect("freeze fresh activation rollback");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish fresh activation install");
+        let report = published
+            .apply_source_activation(b"native session launcher\n")
+            .expect("apply fresh source activation");
+        assert_eq!(
+            report.get("handler").and_then(Value::as_str),
+            Some("core.source-activation.apple-codex-v1")
+        );
+        published
+            .verify(&fixture.token)
+            .expect("verify activated fresh install");
+        published
+            .commit(&fixture.token)
+            .expect("commit activated fresh install");
+
+        assert_eq!(
+            std::fs::read(fixture.target().join("bin/agent-session"))
+                .expect("read native launcher"),
+            b"native session launcher\n"
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("readonly.config.toml"))
+                .expect("read preserved user profile"),
+            b"# user readonly\n"
+        );
+        let config =
+            std::fs::read_to_string(fixture.target().join("config.toml")).expect("read config");
+        assert!(config.contains("model = \"fresh-local\""));
+        assert!(config.contains("model_instructions_file"));
+        assert!(
+            fixture
+                .target()
+                .join(".agent-skills/activation-lock.json")
+                .is_file()
+        );
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn fresh_source_activation_rollback_restores_external_preimages_and_removes_managed_roots() {
+        let fixture = Fixture::with_source_activation_runtime();
+        std::fs::create_dir_all(fixture.target()).expect("create activation target");
+        std::fs::write(
+            fixture.target().join("config.toml"),
+            b"model = \"before\"\n",
+        )
+        .expect("write original config");
+        std::fs::write(
+            fixture.target().join("readonly.config.toml"),
+            b"# original profile\n",
+        )
+        .expect("write original profile");
+        set_mode(&fixture.target(), MANAGED_DIRECTORY_MODE);
+        set_mode(&fixture.target().join("config.toml"), 0o600);
+        set_mode(&fixture.target().join("readonly.config.toml"), 0o600);
+
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage fresh external state");
+        workspace
+            .stage_fresh_source_activation(&fixture.token, b"native session launcher\n")
+            .expect("freeze fresh activation rollback");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish fresh activation install");
+        published
+            .apply_source_activation(b"native session launcher\n")
+            .expect("apply fresh source activation");
+        published
+            .rollback()
+            .expect("rollback fresh activated install");
+
+        for name in ["AGENTS.md", "skills", ".agent-skills"] {
+            assert!(!fixture.target().join(name).exists(), "{name}");
+        }
+        assert_eq!(
+            std::fs::read(fixture.target().join("config.toml"))
+                .expect("read restored original config"),
+            b"model = \"before\"\n"
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("readonly.config.toml"))
+                .expect("read restored original profile"),
+            b"# original profile\n"
+        );
+        for path in [
+            "agents",
+            "bin",
+            "templates",
+            "budget.config.toml",
+            "daily.config.toml",
+            "deep.config.toml",
+            "extreme.config.toml",
+            "interactive-fast.config.toml",
+        ] {
+            assert!(
+                !fixture.target().join(path).exists(),
+                "fresh activation residue remains: {path}"
+            );
+        }
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn fresh_source_activation_cannot_commit_before_activation_completes() {
+        let fixture = Fixture::with_source_activation_runtime();
+        std::fs::create_dir_all(fixture.target()).expect("create activation target");
+        std::fs::write(
+            fixture.target().join("config.toml"),
+            b"model = \"before\"\n",
+        )
+        .expect("write config preimage");
+        set_mode(&fixture.target(), MANAGED_DIRECTORY_MODE);
+        set_mode(&fixture.target().join("config.toml"), 0o600);
+
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage fresh external state");
+        workspace
+            .stage_fresh_source_activation(&fixture.token, b"native session launcher\n")
+            .expect("freeze fresh activation rollback");
+        let published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish fresh activation install");
+        let verify_error = published
+            .verify(&fixture.token)
+            .expect_err("unactivated fresh install must not verify");
+        assert!(
+            verify_error
+                .to_string()
+                .contains("fresh source activation must complete before commit"),
+            "{verify_error}"
+        );
+        let commit_error = published
+            .commit(&fixture.token)
+            .expect_err("unactivated fresh install must not commit");
+        assert!(
+            commit_error
+                .to_string()
+                .contains("fresh source activation must complete before commit"),
+            "{commit_error}"
+        );
+
+        for name in ["AGENTS.md", "skills", ".agent-skills"] {
+            assert!(!fixture.target().join(name).exists(), "{name}");
+        }
+        assert_eq!(
+            std::fs::read(fixture.target().join("config.toml"))
+                .expect("read unchanged config preimage"),
+            b"model = \"before\"\n"
+        );
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn failed_mid_fresh_source_activation_restores_every_external_preimage() {
+        let fixture = Fixture::with_source_activation_runtime();
+        std::fs::create_dir_all(fixture.target()).expect("create activation target");
+        std::fs::write(
+            fixture.target().join("config.toml"),
+            b"model = \"before-failure\"\n",
+        )
+        .expect("write original config");
+        set_mode(&fixture.target(), MANAGED_DIRECTORY_MODE);
+        set_mode(&fixture.target().join("config.toml"), 0o600);
+
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage fresh external state");
+        workspace
+            .stage_fresh_source_activation(&fixture.token, b"native session launcher\n")
+            .expect("freeze fresh activation rollback");
+        let mut published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish fresh activation install");
+        let error = published
+            .apply_source_activation_with_test_hook(b"native session launcher\n", |_, phase| {
+                if phase == "managed-file-published" {
+                    return Err(LifecycleError::Invalid(
+                        "injected fresh activation failure".to_owned(),
+                    ));
+                }
+                Ok(())
+            })
+            .expect_err("fresh activation must fail after its first external write");
+        assert!(
+            error
+                .to_string()
+                .contains("injected fresh activation failure"),
+            "{error}"
+        );
+        published
+            .rollback()
+            .expect("rollback failed fresh activation");
+
+        for name in ["AGENTS.md", "skills", ".agent-skills", "agents", "bin"] {
+            assert!(!fixture.target().join(name).exists(), "{name}");
+        }
+        assert_eq!(
+            std::fs::read(fixture.target().join("config.toml"))
+                .expect("read restored failure preimage"),
+            b"model = \"before-failure\"\n"
+        );
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn fresh_source_activation_rejects_unmanaged_conflicts_before_publication() {
+        let fixture = Fixture::with_source_activation_runtime();
+        std::fs::create_dir_all(fixture.target().join("agents"))
+            .expect("create unmanaged activation parent");
+        std::fs::write(
+            fixture.target().join("agents/reviewer.toml"),
+            b"# unmanaged conflict\n",
+        )
+        .expect("write unmanaged conflict");
+        set_mode(&fixture.target(), MANAGED_DIRECTORY_MODE);
+        set_mode(&fixture.target().join("agents"), MANAGED_DIRECTORY_MODE);
+        set_mode(
+            &fixture.target().join("agents/reviewer.toml"),
+            MANAGED_FILE_MODE,
+        );
+
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage fresh external state");
+        let error = workspace
+            .stage_fresh_source_activation(&fixture.token, b"native session launcher\n")
+            .expect_err("unmanaged activation conflict must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to overwrite unmanaged activation destination"),
+            "{error}"
+        );
+        for name in ["AGENTS.md", "skills", ".agent-skills"] {
+            assert!(!fixture.target().join(name).exists(), "{name}");
+        }
+        assert_eq!(
+            std::fs::read(fixture.target().join("agents/reviewer.toml"))
+                .expect("read unchanged unmanaged conflict"),
+            b"# unmanaged conflict\n"
+        );
+        drop(source);
+        workspace
+            .cleanup()
+            .expect("cleanup rejected fresh workspace");
+    }
+
+    #[test]
+    fn fresh_source_activation_scope_drift_blocks_managed_publication() {
+        let fixture = Fixture::with_source_activation_runtime();
+        std::fs::create_dir_all(fixture.target()).expect("create activation target");
+        std::fs::write(
+            fixture.target().join("config.toml"),
+            b"model = \"before\"\n",
+        )
+        .expect("write config preimage");
+        set_mode(&fixture.target(), MANAGED_DIRECTORY_MODE);
+        set_mode(&fixture.target().join("config.toml"), 0o600);
+
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage fresh external state");
+        workspace
+            .stage_fresh_source_activation(&fixture.token, b"native session launcher\n")
+            .expect("freeze fresh activation rollback");
+        std::fs::write(fixture.target().join("config.toml"), b"model = \"raced\"\n")
+            .expect("drift frozen config");
+        let error = workspace
+            .publish_staged_install(&fixture.token)
+            .expect_err("fresh scope drift must block publication");
+        assert!(
+            error
+                .to_string()
+                .contains("fresh rollback point source state changed"),
+            "{error}"
+        );
+        for name in ["AGENTS.md", "skills", ".agent-skills"] {
+            assert!(!fixture.target().join(name).exists(), "{name}");
+        }
+        assert_eq!(
+            std::fs::read(fixture.target().join("config.toml")).expect("read raced config"),
+            b"model = \"raced\"\n"
+        );
         assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
         drop(source);
     }

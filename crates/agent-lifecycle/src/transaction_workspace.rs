@@ -1,7 +1,7 @@
 use super::{
     INSTALL_BACKUP_PREFIX, INSTALL_STAGE_PREFIX, LifecycleError, LifecycleLock,
     ValidatedInstallPlan, external_stage, open_child_directory, rollback_stage, same_object_cap,
-    staged_install, staged_tree,
+    source_activation, staged_install, staged_tree,
 };
 use cap_std::fs::Dir;
 use serde_json::Value;
@@ -23,12 +23,13 @@ static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// bound to the locked target, and can assemble a complete managed stage from
 /// one [`ValidatedInstallPlan`], including a frozen external `.system` and
 /// Activation snapshot plus a persistent rollback point for an intact current
-/// installation. Managed roots can then be published through an identity-bound
+/// installation or a split-source rollback point for fresh activation.
+/// Managed roots can then be published through an identity-bound
 /// [`super::PublishedInstall`] guard. That guard owns external rollback
 /// restoration once its internal mutation boundary starts; trusted handlers
-/// now cover source deactivation, rollback-backed replacement activation, and
-/// rollback-backed full uninstall, while production commands are not routed
-/// through these guards yet.
+/// now cover source deactivation, rollback-backed replacement/fresh
+/// activation, and rollback-backed full uninstall, while production commands
+/// are not routed through these guards yet.
 #[must_use = "the lifecycle workspace must be held for the full transaction"]
 pub struct LifecycleWorkspace {
     backup: WorkspaceEntry,
@@ -38,6 +39,7 @@ pub struct LifecycleWorkspace {
     staged_external_state: Option<external_stage::ExternalStageSnapshot>,
     staged_install_identity: Option<StagedInstallIdentity>,
     staged_rollback_point: Option<rollback_stage::RollbackStageSnapshot>,
+    staged_rollback_point_is_fresh: bool,
     target: PathBuf,
     target_directory: Dir,
     rollback_external_paths: Vec<String>,
@@ -110,6 +112,7 @@ impl LifecycleWorkspace {
                 staged_external_state: None,
                 staged_install_identity: None,
                 staged_rollback_point: None,
+                staged_rollback_point_is_fresh: false,
                 target,
                 target_directory,
                 rollback_external_paths: Vec::new(),
@@ -307,6 +310,67 @@ impl LifecycleWorkspace {
         )?;
         self.rollback_external_paths = external_paths.to_vec();
         self.staged_rollback_point = Some(snapshot);
+        self.staged_rollback_point_is_fresh = false;
+        self.verify_staged_install(plan)?;
+        Ok(fingerprint)
+    }
+
+    /// Freeze fresh-install source activation preimages before publication.
+    ///
+    /// Installed activation assets are read from the complete managed stage,
+    /// while unmanaged destinations, profiles, and `config.toml` are read from
+    /// the still-unmodified target. The resulting exact external scope is
+    /// persisted inside the staged rollback point so a failed post-publication
+    /// activation can remove the new managed roots and restore every external
+    /// preimage.
+    ///
+    /// # Errors
+    /// Fails closed unless the staged installation and preserved external
+    /// state are complete, all target managed roots are absent, activation
+    /// assets are valid, unmanaged destinations are compatible, and the fresh
+    /// rollback point can be copied and revalidated without drift.
+    pub fn stage_fresh_source_activation(
+        &mut self,
+        plan: &ValidatedInstallPlan,
+        session_launcher: &[u8],
+    ) -> Result<String, LifecycleError> {
+        self.validate()?;
+        self.validate_staged_install_identity(plan)?;
+        if self.staged_rollback_point.is_some() {
+            return invalid("lifecycle workspace rollback point is already staged");
+        }
+        require_fresh_managed_target(&self.target_directory)?;
+        let external = self.staged_external_state.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid(
+                "lifecycle workspace external state has not been staged".to_owned(),
+            )
+        })?;
+        external_stage::verify(&self.target_directory, self.stage.directory()?, external)?;
+        staged_install::verify(self.stage.directory()?, plan, external.layout())?;
+        let prepared = source_activation::SourceActivation::prepare_fresh(
+            self.stage.directory()?,
+            &self.target_directory,
+            &self.contract_target,
+            session_launcher,
+        )?;
+        let external_paths = prepared.scope().to_vec();
+        let snapshot = rollback_stage::stage_fresh(
+            self.stage.directory()?,
+            &self.target_directory,
+            self.stage.directory()?,
+            &external_paths,
+        )?;
+        let fingerprint = snapshot.fingerprint()?.to_owned();
+        rollback_stage::verify_fresh(
+            self.stage.directory()?,
+            &self.target_directory,
+            self.stage.directory()?,
+            &snapshot,
+            &external_paths,
+        )?;
+        self.rollback_external_paths = external_paths;
+        self.staged_rollback_point = Some(snapshot);
+        self.staged_rollback_point_is_fresh = true;
         self.verify_staged_install(plan)?;
         Ok(fingerprint)
     }
@@ -347,6 +411,7 @@ impl LifecycleWorkspace {
         )?;
         self.rollback_external_paths = external_paths.to_vec();
         self.staged_rollback_point = Some(snapshot);
+        self.staged_rollback_point_is_fresh = false;
         self.validate()?;
         Ok(fingerprint)
     }
@@ -372,22 +437,43 @@ impl LifecycleWorkspace {
         external_stage::verify(&self.target_directory, self.stage.directory()?, external)?;
         let mut layout = external.layout();
         if let Some(rollback) = self.staged_rollback_point.as_ref() {
-            rollback_stage::verify(
-                &self.target_directory,
-                self.stage.directory()?,
-                rollback,
-                &self.rollback_external_paths,
-            )?;
+            if self.staged_rollback_point_is_fresh {
+                require_fresh_managed_target(&self.target_directory)?;
+                rollback_stage::verify_fresh(
+                    self.stage.directory()?,
+                    &self.target_directory,
+                    self.stage.directory()?,
+                    rollback,
+                    &self.rollback_external_paths,
+                )?;
+            } else {
+                rollback_stage::verify(
+                    &self.target_directory,
+                    self.stage.directory()?,
+                    rollback,
+                    &self.rollback_external_paths,
+                )?;
+            }
             layout.rollback_point = true;
         }
         staged_install::verify(self.stage.directory()?, plan, layout)?;
         if let Some(rollback) = self.staged_rollback_point.as_ref() {
-            rollback_stage::verify(
-                &self.target_directory,
-                self.stage.directory()?,
-                rollback,
-                &self.rollback_external_paths,
-            )?;
+            if self.staged_rollback_point_is_fresh {
+                rollback_stage::verify_fresh(
+                    self.stage.directory()?,
+                    &self.target_directory,
+                    self.stage.directory()?,
+                    rollback,
+                    &self.rollback_external_paths,
+                )?;
+            } else {
+                rollback_stage::verify(
+                    &self.target_directory,
+                    self.stage.directory()?,
+                    rollback,
+                    &self.rollback_external_paths,
+                )?;
+            }
         }
         external_stage::verify(&self.target_directory, self.stage.directory()?, external)?;
         self.validate()
@@ -817,6 +903,28 @@ impl LifecycleWorkspace {
         self.staged_rollback_point.is_some()
     }
 
+    pub(super) fn has_fresh_rollback_point(&self) -> bool {
+        self.staged_rollback_point.is_some() && self.staged_rollback_point_is_fresh
+    }
+
+    pub(super) fn verify_fresh_recovery(&self) -> Result<(), LifecycleError> {
+        self.validate()?;
+        if !self.has_fresh_rollback_point() {
+            return invalid("fresh recovery requires a fresh rollback point");
+        }
+        require_fresh_managed_target(&self.target_directory)?;
+        let rollback = self.staged_rollback_point.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid("lifecycle workspace has no frozen rollback point".to_owned())
+        })?;
+        rollback_stage::verify_staged_external_preimage(
+            &self.target_directory,
+            self.stage.directory()?,
+            rollback,
+            &self.rollback_external_paths,
+        )?;
+        self.validate()
+    }
+
     pub(super) fn verify_recovery_backup(&self) -> Result<(), LifecycleError> {
         let rollback = self.staged_rollback_point.as_ref().ok_or_else(|| {
             LifecycleError::Invalid(
@@ -1092,6 +1200,21 @@ fn workspace_suffix(attempt: u64) -> String {
 
 fn invalid<T>(message: impl Into<String>) -> Result<T, LifecycleError> {
     Err(LifecycleError::Invalid(message.into()))
+}
+
+fn require_fresh_managed_target(target: &Dir) -> Result<(), LifecycleError> {
+    for name in ["AGENTS.md", "skills", ".agent-skills"] {
+        match target.symlink_metadata(name) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => {
+                return invalid(format!(
+                    "fresh source activation requires an absent managed root: {name}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn finish_cleanup(
