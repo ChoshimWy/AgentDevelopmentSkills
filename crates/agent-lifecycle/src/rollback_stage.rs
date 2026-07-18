@@ -42,9 +42,14 @@ impl RollbackStageSnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SourceInstallSnapshot {
+    external_state: Value,
+    managed: ManagedInstallSnapshot,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManagedInstallSnapshot {
     activation: Option<Vec<u8>>,
     agents: Vec<u8>,
-    external_state: Value,
     install_lock: Value,
     install_lock_bytes: Vec<u8>,
     package_lock: Value,
@@ -93,25 +98,25 @@ pub(super) fn stage(
     external_stage::write_independent_file(
         &root,
         "AGENTS.md",
-        &source.agents,
+        &source.managed.agents,
         MANAGED_FILE_MODE,
         "staged rollback AGENTS.md",
     )?;
     external_stage::write_independent_file(
         &root,
         INSTALL_LOCK,
-        &source.install_lock_bytes,
+        &source.managed.install_lock_bytes,
         MANAGED_FILE_MODE,
         "staged rollback Install Lock",
     )?;
     external_stage::write_independent_file(
         &root,
         PERSISTENT_PACKAGE_LOCK,
-        &source.package_lock_bytes,
+        &source.managed.package_lock_bytes,
         MANAGED_FILE_MODE,
         "staged rollback package Lockfile",
     )?;
-    if let Some(bytes) = source.activation.as_deref() {
+    if let Some(bytes) = source.managed.activation.as_deref() {
         external_stage::write_independent_file(
             &root,
             EXTERNAL_ACTIVATION_LOCK,
@@ -133,7 +138,7 @@ pub(super) fn stage(
         Some(MANAGED_DIRECTORY_MODE),
         "source packages",
     )?;
-    for record in records(&source.install_lock, "packages", "source packages")? {
+    for record in records(&source.managed.install_lock, "packages", "source packages")? {
         let id = record
             .get("id")
             .and_then(Value::as_str)
@@ -152,7 +157,7 @@ pub(super) fn stage(
         Some(MANAGED_DIRECTORY_MODE),
         "source Skills root",
     )?;
-    for record in records(&source.install_lock, "skills", "source Skills")? {
+    for record in records(&source.managed.install_lock, "skills", "source Skills")? {
         let name = record
             .get("name")
             .and_then(Value::as_str)
@@ -176,6 +181,7 @@ pub(super) fn stage(
     )?;
     let snapshot_sha256 = rollback::snapshot_identity(&root)?;
     let package_lock_hash = source
+        .managed
         .package_lock
         .get("fingerprint")
         .and_then(Value::as_str)
@@ -184,7 +190,7 @@ pub(super) fn stage(
         })?;
     let mut point = json!({
         "external_state_sha256": source.external_state.get("fingerprint").cloned().unwrap_or(Value::Null),
-        "install_plan_fingerprint": source.install_lock.get("fingerprint").cloned().unwrap_or(Value::Null),
+        "install_plan_fingerprint": source.managed.install_lock.get("fingerprint").cloned().unwrap_or(Value::Null),
         "manager": "agent-development-skills",
         "package_lock_hash": package_lock_hash,
         "point_id": format!("rollback-{}", &package_lock_hash[..12]),
@@ -243,10 +249,74 @@ pub(super) fn verify(
     Ok(())
 }
 
+pub(super) fn verify_published(
+    target: &Dir,
+    expected: &RollbackStageSnapshot,
+) -> Result<(), LifecycleError> {
+    verify_staged(target, expected)
+}
+
+pub(super) fn verify_staged(
+    target: &Dir,
+    expected: &RollbackStageSnapshot,
+) -> Result<(), LifecycleError> {
+    let managed = open_child_directory(
+        target,
+        ".agent-skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "staged managed metadata",
+    )?;
+    let root = open_child_directory(
+        &managed,
+        ROLLBACK_POINT_DIRECTORY,
+        Some(MANAGED_DIRECTORY_MODE),
+        "staged rollback point",
+    )?;
+    rollback::validate_rollback_point_root(&root)?;
+    if load_json_file(
+        &root,
+        ROLLBACK_POINT_FILE,
+        MANAGED_FILE_MODE,
+        "staged rollback point contract",
+    )? != expected.point
+    {
+        return invalid("staged rollback point identity changed after swap");
+    }
+    Ok(())
+}
+
 fn inspect_source_install(
     target: &Dir,
     external_paths: &[String],
 ) -> Result<SourceInstallSnapshot, LifecycleError> {
+    let managed = inspect_managed_install(target)?;
+    check_activation(target)?;
+    let external_state = inspect_external_state(target, external_paths)?;
+    Ok(SourceInstallSnapshot {
+        external_state,
+        managed,
+    })
+}
+
+pub(super) fn verify_backup(
+    backup: &Dir,
+    expected: &RollbackStageSnapshot,
+) -> Result<(), LifecycleError> {
+    validate_backup_entries(backup)?;
+    verify_restored(backup, expected)
+}
+
+pub(super) fn verify_restored(
+    target: &Dir,
+    expected: &RollbackStageSnapshot,
+) -> Result<(), LifecycleError> {
+    if inspect_managed_install(target)? != expected.source.managed {
+        return invalid("restored managed installation differs from rollback source");
+    }
+    Ok(())
+}
+
+fn inspect_managed_install(target: &Dir) -> Result<ManagedInstallSnapshot, LifecycleError> {
     let managed = open_child_directory(
         target,
         ".agent-skills",
@@ -292,7 +362,6 @@ fn inspect_source_install(
     )?;
     post_install::check_binding_freeze(&install_lock, &package_lock, semantics.as_ref())?;
     post_install::check_permission_freeze(&install_lock, &package_lock, semantics.as_ref())?;
-    check_activation(target)?;
 
     let agents = read_stable_file(
         target,
@@ -338,16 +407,42 @@ fn inspect_source_install(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    let external_state = inspect_external_state(target, external_paths)?;
-    Ok(SourceInstallSnapshot {
+    Ok(ManagedInstallSnapshot {
         activation,
         agents,
-        external_state,
         install_lock,
         install_lock_bytes,
         package_lock,
         package_lock_bytes,
     })
+}
+
+fn validate_backup_entries(backup: &Dir) -> Result<(), LifecycleError> {
+    let mut actual = BTreeSet::new();
+    for entry in backup.entries()? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if ignored_os_metadata(backup, &name)? {
+            continue;
+        }
+        actual.insert(
+            name.to_str()
+                .ok_or_else(|| {
+                    LifecycleError::Invalid("recovery backup contains a non-UTF-8 entry".to_owned())
+                })?
+                .to_owned(),
+        );
+    }
+    if actual
+        != BTreeSet::from([
+            ".agent-skills".to_owned(),
+            "AGENTS.md".to_owned(),
+            "skills".to_owned(),
+        ])
+    {
+        return invalid("recovery backup managed roots are incomplete");
+    }
+    Ok(())
 }
 
 fn validate_managed_entries(managed: &Dir) -> Result<(), LifecycleError> {

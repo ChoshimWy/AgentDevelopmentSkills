@@ -6,12 +6,15 @@
 //! persistent Lockfile; the workspace can then assemble and semantically verify
 //! all three managed roots, preserve external `.system`/Activation state, and
 //! verify the complete staged topology before a swap, including a rollback
-//! point for an intact current installation. Root swaps, upgrade/rollback, and
-//! removal remain outside this slice, which is not yet wired into production
-//! commands.
+//! point for an intact current installation. [`PublishedInstall`] then performs
+//! identity-bound, no-replace managed-root publication and keeps the previous
+//! roots recoverable until explicit commit or rollback. External post-install
+//! mutation, uninstall, and production command routing remain outside this
+//! slice.
 
 mod doctor_report;
 mod external_stage;
+mod managed_swap;
 mod packages;
 mod post_install;
 mod rollback;
@@ -24,6 +27,7 @@ mod transaction_workspace;
 pub use doctor_report::inspect_doctor_report_v1;
 #[cfg(test)]
 use doctor_report::validate_doctor_report_v1;
+pub use managed_swap::PublishedInstall;
 pub use staged_install::ValidatedInstallPlan;
 pub use transaction_lock::LifecycleLock;
 pub use transaction_workspace::LifecycleWorkspace;

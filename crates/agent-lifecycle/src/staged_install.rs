@@ -285,10 +285,32 @@ pub(super) fn verify(
     plan: &ValidatedInstallPlan,
     external: ExternalLayout,
 ) -> Result<(), LifecycleError> {
-    if external == ExternalLayout::default() {
-        validate_layout(stage, plan)?;
+    verify_with_scope(stage, plan, external, true)
+}
+
+pub(super) fn verify_published(
+    target: &Dir,
+    plan: &ValidatedInstallPlan,
+    external: ExternalLayout,
+) -> Result<(), LifecycleError> {
+    verify_with_scope(target, plan, external, false)
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_with_scope(
+    stage: &Dir,
+    plan: &ValidatedInstallPlan,
+    external: ExternalLayout,
+    exact_root: bool,
+) -> Result<(), LifecycleError> {
+    if exact_root {
+        if external == ExternalLayout::default() {
+            validate_layout(stage, plan)?;
+        } else {
+            validate_external_layout(stage, plan, external)?;
+        }
     } else {
-        validate_external_layout(stage, plan, external)?;
+        validate_published_layout(stage, plan, external)?;
     }
     let managed = open_child_directory(
         stage,
@@ -410,11 +432,13 @@ pub(super) fn verify(
         semantics.as_ref(),
     )?;
 
-    require_names(
-        stage,
-        &set([".agent-skills", "AGENTS.md", "skills"]),
-        "staged managed roots changed while verifying",
-    )?;
+    if exact_root {
+        require_names(
+            stage,
+            &set([".agent-skills", "AGENTS.md", "skills"]),
+            "staged managed roots changed while verifying",
+        )?;
+    }
     let final_managed = revalidate_directory(
         stage,
         ".agent-skills",
@@ -471,6 +495,89 @@ pub(super) fn verify(
         expected_instructions.as_bytes(),
     )? {
         return invalid("staged managed metadata changed while verifying");
+    }
+    Ok(())
+}
+
+fn validate_published_layout(
+    target: &Dir,
+    plan: &ValidatedInstallPlan,
+    external: ExternalLayout,
+) -> Result<(), LifecycleError> {
+    let managed = open_child_directory(
+        target,
+        ".agent-skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "published managed metadata",
+    )?;
+    require_names(
+        &managed,
+        &managed_names(external),
+        "published managed metadata contains unverified entries",
+    )?;
+    open_child_directory(
+        &managed,
+        "packages",
+        Some(MANAGED_DIRECTORY_MODE),
+        "published packages root",
+    )?;
+    let skills = open_child_directory(
+        target,
+        "skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "published Skills root",
+    )?;
+    require_names(
+        &skills,
+        &skill_names(plan, external)?,
+        "published Skill set differs from Install Plan",
+    )?;
+    if strict_file_hash(
+        target,
+        "AGENTS.md",
+        MANAGED_FILE_MODE,
+        "published AGENTS.md",
+    )? != plan
+        .install_plan
+        .pointer("/instructions/sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            LifecycleError::Invalid("Install Plan instructions are invalid".to_owned())
+        })?
+    {
+        return invalid("published AGENTS.md differs from Install Plan");
+    }
+    if load_json_file(
+        &managed,
+        INSTALL_LOCK,
+        MANAGED_FILE_MODE,
+        "published Install Lock",
+    )? != plan.install_plan
+        || !strict_child_bytes_equal(
+            &managed,
+            INSTALL_LOCK,
+            MANAGED_FILE_MODE,
+            "published Install Lock",
+            &canonical_json(&plan.install_plan)?,
+        )?
+    {
+        return invalid("published Install Lock differs from validated Install Plan");
+    }
+    if load_json_file(
+        &managed,
+        PACKAGE_LOCK,
+        MANAGED_FILE_MODE,
+        "published persistent package Lockfile",
+    )? != plan.package_lock
+        || !strict_child_bytes_equal(
+            &managed,
+            PACKAGE_LOCK,
+            MANAGED_FILE_MODE,
+            "published persistent package Lockfile",
+            &canonical_json(&plan.package_lock)?,
+        )?
+    {
+        return invalid("published persistent Lockfile differs from validated package Lockfile");
     }
     Ok(())
 }
@@ -809,7 +916,7 @@ fn invalid<T>(message: impl Into<String>) -> Result<T, LifecycleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LifecycleWorkspace;
+    use crate::{LIFECYCLE_LOCK_DIRECTORY, LifecycleWorkspace};
     use agent_contracts::{canonical_sha256, load_json};
     use agent_engine::resolve_package_lock;
     use cap_std::ambient_authority;
@@ -1705,6 +1812,583 @@ mod tests {
             drop(source);
             workspace.cleanup().expect("cleanup workspace");
         }
+    }
+
+    #[test]
+    fn fresh_managed_roots_publish_verify_and_commit_without_touching_unrelated_files() {
+        let fixture = Fixture::new();
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        std::fs::write(fixture.target().join("user-note"), b"unmanaged\n")
+            .expect("write unrelated target file");
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        let stage = workspace.stage_path();
+        let backup = workspace.backup_path();
+        let published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish fresh managed roots");
+        assert_eq!(
+            published.target().expect("published target"),
+            fixture.target().canonicalize().expect("canonical target")
+        );
+        assert!(fixture.target().join("AGENTS.md").is_file());
+        assert!(fixture.target().join("skills").is_dir());
+        assert!(fixture.target().join(".agent-skills").is_dir());
+        assert_eq!(
+            std::fs::read(fixture.target().join("user-note")).expect("read unrelated target file"),
+            b"unmanaged\n"
+        );
+        published
+            .verify(&fixture.token)
+            .expect("verify published install");
+        published
+            .commit(&fixture.token)
+            .expect("commit published install");
+        assert!(!stage.exists());
+        assert!(!backup.exists());
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn dropping_uncommitted_fresh_publication_removes_managed_roots() {
+        let fixture = Fixture::new();
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        let published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish fresh managed roots");
+        drop(published);
+        for name in ["AGENTS.md", "skills", ".agent-skills"] {
+            assert!(!fixture.target().join(name).exists(), "{name}");
+        }
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn published_upgrade_can_restore_all_previous_managed_roots() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let original_agents =
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read original AGENTS");
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        let stage = workspace.stage_path();
+        let backup = workspace.backup_path();
+        let published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        assert!(backup.join("AGENTS.md").is_file());
+        assert!(backup.join("skills").is_dir());
+        assert!(backup.join(".agent-skills").is_dir());
+        assert!(
+            fixture
+                .target()
+                .join(".agent-skills/rollback-point")
+                .is_dir()
+        );
+        published
+            .rollback()
+            .expect("restore previous managed roots");
+        assert_eq!(
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read restored AGENTS"),
+            original_agents
+        );
+        assert!(
+            !fixture
+                .target()
+                .join(".agent-skills/rollback-point")
+                .exists()
+        );
+        assert!(!stage.exists());
+        assert!(!backup.exists());
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn dropping_uncommitted_publication_restores_previous_install() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        let published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        assert!(
+            fixture
+                .target()
+                .join(".agent-skills/rollback-point")
+                .is_dir()
+        );
+        drop(published);
+        assert!(
+            !fixture
+                .target()
+                .join(".agent-skills/rollback-point")
+                .exists()
+        );
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn published_content_tamper_makes_commit_roll_back() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let original_agents =
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read original AGENTS");
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        let published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        std::fs::write(fixture.target().join("AGENTS.md"), b"tampered\n")
+            .expect("tamper published AGENTS");
+        let error = published
+            .commit(&fixture.token)
+            .expect_err("tampered publication must not commit");
+        assert!(error.to_string().contains("AGENTS"), "{error}");
+        assert_eq!(
+            std::fs::read(fixture.target().join("AGENTS.md"))
+                .expect("read automatically restored AGENTS"),
+            original_agents
+        );
+        assert!(
+            !fixture
+                .target()
+                .join(".agent-skills/rollback-point")
+                .exists()
+        );
+        drop(source);
+    }
+
+    #[test]
+    fn partial_publication_failure_reverses_completed_moves() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let original_agents =
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read original AGENTS");
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        let error = workspace
+            .publish_staged_install_with_hook(&fixture.token, |name, phase| {
+                if name == "skills" && phase == "publish" {
+                    return Err(LifecycleError::Invalid(
+                        "injected partial publication failure".to_owned(),
+                    ));
+                }
+                Ok(())
+            })
+            .expect_err("partial publication must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("injected partial publication failure"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("AGENTS.md"))
+                .expect("read restored original AGENTS"),
+            original_agents
+        );
+        assert!(fixture.target().join("skills").is_dir());
+        assert!(fixture.target().join(".agent-skills").is_dir());
+        assert!(
+            !fixture
+                .target()
+                .join(".agent-skills/rollback-point")
+                .exists()
+        );
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn partial_backup_failure_restores_moved_old_roots() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let original_agents =
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read original AGENTS");
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        let error = workspace
+            .publish_staged_install_with_hook(&fixture.token, |name, phase| {
+                if name == "skills" && phase == "backup" {
+                    return Err(LifecycleError::Invalid(
+                        "injected partial backup failure".to_owned(),
+                    ));
+                }
+                Ok(())
+            })
+            .expect_err("partial backup must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("injected partial backup failure"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("AGENTS.md"))
+                .expect("read restored original AGENTS"),
+            original_agents
+        );
+        assert!(fixture.target().join("skills").is_dir());
+        assert!(fixture.target().join(".agent-skills").is_dir());
+        assert!(
+            !fixture
+                .target()
+                .join(".agent-skills/rollback-point")
+                .exists()
+        );
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn post_rename_drift_preserves_the_recorded_backup_root() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let original_agents =
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read original AGENTS");
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        let backup = workspace.backup_path();
+        let target = fixture.target();
+        let error = workspace
+            .publish_staged_install_with_hook(&fixture.token, |name, phase| {
+                if name == "AGENTS.md" && phase == "backup-after-rename" {
+                    std::fs::write(target.join("AGENTS.md"), b"racing replacement\n")
+                        .expect("reoccupy post-rename source");
+                    set_mode(&target.join("AGENTS.md"), MANAGED_FILE_MODE);
+                }
+                Ok(())
+            })
+            .expect_err("post-rename source drift must fail closed");
+        assert!(error.to_string().contains("backup preserved"), "{error}");
+        assert_eq!(
+            std::fs::read(backup.join("AGENTS.md")).expect("read preserved original AGENTS"),
+            original_agents
+        );
+        assert_eq!(
+            std::fs::read(target.join("AGENTS.md")).expect("read racing replacement"),
+            b"racing replacement\n"
+        );
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn published_identity_replacement_preserves_recovery_backup() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        let published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let backup = published.backup_path().expect("published backup path");
+        let displaced = fixture.target().join("displaced-published-agents");
+        std::fs::rename(fixture.target().join("AGENTS.md"), &displaced)
+            .expect("displace published AGENTS");
+        std::fs::write(fixture.target().join("AGENTS.md"), INSTRUCTIONS.as_bytes())
+            .expect("replace published AGENTS");
+        set_mode(&fixture.target().join("AGENTS.md"), MANAGED_FILE_MODE);
+
+        let error = published
+            .rollback()
+            .expect_err("identity replacement must block rollback");
+        assert!(error.to_string().contains("backup preserved"), "{error}");
+        assert!(backup.join("AGENTS.md").is_file());
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        std::fs::remove_file(displaced).expect("remove displaced published AGENTS");
+        drop(source);
+    }
+
+    #[test]
+    fn recovery_backup_content_tamper_never_replaces_published_roots() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        let published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let backup = published.backup_path().expect("published backup path");
+        std::fs::write(backup.join("AGENTS.md"), b"tampered backup\n")
+            .expect("tamper recovery backup");
+
+        let error = published
+            .rollback()
+            .expect_err("tampered backup must not be restored");
+        assert!(error.to_string().contains("backup preserved"), "{error}");
+        assert_eq!(
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read still-published AGENTS"),
+            INSTRUCTIONS.as_bytes()
+        );
+        assert!(
+            fixture
+                .target()
+                .join(".agent-skills/rollback-point")
+                .is_dir()
+        );
+        assert!(backup.join("AGENTS.md").is_file());
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn recovery_time_tamper_reinstates_the_published_install() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        let published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let backup = published.backup_path().expect("published backup path");
+        let error = published
+            .rollback_with_hook(|name, phase| {
+                if name == ".agent-skills" && phase == "restore" {
+                    std::fs::write(backup.join("AGENTS.md"), b"recovery-time tamper\n")
+                        .expect("tamper backup after its complete verification");
+                    set_mode(&backup.join("AGENTS.md"), MANAGED_FILE_MODE);
+                }
+                Ok(())
+            })
+            .expect_err("recovery-time tamper must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("original publication was reinstated"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("AGENTS.md"))
+                .expect("read reinstated published AGENTS"),
+            INSTRUCTIONS.as_bytes()
+        );
+        assert!(
+            fixture
+                .target()
+                .join(".agent-skills/rollback-point")
+                .is_dir()
+        );
+        assert_eq!(
+            std::fs::read(backup.join("AGENTS.md")).expect("read preserved tampered backup"),
+            b"recovery-time tamper\n"
+        );
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn unpublished_stage_tamper_does_not_block_intact_backup_restore() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let original_agents =
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read original AGENTS");
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        let stage = workspace.stage_path();
+        let published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        published
+            .rollback_with_hook(|name, phase| {
+                if name == "AGENTS.md" && phase == "unpublish-after-rename" {
+                    std::fs::write(stage.join("AGENTS.md"), b"tampered unpublished stage\n")
+                        .expect("tamper unpublished new AGENTS");
+                    set_mode(&stage.join("AGENTS.md"), MANAGED_FILE_MODE);
+                }
+                Ok(())
+            })
+            .expect("intact backup should restore despite discarded stage drift");
+        assert_eq!(
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read restored old AGENTS"),
+            original_agents
+        );
+        assert!(!stage.exists());
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn tampered_new_stage_is_not_reinstated_after_old_restore_drift() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        let stage = workspace.stage_path();
+        let published = workspace
+            .publish_staged_install(&fixture.token)
+            .expect("publish managed upgrade");
+        let backup = published.backup_path().expect("published backup path");
+        let error = published
+            .rollback_with_hook(|name, phase| {
+                if name == "AGENTS.md" && phase == "unpublish-after-rename" {
+                    std::fs::write(stage.join("AGENTS.md"), b"tampered unpublished stage\n")
+                        .expect("tamper unpublished new AGENTS");
+                    set_mode(&stage.join("AGENTS.md"), MANAGED_FILE_MODE);
+                }
+                if name == ".agent-skills" && phase == "restore" {
+                    std::fs::write(backup.join("AGENTS.md"), b"tampered recovery AGENTS\n")
+                        .expect("tamper old AGENTS during recovery");
+                    set_mode(&backup.join("AGENTS.md"), MANAGED_FILE_MODE);
+                }
+                Ok(())
+            })
+            .expect_err("neither tampered tree may be accepted as reinstated");
+        assert!(
+            error
+                .to_string()
+                .contains("verify staged publication before failed-recovery reinstatement"),
+            "{error}"
+        );
+        assert!(
+            !error
+                .to_string()
+                .contains("original publication was reinstated after failed recovery"),
+            "{error}"
+        );
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn occupied_private_backup_is_rejected_before_any_root_move() {
+        let fixture = Fixture::new();
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        std::fs::write(workspace.backup_path().join("collision"), b"occupied\n")
+            .expect("occupy recovery backup");
+        let error = workspace
+            .publish_staged_install(&fixture.token)
+            .expect_err("occupied backup must fail");
+        assert!(error.to_string().contains("backup is not empty"), "{error}");
+        for name in ["AGENTS.md", "skills", ".agent-skills"] {
+            assert!(!fixture.target().join(name).exists(), "{name}");
+        }
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn no_replace_publication_preserves_a_racing_destination() {
+        let fixture = Fixture::new();
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        let target = fixture.target();
+        let error = workspace
+            .publish_staged_install_with_hook(&fixture.token, |name, phase| {
+                if name == "AGENTS.md" && phase == "publish-before-rename" {
+                    std::fs::write(target.join("AGENTS.md"), b"racing owner\n")
+                        .expect("create racing destination");
+                    set_mode(&target.join("AGENTS.md"), MANAGED_FILE_MODE);
+                }
+                Ok(())
+            })
+            .expect_err("no-replace publication must reject a racing destination");
+        assert!(error.to_string().contains("could not move"), "{error}");
+        assert_eq!(
+            std::fs::read(target.join("AGENTS.md")).expect("read racing destination"),
+            b"racing owner\n"
+        );
+        assert!(!target.join("skills").exists());
+        assert!(!target.join(".agent-skills").exists());
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
+    }
+
+    #[test]
+    fn replacing_existing_roots_requires_staged_rollback_evidence() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let original_agents =
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read original AGENTS");
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        let error = workspace
+            .publish_staged_install(&fixture.token)
+            .expect_err("existing install without rollback point must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("requires a verified rollback point"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("AGENTS.md"))
+                .expect("read untouched original AGENTS"),
+            original_agents
+        );
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        drop(source);
     }
 
     #[cfg(windows)]

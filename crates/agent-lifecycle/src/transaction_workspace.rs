@@ -22,8 +22,9 @@ static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// bound to the locked target, and can assemble a complete managed stage from
 /// one [`ValidatedInstallPlan`], including a frozen external `.system` and
 /// Activation snapshot plus a persistent rollback point for an intact current
-/// installation. Managed-root swaps are not yet implemented, and production
-/// install/rollback commands are not routed through it.
+/// installation. Managed roots can then be published through an identity-bound
+/// [`super::PublishedInstall`] guard; external post-install mutation and
+/// production install/rollback commands are not routed through it.
 #[must_use = "the lifecycle workspace must be held for the full transaction"]
 pub struct LifecycleWorkspace {
     backup: WorkspaceEntry,
@@ -327,6 +328,54 @@ impl LifecycleWorkspace {
         self.validate()
     }
 
+    /// Revalidate a managed installation after its staged roots were moved
+    /// into the target while the transaction backup remains held.
+    pub(super) fn verify_published_install(
+        &self,
+        plan: &ValidatedInstallPlan,
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        self.validate_staged_install_identity(plan)?;
+        let external = self.staged_external_state.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid(
+                "lifecycle workspace external state has not been staged".to_owned(),
+            )
+        })?;
+        let mut layout = external.layout();
+        if self.staged_rollback_point.is_some() {
+            layout.rollback_point = true;
+        }
+        staged_install::verify_published(&self.target_directory, plan, layout)?;
+        external_stage::verify_published(&self.target_directory, external)?;
+        if let Some(rollback) = self.staged_rollback_point.as_ref() {
+            rollback_stage::verify_published(&self.target_directory, rollback)?;
+        }
+        self.validate()
+    }
+
+    pub(super) fn verify_reinstatement_stage(
+        &self,
+        plan: &ValidatedInstallPlan,
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        self.validate_staged_install_identity(plan)?;
+        let external = self.staged_external_state.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid(
+                "lifecycle workspace external state has not been staged".to_owned(),
+            )
+        })?;
+        let mut layout = external.layout();
+        if self.staged_rollback_point.is_some() {
+            layout.rollback_point = true;
+        }
+        staged_install::verify(self.stage.directory()?, plan, layout)?;
+        external_stage::verify_staged(self.stage.directory()?, external)?;
+        if let Some(rollback) = self.staged_rollback_point.as_ref() {
+            rollback_stage::verify_staged(self.stage.directory()?, rollback)?;
+        }
+        self.validate()
+    }
+
     /// Copy and verify one caller-supplied package tree record.
     ///
     /// The destination is derived from `record.id` under
@@ -481,6 +530,32 @@ impl LifecycleWorkspace {
             return invalid("lifecycle workspace external state is already staged");
         }
         Ok(())
+    }
+
+    pub(super) fn target_directory_cap(&self) -> &Dir {
+        &self.target_directory
+    }
+
+    pub(super) fn has_staged_rollback_point(&self) -> bool {
+        self.staged_rollback_point.is_some()
+    }
+
+    pub(super) fn verify_recovery_backup(&self) -> Result<(), LifecycleError> {
+        let rollback = self.staged_rollback_point.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid(
+                "recovery backup verification requires a staged rollback point".to_owned(),
+            )
+        })?;
+        rollback_stage::verify_backup(self.backup.directory()?, rollback)
+    }
+
+    pub(super) fn verify_restored_install(&self) -> Result<(), LifecycleError> {
+        let rollback = self.staged_rollback_point.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid(
+                "restored installation verification requires a staged rollback point".to_owned(),
+            )
+        })?;
+        rollback_stage::verify_restored(&self.target_directory, rollback)
     }
 }
 
@@ -656,7 +731,9 @@ fn make_owned_tree_removable(directory: &Dir) -> Result<(), LifecycleError> {
                 return invalid("lifecycle workspace tree changed while preparing cleanup");
             }
         } else if before.is_file() {
-            clear_windows_file_readonly(directory, &name, &before)?;
+            if before.permissions().readonly() {
+                clear_windows_file_readonly(directory, &name, &before)?;
+            }
         } else {
             return invalid("lifecycle workspace contains an unsupported filesystem object");
         }

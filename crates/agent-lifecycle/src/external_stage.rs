@@ -98,12 +98,33 @@ pub(super) fn verify(
     if inspect_system_skills(target)? != expected.system_skills {
         return invalid("target .system Skills changed after staging");
     }
+    verify_staged(stage, expected)
+}
+
+pub(super) fn verify_staged(
+    stage: &Dir,
+    expected: &ExternalStageSnapshot,
+) -> Result<(), LifecycleError> {
     if inspect_staged_activation(stage)? != expected.activation {
         return invalid("staged Activation Lock differs from preserved state");
     }
     if inspect_staged_system_skills(stage)? != expected.system_skills {
         return invalid("staged .system Skills differ from preserved state");
     }
+    Ok(())
+}
+
+pub(super) fn verify_published(
+    target: &Dir,
+    expected: &ExternalStageSnapshot,
+) -> Result<(), LifecycleError> {
+    if inspect_staged_activation(target)? != expected.activation {
+        return invalid("published Activation Lock differs from preserved state");
+    }
+    if inspect_staged_system_skills(target)? != expected.system_skills {
+        return invalid("published .system Skills differ from preserved state");
+    }
+    check_activation(target)?;
     Ok(())
 }
 

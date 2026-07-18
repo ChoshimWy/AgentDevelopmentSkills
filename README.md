@@ -230,7 +230,21 @@ new stage. It freezes the current Lock pair, packages, Skills, `AGENTS.md`,
 optional Activation Lock, package-owned external files, absent-file records,
 and parent-directory state, then revalidates both source and staged identities
 around the complete gate. External paths must be sorted, unique, relative, and
-disjoint from managed roots. Managed-root swaps and production command routing
+disjoint from managed roots. `publish_staged_install` now moves the three
+managed roots with atomic no-replace renames (`renameat2`/`renamex_np` on
+supported Unix targets and `MoveFileExW` without replace flags on Windows),
+verifies every source and destination object identity, and returns a
+`PublishedInstall` guard that keeps the lifecycle lock and old roots until
+explicit commit or rollback.
+Existing installs require a verified staged rollback point. The recovery
+backup is revalidated against the frozen source semantics before publication
+and again before restoration. A restored installation is fully revalidated
+before cleanup; if recovery-time content drift is detected after a complete
+publication, the new roots are reinstated and the backup is preserved for
+diagnosis. Partial failures reverse completed moves, while identity or content
+drift never overwrites an unknown target. Dropping an uncommitted guard
+attempts the same safe rollback.
+External post-install mutation, uninstall, and production command routing
 remain later lifecycle slices.
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path

@@ -130,8 +130,20 @@ contains:
   optional Activation ownership, package-owned external files, absent-file
   records, and parent-directory state. Source and staged identities are
   revalidated around the complete gate; external paths must be sorted, unique,
-  relative, and disjoint from managed roots. Managed-root swaps and production
-  command routing are not implemented yet.
+  relative, and disjoint from managed roots. The workspace now also publishes
+  all three managed roots through atomic no-replace renames: supported Unix
+  targets use `renameat2`/`renamex_np`, while Windows uses `MoveFileExW`
+  without replace flags. Every source and destination object identity is
+  rechecked, an existing install requires a verified rollback point, and a
+  `PublishedInstall` RAII guard holds the lock and old roots until explicit
+  commit or rollback. The complete backup is revalidated against the frozen
+  source semantics before publication and before restoration. The fully
+  restored old installation is then revalidated before cleanup; recovery-time
+  drift after a complete publication reinstates the new roots and preserves the
+  backup. Partial failures reverse completed moves without overwriting unknown
+  targets, and dropping an uncommitted guard attempts the same recovery.
+  External post-install mutation, uninstall, and production command routing
+  are not implemented yet.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit
