@@ -58,21 +58,25 @@ from agent_workflow.policy import PolicyResolver
 from agent_workflow.recipes import automatic_recipe_capabilities
 from agent_workflow.registry import ManifestRegistry
 from agent_workflow.runtime import FakeAdapterExecutor, RecordedAdapterExecutor, RunLedger
-from agent_workflow.worktree_sessions.git_workspace import (
-    create_session_worktree,
-    freeze_checkpoint,
-    inspect_repository,
-    refresh_session_source_identity,
-    remove_created_session_worktree,
-    repository_patch,
-    session_source_identity,
-    worktree_status,
-)
-from agent_workflow.worktree_sessions.gate import (
-    attach_adapter_result,
-    evaluate_session_gate,
-)
-from agent_workflow.worktree_sessions.registry import SessionRegistry, new_session_context
+if os.name != "nt":
+    from agent_workflow.worktree_sessions.git_workspace import (
+        create_session_worktree,
+        freeze_checkpoint,
+        inspect_repository,
+        refresh_session_source_identity,
+        remove_created_session_worktree,
+        repository_patch,
+        session_source_identity,
+        worktree_status,
+    )
+    from agent_workflow.worktree_sessions.gate import (
+        attach_adapter_result,
+        evaluate_session_gate,
+    )
+    from agent_workflow.worktree_sessions.registry import (
+        SessionRegistry,
+        new_session_context,
+    )
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2841,6 +2845,7 @@ class RustCompatibilityTests(unittest.TestCase):
                 rejected_approval.stderr,
             )
 
+    @unittest.skipIf(os.name == "nt", "Python worktree registry requires POSIX fcntl")
     def test_session_worktree_create_and_exact_compensation_match_python(
         self,
     ) -> None:
@@ -3274,6 +3279,7 @@ class RustCompatibilityTests(unittest.TestCase):
                 )
                 git(cas_repo, "branch", "-D", "agent/python-cas")
 
+    @unittest.skipIf(os.name == "nt", "Python worktree registry requires POSIX fcntl")
     def test_manifest_driven_session_creation_matches_python_closure(
         self,
     ) -> None:
@@ -3484,6 +3490,7 @@ class RustCompatibilityTests(unittest.TestCase):
                 )
                 self.assertFalse((worktrees / "unsafe-root").exists())
 
+    @unittest.skipIf(os.name == "nt", "Python worktree registry requires POSIX fcntl")
     def test_session_registry_checkpoint_matches_python_without_committing(
         self,
     ) -> None:
@@ -3572,6 +3579,7 @@ class RustCompatibilityTests(unittest.TestCase):
                 "created",
             )
 
+    @unittest.skipIf(os.name == "nt", "Python worktree registry requires POSIX fcntl")
     def test_session_final_gate_and_registry_persistence_match_python(
         self,
     ) -> None:
@@ -3894,6 +3902,7 @@ class RustCompatibilityTests(unittest.TestCase):
                 before_gated_failure,
             )
 
+    @unittest.skipIf(os.name == "nt", "Python worktree registry requires POSIX fcntl")
     def test_git_workspace_patch_and_source_identity_match_python(self) -> None:
         from tests.test_worktree_sessions import commit_all, git, make_repo
 

@@ -459,7 +459,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "agent-contract-size-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(':', "-")
         ));
         let file = std::fs::File::create(&path).unwrap();
         file.set_len((MAX_CONTRACT_JSON_BYTES + 1) as u64).unwrap();
