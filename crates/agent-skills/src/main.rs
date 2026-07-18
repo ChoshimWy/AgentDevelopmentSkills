@@ -25,6 +25,8 @@ use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+const CLI_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "agent-skills-rs",
@@ -1113,12 +1115,27 @@ fn parse_source_hashes(
 }
 
 fn main() {
-    match run() {
-        Ok(0) => {}
-        Ok(exit_code) => std::process::exit(exit_code),
+    let worker = match std::thread::Builder::new()
+        .name("agent-skills-cli".to_owned())
+        .stack_size(CLI_WORKER_STACK_BYTES)
+        .spawn(|| match run() {
+            Ok(exit_code) => exit_code,
+            Err(error) => {
+                eprintln!("{error}");
+                2
+            }
+        }) {
+        Ok(worker) => worker,
         Err(error) => {
-            eprintln!("{error}");
+            eprintln!("failed to start CLI worker: {error}");
             std::process::exit(2);
         }
+    };
+    let exit_code = match worker.join() {
+        Ok(exit_code) => exit_code,
+        Err(payload) => std::panic::resume_unwind(payload),
+    };
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
 }
