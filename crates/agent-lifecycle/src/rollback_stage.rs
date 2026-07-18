@@ -310,6 +310,14 @@ fn inspect_source_install(
     })
 }
 
+pub(super) fn verify_source_install(
+    target: &Dir,
+    external_paths: &[String],
+) -> Result<(), LifecycleError> {
+    inspect_source_install(target, &normalize_external_paths(external_paths)?)?;
+    Ok(())
+}
+
 pub(super) fn verify_backup(
     backup: &Dir,
     expected: &RollbackStageSnapshot,

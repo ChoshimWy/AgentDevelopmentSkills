@@ -174,10 +174,10 @@ contains:
   filesystem state match the Python source uninstaller on the supported POSIX
   source-installer path. Windows keeps native unit coverage for target
   spelling, ownership, and transaction recovery while the Python source
-  installer remains POSIX-mode only. Dry-run, human-readable output, canonical
-  blocked reports, fresh-install activation, and production command routing
-  are not implemented yet; `uninstall.sh` still uses the Python production
-  path.
+  installer remains POSIX-mode only. The command now also provides a read-only
+  dry-run, Python-compatible human output, and canonical blocked JSON.
+  Fresh-install activation and production command routing are not implemented
+  yet; `uninstall.sh` still uses the Python production path.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit

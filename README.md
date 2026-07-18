@@ -285,9 +285,9 @@ missing target without creating it, and matches the successful Python JSON
 report and resulting filesystem state on the supported POSIX source-installer
 path. Windows keeps native unit coverage for target spelling, ownership, and
 transaction recovery while the Python source installer remains POSIX-mode
-only. It does not yet provide the production shell's dry-run, human-readable,
-or canonical blocked-report surfaces, and the source `uninstall.sh` has not
-switched to it.
+only. The native command now also matches the source CLI's read-only dry-run,
+human-readable success output, and canonical blocked JSON surface. The source
+`uninstall.sh` has not switched to it yet.
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
 holds directory capabilities and opens contract files without following

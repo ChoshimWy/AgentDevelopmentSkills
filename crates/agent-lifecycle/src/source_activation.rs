@@ -481,6 +481,15 @@ impl SourceDeactivation {
         &self.scope
     }
 
+    pub(super) fn uninstall_report_fields(&self) -> (&[String], &'static str) {
+        let config_action = match &self.config {
+            ConfigDeactivation::Missing => "missing",
+            ConfigDeactivation::Preserved(_) => "preserved",
+            ConfigDeactivation::Replace { .. } => "removed-managed-instructions-path",
+        };
+        (&self.reported_paths, config_action)
+    }
+
     pub(super) fn apply_with_hook(
         self,
         target: &Dir,

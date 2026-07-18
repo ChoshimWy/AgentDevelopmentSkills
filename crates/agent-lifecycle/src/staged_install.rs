@@ -1340,6 +1340,64 @@ mod tests {
     fn set_mode(_path: &Path, _mode: u32) {}
 
     #[test]
+    fn full_uninstall_preview_is_read_only_and_matches_public_report() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        add_system_skill_and_local_config(&fixture);
+        let target = fixture.target();
+        let agents = std::fs::read(target.join("AGENTS.md")).expect("read AGENTS");
+        let system = std::fs::read(target.join("skills/.system/builtin/SKILL.md"))
+            .expect("read system Skill");
+        let config = std::fs::read(target.join("config.toml")).expect("read config");
+        let expected_target = contract_target_path(&target);
+
+        let report =
+            crate::inspect_uninstall_plan(&target, &["all".to_owned()]).expect("preview uninstall");
+
+        assert_eq!(
+            report,
+            json!({
+                "activated_files": [],
+                "config_action": "preserved",
+                "legacy_links_restored": false,
+                "managed_roots": ["AGENTS.md", "skills", ".agent-skills"],
+                "preserved_profiles": ["readonly.config.toml"],
+                "preserved_system_skills": true,
+                "removed_packages": ["core"],
+                "schema_version": "1.0",
+                "selected_platforms": [],
+                "status": "planned",
+                "target_root": expected_target,
+            })
+        );
+        assert_eq!(
+            std::fs::read(target.join("AGENTS.md")).expect("read unchanged AGENTS"),
+            agents
+        );
+        assert_eq!(
+            std::fs::read(target.join("skills/.system/builtin/SKILL.md"))
+                .expect("read unchanged system Skill"),
+            system
+        );
+        assert_eq!(
+            std::fs::read(target.join("config.toml")).expect("read unchanged config"),
+            config
+        );
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        assert!(
+            !std::fs::read_dir(&target)
+                .expect("read target")
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with(".agent-skills-stage-")
+                        || name.starts_with(".agent-skills-backup-")
+                })
+        );
+    }
+
+    #[test]
     fn full_uninstall_preserves_system_skills_profiles_and_config() {
         let fixture = Fixture::new();
         materialize_current_install(&fixture);

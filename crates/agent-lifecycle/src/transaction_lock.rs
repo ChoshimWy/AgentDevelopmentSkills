@@ -47,10 +47,9 @@ impl LifecycleLock {
     /// Fails when the target does not already exist as a real directory, when
     /// it traverses a symlink, or when normal lifecycle lock acquisition fails.
     pub fn acquire_existing(target_root: impl AsRef<Path>) -> Result<Self, LifecycleError> {
-        reject_unexpanded_home(target_root.as_ref())?;
-        let requested_target = absolute_path(target_root.as_ref())?;
-        let target_directory = open_absolute_directory_nofollow(&requested_target)?;
-        Self::acquire_opened_target(&requested_target, target_directory)
+        let (target_directory, target, contract_target) =
+            inspect_existing_target(target_root.as_ref())?;
+        Self::acquire_resolved_target(target_directory, target, contract_target)
     }
 
     fn acquire_opened_target(
@@ -60,6 +59,14 @@ impl LifecycleLock {
         let target = canonical_path_for_directory(requested_target, &target_directory)?;
         let contract_target =
             contract_path_for_directory(requested_target, &target, &target_directory);
+        Self::acquire_resolved_target(target_directory, target, contract_target)
+    }
+
+    fn acquire_resolved_target(
+        target_directory: Dir,
+        target: PathBuf,
+        contract_target: PathBuf,
+    ) -> Result<Self, LifecycleError> {
         match create_lock_directory(&target_directory) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -201,6 +208,18 @@ impl LifecycleLock {
         self.active = false;
         Ok(())
     }
+}
+
+pub(super) fn inspect_existing_target(
+    target_root: &Path,
+) -> Result<(Dir, PathBuf, PathBuf), LifecycleError> {
+    reject_unexpanded_home(target_root)?;
+    let requested_target = absolute_path(target_root)?;
+    let target_directory = open_absolute_directory_nofollow(&requested_target)?;
+    let target = canonical_path_for_directory(&requested_target, &target_directory)?;
+    let contract_target =
+        contract_path_for_directory(&requested_target, &target, &target_directory);
+    Ok((target_directory, target, contract_target))
 }
 
 impl Drop for LifecycleLock {

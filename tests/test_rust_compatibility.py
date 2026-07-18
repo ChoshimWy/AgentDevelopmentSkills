@@ -353,6 +353,90 @@ name = "one"
                 )
                 self.assertEqual(installed.returncode, 0, installed.stderr)
 
+            before_preview = snapshot(rust_target)
+            source_preview = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/uninstall_local.py"),
+                    "--target-root",
+                    str(rust_target),
+                    "--platform",
+                    "all",
+                    "--dry-run",
+                    "--json",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                check=False,
+            )
+            native_preview = self.run_rust_bytes(
+                "lifecycle-uninstall",
+                str(rust_target),
+                "--platform",
+                "all",
+                "--dry-run",
+                "--json",
+            )
+            self.assertEqual(source_preview.returncode, 0, source_preview.stderr)
+            self.assertEqual(native_preview.returncode, 0, native_preview.stderr)
+            self.assertEqual(native_preview.stdout, source_preview.stdout)
+            self.assertEqual(snapshot(rust_target), before_preview)
+
+            source_human = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/uninstall_local.py"),
+                    "--target-root",
+                    str(rust_target),
+                    "--platform",
+                    "all",
+                    "--dry-run",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                check=False,
+            )
+            native_human = self.run_rust_bytes(
+                "lifecycle-uninstall",
+                str(rust_target),
+                "--platform",
+                "all",
+                "--dry-run",
+            )
+            self.assertEqual(source_human.returncode, 0, source_human.stderr)
+            self.assertEqual(native_human.returncode, 0, native_human.stderr)
+            self.assertEqual(native_human.stdout, source_human.stdout)
+            self.assertEqual(snapshot(rust_target), before_preview)
+
+            source_blocked = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/uninstall_local.py"),
+                    "--target-root",
+                    str(rust_target),
+                    "--platform",
+                    "missing",
+                    "--dry-run",
+                    "--json",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                check=False,
+            )
+            native_blocked = self.run_rust_bytes(
+                "lifecycle-uninstall",
+                str(rust_target),
+                "--platform",
+                "missing",
+                "--dry-run",
+                "--json",
+            )
+            self.assertEqual(source_blocked.returncode, 2)
+            self.assertEqual(native_blocked.returncode, 2)
+            self.assertEqual(native_blocked.stdout, b"")
+            self.assertEqual(native_blocked.stderr, source_blocked.stderr)
+            self.assertEqual(snapshot(rust_target), before_preview)
+
             source = subprocess.run(
                 [
                     sys.executable,
@@ -373,6 +457,7 @@ name = "one"
                 str(rust_target),
                 "--platform",
                 "all",
+                "--json",
             )
             self.assertEqual(source.returncode, 0, source.stderr)
             self.assertEqual(native.returncode, 0, native.stderr)
@@ -384,9 +469,10 @@ name = "one"
             self.assertEqual(snapshot(rust_target), snapshot(python_target))
 
             missing = root / "missing" / ".codex"
-            blocked = self.run_rust("lifecycle-uninstall", str(missing))
+            blocked = self.run_rust("lifecycle-uninstall", str(missing), "--json")
             self.assertEqual(blocked.returncode, 2)
             self.assertEqual(blocked.stdout, "")
+            self.assertEqual(json.loads(blocked.stderr)["status"], "blocked")
             self.assertFalse(missing.exists())
             self.assertFalse(missing.parent.exists())
 

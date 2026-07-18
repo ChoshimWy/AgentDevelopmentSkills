@@ -1,7 +1,7 @@
 use super::{
     LifecycleError, LifecycleWorkspace, MANAGED_DIRECTORY_MODE, MANAGED_FILE_MODE,
     ValidatedInstallPlan, external_stage, load_json_file, open_child_directory, open_child_file,
-    same_object_cap, source_activation,
+    rollback_stage, same_object_cap, source_activation, transaction_lock,
 };
 use agent_engine::validate_install_plan;
 use cap_std::fs::{Dir, Metadata};
@@ -89,6 +89,53 @@ struct RemovalRootMove {
 struct UninstallSelection {
     removed_packages: Vec<String>,
     selected_platforms: Vec<String>,
+}
+
+/// Inspect the exact full-uninstall plan without acquiring a lifecycle lock or
+/// writing the target.
+///
+/// # Errors
+/// Fails closed for the same unsafe, incomplete, modified, or unsupported
+/// source-install states rejected by the guarded uninstall transaction.
+pub fn inspect_uninstall_plan(
+    target_root: impl AsRef<Path>,
+    requested_platforms: &[String],
+) -> Result<Value, LifecycleError> {
+    let (target, _, contract_target) =
+        transaction_lock::inspect_existing_target(target_root.as_ref())?;
+    let selection = inspect_uninstall_selection(&target, requested_platforms)?;
+    let deactivation =
+        source_activation::SourceDeactivation::prepare_for_uninstall(&target, &contract_target)?;
+    let external_paths = deactivation
+        .as_ref()
+        .map_or(&[][..], |prepared| prepared.scope());
+    rollback_stage::verify_source_install(&target, external_paths)?;
+    let preserved_profiles = inspect_preserved_profiles(&target)?;
+    let preserved_system_skills = inspect_preserved_system_skills(&target)?;
+    let (activated_files, config_action) = deactivation.as_ref().map_or_else(
+        || {
+            Ok::<_, LifecycleError>((
+                Vec::new(),
+                inspect_unmanaged_config_action(&target)?.to_owned(),
+            ))
+        },
+        |prepared| {
+            let (paths, action) = prepared.uninstall_report_fields();
+            Ok((paths.to_vec(), action.to_owned()))
+        },
+    )?;
+    let target_root = contract_target
+        .to_str()
+        .ok_or_else(|| LifecycleError::Invalid("uninstall target is not valid UTF-8".into()))?;
+    Ok(uninstall_report(
+        &serde_json::json!(activated_files),
+        &serde_json::json!(config_action),
+        &preserved_profiles,
+        preserved_system_skills,
+        &selection,
+        "planned",
+        target_root,
+    ))
 }
 
 struct PreservedSystemSkills {
@@ -329,25 +376,21 @@ impl LifecycleWorkspace {
                 "removed_files": [],
             })
         });
-        let report = serde_json::json!({
-            "activated_files": deactivation_result
+        let report = uninstall_report(
+            &deactivation_result
                 .get("removed_files")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!([])),
-            "config_action": deactivation_result
+            &deactivation_result
                 .get("config_action")
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!("missing")),
-            "legacy_links_restored": false,
-            "managed_roots": MANAGED_ROOTS.iter().map(|root| root.name).collect::<Vec<_>>(),
-            "preserved_profiles": preserved_profiles,
-            "preserved_system_skills": system_skills.is_some(),
-            "removed_packages": selection.removed_packages,
-            "schema_version": "1.0",
-            "selected_platforms": selection.selected_platforms,
-            "status": "published",
-            "target_root": target_root,
-        });
+            &preserved_profiles,
+            system_skills.is_some(),
+            &selection,
+            "published",
+            &target_root,
+        );
         Ok(PublishedUninstall {
             deactivation,
             external_mutation_started,
@@ -357,6 +400,30 @@ impl LifecycleWorkspace {
             workspace: Some(self),
         })
     }
+}
+
+fn uninstall_report(
+    activated_files: &Value,
+    config_action: &Value,
+    preserved_profiles: &[String],
+    preserved_system_skills: bool,
+    selection: &UninstallSelection,
+    status: &str,
+    target_root: &str,
+) -> Value {
+    serde_json::json!({
+        "activated_files": activated_files,
+        "config_action": config_action,
+        "legacy_links_restored": false,
+        "managed_roots": MANAGED_ROOTS.iter().map(|root| root.name).collect::<Vec<_>>(),
+        "preserved_profiles": preserved_profiles,
+        "preserved_system_skills": preserved_system_skills,
+        "removed_packages": selection.removed_packages,
+        "schema_version": "1.0",
+        "selected_platforms": selection.selected_platforms,
+        "status": status,
+        "target_root": target_root,
+    })
 }
 
 fn inspect_uninstall_selection(
@@ -850,6 +917,31 @@ fn inspect_preserved_profiles(target: &Dir) -> Result<Vec<String>, LifecycleErro
         }
     }
     Ok(profiles)
+}
+
+fn inspect_preserved_system_skills(target: &Dir) -> Result<bool, LifecycleError> {
+    let skills = open_child_directory(
+        target,
+        "skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "source Skills root",
+    )?;
+    match skills.symlink_metadata(".system") {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            invalid("source skills/.system is unsafe")
+        }
+        Ok(_) => {
+            open_child_directory(
+                &skills,
+                ".system",
+                Some(MANAGED_DIRECTORY_MODE),
+                "source skills/.system",
+            )?;
+            Ok(true)
+        }
+    }
 }
 
 fn inspect_unmanaged_config_action(target: &Dir) -> Result<&'static str, LifecycleError> {

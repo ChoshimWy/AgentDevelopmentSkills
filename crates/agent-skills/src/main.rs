@@ -9,7 +9,8 @@ use agent_engine::{
     validate_plan_package_lock,
 };
 use agent_lifecycle::{
-    LifecycleWorkspace, inspect_doctor_baseline, inspect_doctor_report_v1, render_codex_config,
+    LifecycleError, LifecycleWorkspace, inspect_doctor_baseline, inspect_doctor_report_v1,
+    inspect_uninstall_plan, render_codex_config,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
@@ -172,6 +173,10 @@ enum Command {
         target_root: PathBuf,
         #[arg(long = "platform")]
         platforms: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Execute a deterministic native fake-adapter workflow runtime.
     RuntimeExecute {
@@ -636,11 +641,25 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         Command::LifecycleUninstall {
             target_root,
             platforms,
+            dry_run,
+            json,
         } => {
-            let workspace = LifecycleWorkspace::begin_existing(target_root)?;
-            let published = workspace.publish_uninstall_for_platforms(&platforms)?;
-            let value = published.commit()?;
-            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+            let result = if dry_run {
+                inspect_uninstall_plan(&target_root, &platforms)
+            } else {
+                (|| -> Result<Value, LifecycleError> {
+                    let workspace = LifecycleWorkspace::begin_existing(&target_root)?;
+                    let published = workspace.publish_uninstall_for_platforms(&platforms)?;
+                    published.commit()
+                })()
+            };
+            match result {
+                Ok(value) => write_uninstall_report(&value, json)?,
+                Err(error) => {
+                    write_uninstall_error(&error, json)?;
+                    return Ok(2);
+                }
+            }
         }
         Command::RuntimeExecute {
             plan,
@@ -1102,6 +1121,107 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     Ok(0)
 }
 
+fn write_uninstall_report(
+    report: &Value,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json_output {
+        std::io::stdout().write_all(&canonical_json(report)?)?;
+    } else {
+        print!("{}", uninstall_human_report(report)?);
+    }
+    Ok(())
+}
+
+fn write_uninstall_error(
+    error: &LifecycleError,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json_output {
+        std::io::stderr().write_all(&canonical_json(&json!({
+            "error": error.to_string(),
+            "status": "blocked",
+        }))?)?;
+    } else {
+        eprintln!("✗ Agent Development Skills 卸载未完成\n\n  原因：{error}\n");
+    }
+    Ok(())
+}
+
+fn uninstall_human_report(report: &Value) -> Result<String, Box<dyn std::error::Error>> {
+    let status = report
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or("uninstall report status must be a string")?;
+    let dry_run = status == "planned";
+    let platforms = report
+        .get("selected_platforms")
+        .and_then(Value::as_array)
+        .ok_or("uninstall report selected_platforms must be an array")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or("uninstall report platform must be a string")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let managed_roots = report
+        .get("managed_roots")
+        .and_then(Value::as_array)
+        .ok_or("uninstall report managed_roots must be an array")?;
+    let activated_files = report
+        .get("activated_files")
+        .and_then(Value::as_array)
+        .ok_or("uninstall report activated_files must be an array")?;
+    let config_action = report
+        .get("config_action")
+        .and_then(Value::as_str)
+        .ok_or("uninstall report config_action must be a string")?;
+    let preserved_profiles = report
+        .get("preserved_profiles")
+        .and_then(Value::as_array)
+        .ok_or("uninstall report preserved_profiles must be an array")?;
+    let preserved_system_skills = report
+        .get("preserved_system_skills")
+        .and_then(Value::as_bool)
+        .ok_or("uninstall report preserved_system_skills must be a boolean")?;
+    let title = if dry_run {
+        "◇ Agent Development Skills 卸载预览"
+    } else {
+        "✓ Agent Development Skills 卸载完成"
+    };
+    let selected = if platforms.is_empty() {
+        "全部受管内容".to_owned()
+    } else {
+        platforms.join("、")
+    };
+    let mut lines = vec![
+        title.to_owned(),
+        String::new(),
+        format!("  平台：{selected}"),
+        format!("  受管根：{} 个", managed_roots.len()),
+        format!("  激活文件：{} 个", activated_files.len()),
+        format!("  config.toml：{config_action}"),
+    ];
+    if !preserved_profiles.is_empty() {
+        lines.push(format!(
+            "  保留本机 Profiles：{} 个",
+            preserved_profiles.len()
+        ));
+    }
+    if preserved_system_skills {
+        lines.push("  保留 Codex 系统 Skills：是".to_owned());
+    }
+    lines.push("  旧 iOSAgentSkills 软链：未恢复（安装时未创建持久备份）".to_owned());
+    if dry_run {
+        lines.extend([
+            String::new(),
+            "未写入任何文件；移除 --dry-run 后执行卸载。".to_owned(),
+        ]);
+    }
+    Ok(lines.join("\n") + "\n")
+}
+
 fn read_bounded_codex_config(
     path: &Path,
     label: &str,
@@ -1220,5 +1340,59 @@ fn main() {
     };
     if exit_code != 0 {
         std::process::exit(exit_code);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uninstall_human_output_matches_source_cli_for_preview_and_success() {
+        let mut report = json!({
+            "activated_files": ["bin/tool"],
+            "config_action": "removed-managed-instructions-path",
+            "legacy_links_restored": false,
+            "managed_roots": ["AGENTS.md", "skills", ".agent-skills"],
+            "preserved_profiles": ["readonly.config.toml"],
+            "preserved_system_skills": true,
+            "removed_packages": ["core"],
+            "schema_version": "1.0",
+            "selected_platforms": ["apple"],
+            "status": "planned",
+            "target_root": "/tmp/.codex",
+        });
+        assert_eq!(
+            uninstall_human_report(&report).expect("render preview"),
+            concat!(
+                "◇ Agent Development Skills 卸载预览\n",
+                "\n",
+                "  平台：apple\n",
+                "  受管根：3 个\n",
+                "  激活文件：1 个\n",
+                "  config.toml：removed-managed-instructions-path\n",
+                "  保留本机 Profiles：1 个\n",
+                "  保留 Codex 系统 Skills：是\n",
+                "  旧 iOSAgentSkills 软链：未恢复（安装时未创建持久备份）\n",
+                "\n",
+                "未写入任何文件；移除 --dry-run 后执行卸载。\n",
+            )
+        );
+
+        report["status"] = Value::String("uninstalled".to_owned());
+        assert_eq!(
+            uninstall_human_report(&report).expect("render success"),
+            concat!(
+                "✓ Agent Development Skills 卸载完成\n",
+                "\n",
+                "  平台：apple\n",
+                "  受管根：3 个\n",
+                "  激活文件：1 个\n",
+                "  config.toml：removed-managed-instructions-path\n",
+                "  保留本机 Profiles：1 个\n",
+                "  保留 Codex 系统 Skills：是\n",
+                "  旧 iOSAgentSkills 软链：未恢复（安装时未创建持久备份）\n",
+            )
+        );
     }
 }

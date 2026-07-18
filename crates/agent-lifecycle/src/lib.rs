@@ -37,7 +37,7 @@ pub use codex_config::render_codex_config;
 pub use doctor_report::inspect_doctor_report_v1;
 #[cfg(test)]
 use doctor_report::validate_doctor_report_v1;
-pub use managed_swap::{PublishedInstall, PublishedUninstall};
+pub use managed_swap::{PublishedInstall, PublishedUninstall, inspect_uninstall_plan};
 pub use staged_install::ValidatedInstallPlan;
 pub use transaction_lock::LifecycleLock;
 pub use transaction_workspace::LifecycleWorkspace;
