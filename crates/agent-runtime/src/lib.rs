@@ -70,6 +70,18 @@ pub enum RuntimeError {
     Engine(#[from] agent_engine::EngineError),
 }
 
+#[cfg(unix)]
+fn sync_directory(directory: &Dir) -> Result<(), RuntimeError> {
+    directory.open(".")?.into_std().sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(directory: &Dir) -> Result<(), RuntimeError> {
+    let _ = directory.dir_metadata()?;
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NodeStatus {
     Pending,

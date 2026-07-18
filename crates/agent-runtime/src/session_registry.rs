@@ -1,11 +1,11 @@
 //! Persistent Worktree Session Registry operations.
 
-use crate::RuntimeError;
 use crate::gate::{attach_adapter_result, evaluate_session_gate, validate_worktree_session_gate};
 use crate::git_workspace::resolve_worktree;
 use crate::sessions::{
     freeze_checkpoint, transition_session_context, validate_worktree_session_context,
 };
+use crate::{RuntimeError, sync_directory};
 use agent_contracts::{MAX_CONTRACT_JSON_BYTES, canonical_json, parse_json};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
@@ -483,7 +483,7 @@ impl Registry {
             }
             self.directory
                 .rename(&temporary, &self.directory, file_name)?;
-            self.directory.open(".")?.into_std().sync_all()?;
+            sync_directory(&self.directory)?;
             Ok(())
         })();
         if write_result.is_err() {

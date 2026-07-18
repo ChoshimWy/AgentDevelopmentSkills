@@ -261,9 +261,12 @@ impl<'a> DiscoveryEngine<'a> {
         let explicit = json!({
             "changed_files": sorted_unique_strings(changed_files.iter().map(String::as_str)),
             "cwd": cwd.map_or_else(
-                || requested.to_string_lossy().into_owned(),
+                || user_visible_path(&requested).to_string_lossy().into_owned(),
                 |path| resolve_existing(path)
-                    .map_or_else(|_| path.to_string_lossy().into_owned(), |path| path.to_string_lossy().into_owned()),
+                    .map_or_else(
+                        |_| path.to_string_lossy().into_owned(),
+                        |path| user_visible_path(&path).to_string_lossy().into_owned(),
+                    ),
             ),
             "target_files": sorted_unique_strings(target_files.iter().map(String::as_str)),
         });
@@ -277,7 +280,7 @@ impl<'a> DiscoveryEngine<'a> {
             "platforms": platforms,
             "repository": {
                 "kind": kind,
-                "root": root.to_string_lossy(),
+                "root": user_visible_path(&root).to_string_lossy(),
             },
             "schema_version": "1.0",
             "shared_contracts": shared_contracts,
@@ -301,6 +304,38 @@ fn resolve_existing(path: &Path) -> Result<PathBuf, EngineError> {
             path.display()
         ))
     })
+}
+
+#[cfg(not(windows))]
+fn user_visible_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+#[cfg(windows)]
+fn user_visible_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path.to_path_buf();
+    };
+    let mut normalized = match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:", char::from(drive))),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut value = vec![u16::from(b'\\'), u16::from(b'\\')];
+            value.extend(server.encode_wide());
+            value.push(u16::from(b'\\'));
+            value.extend(share.encode_wide());
+            PathBuf::from(OsString::from_wide(&value))
+        }
+        _ => return path.to_path_buf(),
+    };
+    for component in components {
+        normalized.push(component.as_os_str());
+    }
+    normalized
 }
 
 fn repository_root(requested: &Path) -> Result<PathBuf, EngineError> {
@@ -797,8 +832,9 @@ fn target_modules(
     }
     if candidates.is_empty() {
         let cwd = explicit.get("cwd").and_then(Value::as_str).unwrap_or(".");
+        let visible_root = user_visible_path(root);
         let relative = Path::new(cwd)
-            .strip_prefix(root)
+            .strip_prefix(&visible_root)
             .ok()
             .map(relative_components)
             .map(|parts| parts.join("/"))
@@ -2217,10 +2253,14 @@ fn invalid<T>(message: impl Into<String>) -> Result<T, EngineError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::user_visible_path;
     use super::{
         classify_task, merge_policy_layers, normalize_candidate, resolve_policy, wildcard_match,
     };
     use serde_json::json;
+    #[cfg(windows)]
+    use std::path::PathBuf;
 
     #[test]
     fn task_classification_preserves_precedence_and_disciplines() {
@@ -2323,5 +2363,18 @@ mod tests {
         assert!(normalize_candidate("../../apps/ios/Foo.swift").is_err());
         assert!(normalize_candidate("/apps/ios/Foo.swift").is_err());
         assert!(normalize_candidate(r"C:\apps\ios\Foo.swift").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_paths_match_user_visible_python_paths() {
+        assert_eq!(
+            user_visible_path(&PathBuf::from(r"\\?\C:\agent\repo")),
+            PathBuf::from(r"C:\agent\repo")
+        );
+        assert_eq!(
+            user_visible_path(&PathBuf::from(r"\\?\UNC\server\share\agent")),
+            PathBuf::from(r"\\server\share\agent")
+        );
     }
 }

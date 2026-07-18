@@ -150,7 +150,7 @@ class RustCompatibilityTests(unittest.TestCase):
             [str(self.rust_cli), *arguments],
             cwd=ROOT,
             env={**os.environ, "CARGO_TERM_COLOR": "never"},
-            text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )
@@ -1373,6 +1373,10 @@ class RustCompatibilityTests(unittest.TestCase):
                     self.assertEqual(rejected.returncode, 2)
                     self.assertEqual(rejected.stdout, "")
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "Python installation mode contract is POSIX-only",
+    )
     def test_doctor_baseline_matches_python_and_remains_read_only(self) -> None:
         check_ids = {
             "filesystem.target",

@@ -3,8 +3,8 @@
 //! This module never executes a binding. It atomically publishes one frozen
 //! request, grants one time-bounded claim, and accepts one validated result.
 
-use crate::RuntimeError;
 use crate::adapters::{build_adapter_request, validate_adapter_request, validate_adapter_result};
+use crate::{RuntimeError, sync_directory};
 use agent_contracts::{MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256, parse_json};
 use agent_engine::{validate_compiled_plan, validate_package_lock, validate_plan_package_lock};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
@@ -935,7 +935,7 @@ impl Store {
             }
             self.directory
                 .rename(&temporary, &self.directory, file_name)?;
-            self.directory.open(".")?.into_std().sync_all()?;
+            sync_directory(&self.directory)?;
             Ok(())
         })();
         if write_result.is_err() {

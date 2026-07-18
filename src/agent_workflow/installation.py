@@ -1905,7 +1905,7 @@ def install_bundle(
     preserve_backup = False
     external_mutation_started = False
     try:
-        (stage / "AGENTS.md").write_text(bundle.instructions, encoding="utf-8")
+        (stage / "AGENTS.md").write_bytes(bundle.instructions.encode("utf-8"))
         (stage / "AGENTS.md").chmod(MANAGED_FILE_MODE)
         (stage / "skills").mkdir()
         (stage / "skills").chmod(MANAGED_DIRECTORY_MODE)
