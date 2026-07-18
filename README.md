@@ -124,6 +124,14 @@ cargo run --locked -p agent-skills-rs -- \
   session-context-create /path/to/session-context-input.json
 cargo run --locked -p agent-skills-rs -- \
   session-registry-list /path/to/repository
+cargo run --locked -p agent-skills-rs -- \
+  session-create /path/to/repository feature \
+  /path/to/session-context-input.json --base-ref HEAD
+cargo run --locked -p agent-skills-rs -- \
+  session-registry-checkpoint /path/to/repository session-id
+cargo run --locked -p agent-skills-rs -- \
+  session-registry-gate /path/to/repository session-id \
+  /path/to/adapter-pairs.json /path/to/run-ledger.json /path/to/artifacts
 ```
 
 The migration sequence and cutover gates are documented in
@@ -139,10 +147,11 @@ also freezes and validates Adapter Request/Result v1 contracts and consumes
 those recorded results through the same ledger, resource, resume, and
 final-status contracts. The next native increment now covers bounded Git
 Worktree inspection, `repository-patch-v1`, `session-source-v1`, Session
-Context validation/checkpoint transitions, and the locked persistent Session
-Registry for non-gated lifecycle changes. It does not invoke external
-providers, execute package code, create Worktrees, run the Final Gate, or make
-installation changes.
+Context validation, exact Worktree creation/compensation, checkpoint
+transitions, the locked persistent Session Registry, and Final Gate evidence
+revalidation/persistence. It does not invoke external providers, execute
+package code, create commits, change staging, switch the production CLI, or
+make installation changes.
 
 ## Release governance
 

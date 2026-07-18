@@ -7,11 +7,14 @@ use agent_engine::{
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
-    build_adapter_request, execute_fake_plan, execute_recorded_plan, freeze_checkpoint,
-    inspect_repository, new_session_context, refresh_session_source_identity, registry_create,
-    registry_list, registry_load, registry_transition, registry_write, repository_patch,
-    session_source_identity, transition_session_context, validate_adapter_request,
-    validate_adapter_result, validate_worktree_session_context, worktree_status,
+    attach_adapter_result, build_adapter_request, create_session_worktree, evaluate_session_gate,
+    execute_fake_plan, execute_recorded_plan, freeze_checkpoint, inspect_repository,
+    new_session_context, refresh_session_source_identity, registry_assert_available,
+    registry_attach_and_gate, registry_checkpoint, registry_create, registry_create_active,
+    registry_list, registry_load, registry_transition, registry_write,
+    remove_created_session_worktree, repository_patch, session_source_identity,
+    transition_session_context, validate_adapter_request, validate_adapter_result,
+    validate_worktree_session_context, worktree_status,
 };
 use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
@@ -202,6 +205,40 @@ enum Command {
         #[arg(long, default_value = "working")]
         mode: String,
     },
+    /// Create one isolated Worktree and branch from a frozen Commit.
+    SessionWorktreeCreate {
+        repository: PathBuf,
+        name: String,
+        #[arg(long, default_value = "primary")]
+        repository_id: String,
+        #[arg(long)]
+        base_ref: Option<String>,
+        #[arg(long)]
+        base_source: Option<String>,
+        #[arg(long)]
+        worktree_root: Option<PathBuf>,
+        #[arg(long)]
+        branch: Option<String>,
+    },
+    /// Remove one unchanged Worktree/branch pair created by this workflow.
+    SessionWorktreeRemove {
+        source_repository: PathBuf,
+        repository_record: PathBuf,
+    },
+    /// Create one Session with exact pre-registration Worktree compensation.
+    SessionCreate {
+        repository: PathBuf,
+        name: String,
+        context_input: PathBuf,
+        #[arg(long)]
+        base_ref: Option<String>,
+        #[arg(long)]
+        base_source: Option<String>,
+        #[arg(long)]
+        worktree_root: Option<PathBuf>,
+        #[arg(long)]
+        branch: Option<String>,
+    },
     /// Validate one Worktree Session Context v1.
     SessionContextValidate { context: PathBuf },
     /// Create one Session Context from an explicit deterministic envelope.
@@ -234,6 +271,33 @@ enum Command {
         repository: PathBuf,
         session_id: String,
         target: String,
+    },
+    /// Freeze one active Registry Session at existing clean HEAD Commits.
+    SessionRegistryCheckpoint {
+        repository: PathBuf,
+        session_id: String,
+    },
+    /// Attach Adapter pairs, evaluate Final Gate, and persist passed state.
+    SessionRegistryGate {
+        repository: PathBuf,
+        session_id: String,
+        adapter_pairs: PathBuf,
+        ledger: PathBuf,
+        artifact_root: PathBuf,
+    },
+    /// Attach one Adapter Result reference to a Session Context.
+    SessionGateAttach {
+        context: PathBuf,
+        attempt_id: String,
+        request: PathBuf,
+        result: PathBuf,
+    },
+    /// Evaluate one Final Gate without writing Registry state.
+    SessionGateEvaluate {
+        context: PathBuf,
+        adapter_pairs: PathBuf,
+        ledger: PathBuf,
+        artifact_root: PathBuf,
     },
 }
 
@@ -533,6 +597,92 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let value = Value::String(session_source_identity(&repositories, &mode)?);
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
+        Command::SessionWorktreeCreate {
+            repository,
+            name,
+            repository_id,
+            base_ref,
+            base_source,
+            worktree_root,
+            branch,
+        } => {
+            let (record, notice) = create_session_worktree(
+                &repository,
+                &name,
+                &repository_id,
+                base_ref.as_deref(),
+                base_source.as_deref(),
+                worktree_root.as_deref(),
+                branch.as_deref(),
+            )?;
+            let value = json!({"notice": notice, "repository": record});
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionWorktreeRemove {
+            source_repository,
+            repository_record,
+        } => {
+            let record = load_json(repository_record)?;
+            remove_created_session_worktree(&record, &source_repository)?;
+            let value = json!({"removed": true});
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionCreate {
+            repository,
+            name,
+            context_input,
+            base_ref,
+            base_source,
+            worktree_root,
+            branch,
+        } => {
+            let mut input = load_json(context_input)?;
+            let session_id = input
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or("session context input session_id is required")?
+                .to_owned();
+            registry_assert_available(&repository, &session_id)?;
+            let (record, notice) = create_session_worktree(
+                &repository,
+                &name,
+                "primary",
+                base_ref.as_deref(),
+                base_source.as_deref(),
+                worktree_root.as_deref(),
+                branch.as_deref(),
+            )?;
+            let registration = (|| -> Result<Value, agent_runtime::RuntimeError> {
+                let input_object = input.as_object_mut().ok_or_else(|| {
+                    agent_runtime::RuntimeError::Contract(
+                        "session context input must be an object".to_owned(),
+                    )
+                })?;
+                input_object.insert(
+                    "repositories".to_owned(),
+                    Value::Array(vec![record.clone()]),
+                );
+                let context = new_session_context(&input)?;
+                registry_create_active(&repository, &context)
+            })();
+            if let Err(error) = registration {
+                if let Err(cleanup_error) = remove_created_session_worktree(&record, &repository) {
+                    return Err(format!(
+                        "session registration failed ({error}); exact Worktree compensation was blocked ({cleanup_error})"
+                    )
+                    .into());
+                }
+                return Err(error.into());
+            }
+            let session = registration?;
+            let value = json!({
+                "notice": notice,
+                "operation": "create",
+                "schema_version": "1.0",
+                "session": session,
+            });
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
         Command::SessionContextValidate { context } => {
             let context = load_json(context)?;
             validate_worktree_session_context(&context)?;
@@ -592,6 +742,61 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             target,
         } => {
             let value = registry_transition(&repository, &session_id, &target)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionRegistryCheckpoint {
+            repository,
+            session_id,
+        } => {
+            let session = registry_checkpoint(&repository, &session_id)?;
+            let value = json!({
+                "notice": {"commits_created": false, "staging_changed": false},
+                "operation": "checkpoint",
+                "schema_version": "1.0",
+                "session": session,
+            });
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionRegistryGate {
+            repository,
+            session_id,
+            adapter_pairs,
+            ledger,
+            artifact_root,
+        } => {
+            let pairs = load_json(adapter_pairs)?;
+            let ledger = load_json(ledger)?;
+            let value = registry_attach_and_gate(
+                &repository,
+                &session_id,
+                &pairs,
+                &ledger,
+                &artifact_root,
+            )?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::SessionGateAttach {
+            context,
+            attempt_id,
+            request,
+            result,
+        } => {
+            let mut context = load_json(context)?;
+            let request = load_json(request)?;
+            let result = load_json(result)?;
+            attach_adapter_result(&mut context, &attempt_id, &request, &result)?;
+            print!("{}", String::from_utf8(canonical_json(&context)?)?);
+        }
+        Command::SessionGateEvaluate {
+            context,
+            adapter_pairs,
+            ledger,
+            artifact_root,
+        } => {
+            let context = load_json(context)?;
+            let pairs = load_json(adapter_pairs)?;
+            let ledger = load_json(ledger)?;
+            let value = evaluate_session_gate(&context, &pairs, &ledger, &artifact_root)?;
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
     }

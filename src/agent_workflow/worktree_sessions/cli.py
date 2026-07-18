@@ -11,10 +11,8 @@ from ..canonical_json import dumps, load
 from ..contracts import validate_manifest
 from ..models import ContractError
 from ..registry import ManifestRegistry
-from .gate import attach_adapter_result
 from .git_workspace import (
     create_session_worktree,
-    freeze_checkpoint,
     refresh_session_source_identity,
     remove_created_session_worktree,
 )
@@ -126,16 +124,16 @@ def _create(args: argparse.Namespace) -> dict[str, Any]:
         worktree_root=args.worktree_root,
         branch=args.branch,
     )
-    context = new_session_context(
-        session_id=session_id,
-        project_id=args.project_id,
-        repositories=[repository],
-        selected_platforms=selected,
-        platform_contexts=platform_contexts,
-        capability_closure=_capability_closure(platform_contexts, manifest_root),
-    )
     try:
-        registry.create(context)
+        context = new_session_context(
+            session_id=session_id,
+            project_id=args.project_id,
+            repositories=[repository],
+            selected_platforms=selected,
+            platform_contexts=platform_contexts,
+            capability_closure=_capability_closure(platform_contexts, manifest_root),
+        )
+        context = registry.create_active(context)
     except (ContractError, OSError) as error:
         try:
             remove_created_session_worktree(repository, source_repository=args.repository)
@@ -144,7 +142,6 @@ def _create(args: argparse.Namespace) -> dict[str, Any]:
                 f"session registration failed ({error}); exact Worktree compensation was blocked ({cleanup_error})"
             ) from error
         raise
-    context = registry.transition(context["session_id"], "active")
     return {"notice": notice, "operation": "create", "schema_version": "1.0", "session": context}
 
 
@@ -167,13 +164,7 @@ def _fingerprint(args: argparse.Namespace) -> dict[str, Any]:
 
 def _checkpoint(args: argparse.Namespace) -> dict[str, Any]:
     registry = _registry(args.repository)
-    context = registry.load(args.session_id)
-    if context["lifecycle"]["state"] == "created":
-        context = registry.transition(args.session_id, "active")
-    if context["lifecycle"]["state"] != "active":
-        raise ContractError("checkpoint requires an active worktree session")
-    freeze_checkpoint(context)
-    context = registry.write(context)
+    context = registry.checkpoint(args.session_id)
     return {
         "notice": {"commits_created": False, "staging_changed": False},
         "operation": "checkpoint",
@@ -184,20 +175,9 @@ def _checkpoint(args: argparse.Namespace) -> dict[str, Any]:
 
 def _gate(args: argparse.Namespace) -> dict[str, Any]:
     registry = _registry(args.repository)
-    context = registry.load(args.session_id)
     pairs = [load(path) for path in args.pair]
     ledger = load(args.ledger)
-    for pair in pairs:
-        if not isinstance(pair, dict) or set(pair) != {"attempt_id", "request", "result"}:
-            raise ContractError("gate pair file fields are invalid")
-        attach_adapter_result(
-            context,
-            attempt_id=pair["attempt_id"],
-            request=pair["request"],
-            result=pair["result"],
-        )
-    registry.write(context)
-    result = registry.evaluate_and_gate(
+    result = registry.attach_and_gate(
         args.session_id,
         adapter_pairs=pairs,
         ledger=ledger,

@@ -203,6 +203,14 @@ class RegistryTests(unittest.TestCase):
             context = new_session_context(session_id="feature-a", project_id="project", repositories=[repository])
             registry = SessionRegistry(root)
             registry.create(context)
+            (root / "file.txt").write_text("dirty before activation\n", encoding="utf-8")
+            with self.assertRaisesRegex(ContractError, "clean worktree"):
+                registry.checkpoint("feature-a")
+            self.assertEqual(
+                "created",
+                registry.load("feature-a")["lifecycle"]["state"],
+            )
+            git(root, "checkout", "--", "file.txt")
             with self.assertRaisesRegex(ContractError, "illegal"):
                 registry.transition("feature-a", "gated")
             context = registry.transition("feature-a", "active")
@@ -278,11 +286,22 @@ class RegistryTests(unittest.TestCase):
                 session_id="compensated",
                 worktree_root=worktrees,
             )
-            with mock.patch.object(SessionRegistry, "create", side_effect=ContractError("simulated race")):
+            with mock.patch.object(SessionRegistry, "create_active", side_effect=ContractError("simulated race")):
                 with self.assertRaisesRegex(ContractError, "simulated race"):
                     _create(args)
             self.assertFalse((worktrees / "compensated").exists())
             self.assertEqual("", git(root, "branch", "--list", "agent/compensated"))
+
+            args.name = "invalid-context"
+            args.session_id = "invalid-context"
+            args.project_id = ""
+            with self.assertRaises(ContractError):
+                _create(args)
+            self.assertFalse((worktrees / "invalid-context").exists())
+            self.assertEqual(
+                "",
+                git(root, "branch", "--list", "agent/invalid-context"),
+            )
 
     def test_bootstrap_only_platform_selection_fails_closed(self) -> None:
         platforms = ROOT / "platforms"
@@ -554,6 +573,40 @@ class GateTests(unittest.TestCase):
             result = evaluate_session_gate(context, adapter_pairs=pairs, ledger=ledger, artifact_root=artifacts)
             self.assertEqual("blocked", result["status"])
             self.assertIn("review-invalid", {item["code"] for item in result["diagnostics"]})
+
+    def test_attach_and_gate_errors_do_not_partially_mutate_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, context, pairs, ledger, artifacts = self._fixture(Path(temporary))
+            registry = SessionRegistry(root)
+            before = registry.load(context["session_id"])
+            malformed = deepcopy(ledger)
+            malformed["node_attempts"].append(
+                deepcopy(malformed["node_attempts"][0])
+            )
+            with self.assertRaisesRegex(ContractError, "globally unique"):
+                registry.attach_and_gate(
+                    context["session_id"],
+                    adapter_pairs=pairs,
+                    ledger=malformed,
+                    artifact_root=artifacts,
+                )
+            self.assertEqual(before, registry.load(context["session_id"]))
+
+            registry.evaluate_and_gate(
+                context["session_id"],
+                adapter_pairs=pairs,
+                ledger=ledger,
+                artifact_root=artifacts,
+            )
+            gated = registry.load(context["session_id"])
+            with self.assertRaisesRegex(ContractError, "checkpointed"):
+                registry.attach_and_gate(
+                    context["session_id"],
+                    adapter_pairs=pairs,
+                    ledger=ledger,
+                    artifact_root=artifacts,
+                )
+            self.assertEqual(gated, registry.load(context["session_id"]))
 
 
 class AppleAdapterTests(unittest.TestCase):

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
+import stat
 from typing import Any, Iterable
 
 from ..adapters.contracts import validate_adapter_request, validate_adapter_result
@@ -17,6 +19,12 @@ from ..contracts import (
 )
 from ..models import ContractError
 from .git_workspace import refresh_session_source_identity
+
+
+@dataclass(frozen=True)
+class _ArtifactRoot:
+    descriptor: int
+    path: Path
 
 
 def attach_adapter_result(
@@ -106,24 +114,36 @@ def evaluate_session_gate(
         pair_lookup[key] = pair
 
     latest_attempts = _latest_attempts_by_node(ledger)
-    verification_ids = _validate_reference_group(
-        context,
-        "verification",
-        pair_lookup,
-        ledger,
-        latest_attempts,
-        Path(artifact_root).expanduser().resolve(),
-        diagnostics,
-    )
-    review_ids = _validate_reference_group(
-        context,
-        "review",
-        pair_lookup,
-        ledger,
-        latest_attempts,
-        Path(artifact_root).expanduser().resolve(),
-        diagnostics,
-    )
+    root: _ArtifactRoot | None = None
+    root_error: str | None = None
+    try:
+        root = _open_artifact_root(Path(artifact_root).expanduser())
+    except (ContractError, OSError) as error:
+        root_error = str(error)
+    try:
+        verification_ids = _validate_reference_group(
+            context,
+            "verification",
+            pair_lookup,
+            ledger,
+            latest_attempts,
+            root,
+            root_error,
+            diagnostics,
+        )
+        review_ids = _validate_reference_group(
+            context,
+            "review",
+            pair_lookup,
+            ledger,
+            latest_attempts,
+            root,
+            root_error,
+            diagnostics,
+        )
+    finally:
+        if root is not None:
+            os.close(root.descriptor)
     if context["verification"]["status"] != "passed" or not verification_ids:
         diagnostics.append({"code": "verification-missing", "message": "Passed verification evidence is required"})
     else:
@@ -175,7 +195,8 @@ def _validate_reference_group(
     pair_lookup: dict[tuple[str, str], dict[str, Any]],
     ledger: dict[str, Any],
     latest_attempts: dict[str, str],
-    artifact_root: Path,
+    artifact_root: _ArtifactRoot | None,
+    artifact_root_error: str | None,
     diagnostics: list[dict[str, str]],
 ) -> list[str]:
     valid: list[str] = []
@@ -193,6 +214,8 @@ def _validate_reference_group(
             _validate_request_session_identity(context, request)
             _validate_reference_identity(reference, request, result)
             _validate_ledger_link(reference, result, ledger, latest_attempts)
+            if artifact_root is None:
+                raise ContractError(artifact_root_error or "adapter artifact root is missing or unsafe")
             _validate_artifact_bytes(reference["artifact_hashes"], artifact_root)
         except (ContractError, OSError) as error:
             diagnostics.append({"code": f"{label}-invalid", "message": f"{identity}: {error}"})
@@ -305,29 +328,119 @@ def _validate_ledger_link(
         raise ContractError("run ledger and Adapter Result evidence semantics differ")
 
 
-def _validate_artifact_bytes(artifacts: list[dict[str, str]], artifact_root: Path) -> None:
+def _validate_artifact_bytes(artifacts: list[dict[str, str]], artifact_root: _ArtifactRoot) -> None:
     for artifact in artifacts:
         raw = artifact["uri"].removeprefix("file://")
         path = Path(raw)
-        candidate = path if path.is_absolute() else artifact_root / path
+        candidate = path if path.is_absolute() else artifact_root.path / path
         normalized = Path(os.path.abspath(candidate))
         try:
-            relative = normalized.relative_to(artifact_root)
+            relative = normalized.relative_to(artifact_root.path)
         except ValueError as error:
             raise ContractError("adapter artifact escapes the allowed artifact root") from error
-        cursor = artifact_root
-        for part in relative.parts:
-            cursor /= part
-            if cursor.is_symlink():
-                raise ContractError(f"adapter artifact path contains a symlink: {artifact['artifact_id']}")
-        if not normalized.is_file():
+        if not relative.parts:
             raise ContractError(f"adapter artifact is missing or unsafe: {artifact['artifact_id']}")
+        directory = os.dup(artifact_root.descriptor)
+        try:
+            for part in relative.parts[:-1]:
+                next_directory = os.open(
+                    part,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
+                    dir_fd=directory,
+                )
+                os.close(directory)
+                directory = next_directory
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            descriptor = os.open(relative.parts[-1], flags, dir_fd=directory)
+        except OSError as error:
+            raise ContractError(
+                f"adapter artifact is missing or unsafe: {artifact['artifact_id']}"
+            ) from error
+        finally:
+            os.close(directory)
         digest = hashlib.sha256()
-        with normalized.open("rb") as stream:
+        with os.fdopen(descriptor, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise ContractError(f"adapter artifact is missing or unsafe: {artifact['artifact_id']}")
             for block in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(block)
+        directory = os.dup(artifact_root.descriptor)
+        try:
+            for part in relative.parts[:-1]:
+                next_directory = os.open(
+                    part,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
+                    dir_fd=directory,
+                )
+                os.close(directory)
+                directory = next_directory
+            reopened_descriptor = os.open(
+                relative.parts[-1],
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=directory,
+            )
+            reopened = os.fstat(reopened_descriptor)
+            os.close(reopened_descriptor)
+        except OSError as error:
+            raise ContractError(
+                f"adapter artifact changed while hashing: {artifact['artifact_id']}"
+            ) from error
+        finally:
+            os.close(directory)
+        if _stat_identity(opened) != _stat_identity(reopened):
+            raise ContractError(
+                f"adapter artifact changed while hashing: {artifact['artifact_id']}"
+            )
         if digest.hexdigest() != artifact["sha256"]:
             raise ContractError(f"adapter artifact hash mismatch: {artifact['artifact_id']}")
+
+
+def _open_artifact_root(path: Path) -> _ArtifactRoot:
+    input_path = Path(os.path.abspath(path))
+    try:
+        before = input_path.lstat()
+    except OSError as error:
+        raise ContractError(f"adapter artifact root is missing or unsafe: {input_path}") from error
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+        raise ContractError(f"adapter artifact root is missing or unsafe: {input_path}")
+    normalized = input_path.resolve(strict=True)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptor = os.open(normalized.anchor, flags)
+    try:
+        for part in normalized.parts[1:]:
+            next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        opened = os.fstat(descriptor)
+        after = input_path.lstat()
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or stat.S_ISLNK(after.st_mode)
+            or _stat_identity(before) != _stat_identity(opened)
+            or _stat_identity(opened) != _stat_identity(after)
+        ):
+            raise ContractError(f"adapter artifact root changed while opening: {input_path}")
+        return _ArtifactRoot(descriptor=descriptor, path=normalized)
+    except OSError as error:
+        os.close(descriptor)
+        raise ContractError(
+            f"adapter artifact root is missing or unsafe: {normalized}"
+        ) from error
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def _latest_attempts_by_node(ledger: dict[str, Any]) -> dict[str, str]:
@@ -352,3 +465,14 @@ def _unique_diagnostics(items: list[dict[str, str]]) -> list[dict[str, str]]:
             seen.add(key)
             result.append(item)
     return result
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )

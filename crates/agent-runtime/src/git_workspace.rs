@@ -1,7 +1,13 @@
-//! Read-only Git workspace and Worktree Session source-identity primitives.
+//! Git workspace and Worktree Session source-identity primitives.
 
 use crate::RuntimeError;
 use agent_contracts::canonical_sha256;
+#[cfg(unix)]
+use cap_fs_ext::DirExt as _;
+#[cfg(unix)]
+use cap_std::ambient_authority;
+#[cfg(unix)]
+use cap_std::fs::Dir;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -239,6 +245,231 @@ pub fn inspect_repository(
         "role": role,
         "worktree_path": path_text(&worktree, "worktree path")?,
     }))
+}
+
+/// Create one isolated Worktree and branch from a frozen Commit.
+///
+/// The source Worktree may be dirty only when the caller supplies an explicit
+/// base. Source changes are never copied into the new Worktree.
+///
+/// # Errors
+/// Returns an error for an unsafe target, invalid or existing branch, Gitlink
+/// base, failed Git operation, or post-create identity mismatch. A
+/// post-create validation failure triggers exact compensation and reports when
+/// compensation cannot prove the created Worktree is still pristine.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+pub fn create_session_worktree(
+    repository: &Path,
+    name: &str,
+    repository_id: &str,
+    base_ref: Option<&str>,
+    base_source: Option<&str>,
+    worktree_root: Option<&Path>,
+    branch: Option<&str>,
+) -> Result<(Value, Value), RuntimeError> {
+    validate_identifier(name, "session name")?;
+    validate_identifier(repository_id, "repository id")?;
+    let (source_root, common) = resolve_worktree(repository)?;
+    let status = worktree_status(&source_root)?;
+    let source_dirty = status
+        .get("dirty")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| RuntimeError::Contract("worktree status is invalid".to_owned()))?;
+    let (effective_ref, effective_source) = match base_ref {
+        None => {
+            if base_source.is_some() {
+                return contract("base_source requires an explicit base ref");
+            }
+            if source_dirty {
+                return contract(
+                    "cannot infer session base from a dirty worktree; specify an explicit base commit or ref",
+                );
+            }
+            ("HEAD", "clean-head")
+        }
+        Some(reference) => {
+            if base_source == Some("clean-head") {
+                return contract("clean-head base_source is reserved for an inferred clean HEAD");
+            }
+            (reference, base_source.unwrap_or("explicit"))
+        }
+    };
+    if !matches!(
+        effective_source,
+        "explicit" | "integration-checkpoint" | "stacked-checkpoint" | "clean-head"
+    ) {
+        return contract("repository base source is invalid");
+    }
+    let base_commit = resolve_commit(&source_root, effective_ref)?;
+    if commit_has_gitlinks(&source_root, &base_commit)? {
+        return contract("repository-patch-v1 does not support Git submodules/gitlinks");
+    }
+    let branch_name = branch.map_or_else(|| format!("agent/{name}"), ToOwned::to_owned);
+    if branch_name.is_empty() || branch_name.starts_with('-') || branch_name.contains("..") {
+        return contract("session branch is invalid");
+    }
+    if !git_run(
+        &source_root,
+        &["check-ref-format", "--branch", &branch_name],
+        false,
+    )?
+    .status
+    .success()
+    {
+        return contract("session branch is invalid");
+    }
+    let branch_ref = format!("refs/heads/{branch_name}");
+    let branch_exists = git_run(
+        &source_root,
+        &["show-ref", "--verify", "--quiet", &branch_ref],
+        false,
+    )?;
+    match branch_exists.status.code() {
+        Some(0) => {
+            return contract(format!("session branch already exists: {branch_name}"));
+        }
+        Some(1) => {}
+        _ => return contract("unable to inspect session branch"),
+    }
+
+    let parent_input = worktree_root.map_or_else(
+        || {
+            source_root
+                .parent()
+                .unwrap_or(&source_root)
+                .join(".agent-worktrees")
+                .join(
+                    source_root
+                        .file_name()
+                        .unwrap_or_else(|| OsStr::new("repository")),
+                )
+        },
+        Path::to_path_buf,
+    );
+    let parent = prepare_worktree_parent(&parent_input, &source_root)?;
+    let target = parent.join(name);
+    if target == source_root || target.starts_with(&source_root) {
+        return contract("session worktree must not be nested inside the source worktree");
+    }
+    match std::fs::symlink_metadata(&target) {
+        Ok(_) => {
+            return contract(format!(
+                "session worktree path already exists: {}",
+                target.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(RuntimeError::Io(error)),
+    }
+    let target_text = path_text(&target, "session worktree path")?;
+    git_run(
+        &source_root,
+        &["update-ref", "--no-deref", &branch_ref, &base_commit, ""],
+        true,
+    )?;
+    if let Err(error) = git_run(
+        &source_root,
+        &["worktree", "add", target_text, &branch_name],
+        true,
+    ) {
+        if let Err(cleanup_error) = compensate_failed_worktree_add(
+            &source_root,
+            &common,
+            &target,
+            &branch_name,
+            &base_commit,
+        ) {
+            return contract(format!(
+                "worktree creation failed ({error}); exact compensation was blocked ({cleanup_error})"
+            ));
+        }
+        return Err(error);
+    }
+    let record_result = (|| {
+        let (created, created_common) = resolve_worktree(&target)?;
+        if created != target || created_common != common {
+            return contract("created worktree does not belong to the expected Git common dir");
+        }
+        validate_direct_branch_ref(&source_root, &branch_ref, &base_commit)?;
+        let record = inspect_repository(
+            &created,
+            repository_id,
+            "primary",
+            &base_commit,
+            effective_source,
+            false,
+        )?;
+        if record.get("branch").and_then(Value::as_str) != Some(branch_name.as_str()) {
+            return contract("created worktree branch identity is invalid");
+        }
+        Ok(record)
+    })();
+    let record = match record_result {
+        Ok(record) => record,
+        Err(error) => {
+            if let Err(cleanup_error) = remove_exact_created_worktree(
+                &source_root,
+                &common,
+                &target,
+                &branch_name,
+                &base_commit,
+            ) {
+                return contract(format!(
+                    "worktree creation validation failed ({error}); exact compensation was blocked ({cleanup_error})"
+                ));
+            }
+            return Err(error);
+        }
+    };
+    Ok((
+        record,
+        json!({
+            "base_commit": base_commit,
+            "base_ref": effective_ref,
+            "source_worktree_dirty": source_dirty,
+            "source_worktree_changes_inherited": false,
+        }),
+    ))
+}
+
+/// Remove only a pristine Worktree/branch pair created by this workflow.
+///
+/// # Errors
+/// Returns an error instead of removing anything when live Worktree, branch,
+/// Commit, common-directory, or dirty-state identity differs from the record.
+pub fn remove_created_session_worktree(
+    record: &Value,
+    source_repository: &Path,
+) -> Result<(), RuntimeError> {
+    let record = object(record, "session repository")?;
+    let worktree_path = PathBuf::from(required_str(record, "worktree_path", "session repository")?);
+    let (worktree, common) = resolve_worktree(&worktree_path)?;
+    let expected_common = required_str(record, "git_common_dir", "session repository")?;
+    if path_text(&common, "git common dir")? != expected_common
+        || worktree_status(&worktree)?
+            .get("dirty")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return contract("created worktree changed; refusing automatic compensation");
+    }
+    let base = object(
+        required_value(record, "base", "session repository")?,
+        "session repository base",
+    )?;
+    let base_commit = required_str(base, "commit", "session repository base")?;
+    let branch = required_str(record, "branch", "session repository")?;
+    let head = resolve_commit(&worktree, "HEAD")?;
+    let active_branch = git_text(&worktree, &["symbolic-ref", "--short", "-q", "HEAD"])?;
+    if head != base_commit || active_branch != branch {
+        return contract("created worktree identity changed; refusing automatic compensation");
+    }
+    let (source_root, source_common) = resolve_worktree(source_repository)?;
+    if source_common != common {
+        return contract("created worktree compensation source is invalid");
+    }
+    remove_exact_created_worktree(&source_root, &common, &worktree, branch, base_commit)
 }
 
 /// Derive the order-independent `session-source-v1` identity.
@@ -504,6 +735,240 @@ fn has_gitlinks(root: &Path) -> Result<bool, RuntimeError> {
         .any(|record| record.starts_with(b"160000 ")))
 }
 
+fn commit_has_gitlinks(root: &Path, commit: &str) -> Result<bool, RuntimeError> {
+    let raw = git_run(root, &["ls-tree", "-r", "-z", commit], true)?.stdout;
+    Ok(raw
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .any(|record| record.starts_with(b"160000 ")))
+}
+
+fn remove_exact_created_worktree(
+    source_root: &Path,
+    expected_common: &Path,
+    worktree_path: &Path,
+    branch: &str,
+    base_commit: &str,
+) -> Result<(), RuntimeError> {
+    let (worktree, common) = resolve_worktree(worktree_path)?;
+    if worktree != worktree_path
+        || common != expected_common
+        || worktree_status(&worktree)?
+            .get("dirty")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return contract("created worktree changed; refusing automatic compensation");
+    }
+    if resolve_commit(&worktree, "HEAD")? != base_commit {
+        return contract("created worktree HEAD changed; refusing automatic compensation");
+    }
+    let active_branch = git_text(&worktree, &["symbolic-ref", "--short", "-q", "HEAD"])?;
+    if active_branch != branch
+        || resolve_commit(source_root, &format!("refs/heads/{branch}"))? != base_commit
+    {
+        return contract("created worktree branch changed; refusing automatic compensation");
+    }
+    validate_direct_branch_ref(source_root, &format!("refs/heads/{branch}"), base_commit)?;
+    let worktree_text = path_text(&worktree, "session worktree path")?;
+    git_run(source_root, &["worktree", "remove", worktree_text], true)?;
+    delete_branch_exact(source_root, branch, base_commit)?;
+    Ok(())
+}
+
+fn compensate_failed_worktree_add(
+    source_root: &Path,
+    expected_common: &Path,
+    worktree_path: &Path,
+    branch: &str,
+    base_commit: &str,
+) -> Result<(), RuntimeError> {
+    match std::fs::symlink_metadata(worktree_path) {
+        Ok(_) => remove_exact_created_worktree(
+            source_root,
+            expected_common,
+            worktree_path,
+            branch,
+            base_commit,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            delete_branch_exact(source_root, branch, base_commit)
+        }
+        Err(error) => Err(RuntimeError::Io(error)),
+    }
+}
+
+fn delete_branch_exact(
+    source_root: &Path,
+    branch: &str,
+    base_commit: &str,
+) -> Result<(), RuntimeError> {
+    let branch_ref = format!("refs/heads/{branch}");
+    let current = git_run(
+        source_root,
+        &["show-ref", "--verify", "--quiet", &branch_ref],
+        false,
+    )?;
+    match current.status.code() {
+        Some(1) => return Ok(()),
+        Some(0) => {}
+        _ => return contract("unable to inspect created worktree branch"),
+    }
+    if resolve_commit(source_root, &branch_ref)? != base_commit {
+        return contract("created worktree branch changed; refusing automatic compensation");
+    }
+    validate_direct_branch_ref(source_root, &branch_ref, base_commit)?;
+    let deleted = git_run(
+        source_root,
+        &["update-ref", "--no-deref", "-d", &branch_ref, base_commit],
+        false,
+    )?;
+    if !deleted.status.success() {
+        return contract("created worktree branch changed; refusing automatic compensation");
+    }
+    let remaining = git_run(
+        source_root,
+        &["show-ref", "--verify", "--quiet", &branch_ref],
+        false,
+    )?;
+    if remaining.status.code() != Some(1) {
+        return contract("created worktree branch changed; refusing automatic compensation");
+    }
+    Ok(())
+}
+
+fn validate_direct_branch_ref(
+    source_root: &Path,
+    branch_ref: &str,
+    base_commit: &str,
+) -> Result<(), RuntimeError> {
+    let symbolic = git_run(source_root, &["symbolic-ref", "-q", branch_ref], false)?;
+    if symbolic.status.code() != Some(1) || resolve_commit(source_root, branch_ref)? != base_commit
+    {
+        return contract("created worktree branch identity is invalid");
+    }
+    Ok(())
+}
+
+fn prepare_worktree_parent(input: &Path, source_root: &Path) -> Result<PathBuf, RuntimeError> {
+    let path = canonicalize_missing_directory(input)?;
+    if path == source_root || path.starts_with(source_root) {
+        return contract("session worktree must not be nested inside the source worktree");
+    }
+    prepare_real_directory(&path)?;
+    Ok(path)
+}
+
+fn canonicalize_missing_directory(input: &Path) -> Result<PathBuf, RuntimeError> {
+    let absolute = lexical_absolute_path(input)?;
+    let mut existing = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(metadata) => {
+                if existing == absolute && metadata.file_type().is_symlink() {
+                    return contract(format!(
+                        "session worktree root is missing or unsafe: {}",
+                        absolute.display()
+                    ));
+                }
+                if !metadata.is_dir() && !metadata.file_type().is_symlink() {
+                    return contract(format!(
+                        "session worktree root is missing or unsafe: {}",
+                        absolute.display()
+                    ));
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = existing.file_name().ok_or_else(|| {
+                    RuntimeError::Contract("session worktree root is invalid".to_owned())
+                })?;
+                missing.push(name.to_owned());
+                existing = existing.parent().ok_or_else(|| {
+                    RuntimeError::Contract("session worktree root is invalid".to_owned())
+                })?;
+            }
+            Err(error) => return Err(RuntimeError::Io(error)),
+        }
+    }
+    let mut path = std::fs::canonicalize(existing)?;
+    for component in missing.iter().rev() {
+        path.push(component);
+    }
+    Ok(path)
+}
+
+#[cfg(unix)]
+fn prepare_real_directory(path: &Path) -> Result<(), RuntimeError> {
+    let mut directory = Dir::open_ambient_dir("/", ambient_authority())?;
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(part) => {
+                directory = match directory.open_dir_nofollow(part) {
+                    Ok(next) => next,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        match directory.create_dir(part) {
+                            Ok(()) => {}
+                            Err(race) if race.kind() == std::io::ErrorKind::AlreadyExists => {}
+                            Err(other) => return Err(RuntimeError::Io(other)),
+                        }
+                        directory.open_dir_nofollow(part).map_err(|_| {
+                            RuntimeError::Contract(format!(
+                                "session worktree root is missing or unsafe: {}",
+                                path.display()
+                            ))
+                        })?
+                    }
+                    Err(_) => {
+                        return contract(format!(
+                            "session worktree root is missing or unsafe: {}",
+                            path.display()
+                        ));
+                    }
+                };
+            }
+            Component::ParentDir | Component::Prefix(_) => {
+                return contract(format!(
+                    "session worktree root is missing or unsafe: {}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_real_directory(path: &Path) -> Result<(), RuntimeError> {
+    std::fs::create_dir_all(path)?;
+    ensure_real_directory(path, "session worktree root")
+}
+
+fn lexical_absolute_path(path: &Path) -> Result<PathBuf, RuntimeError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return contract("session worktree root is invalid");
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Ok(normalized)
+}
+
 fn canonical_git_path(root: &Path, args: &[&str]) -> Result<PathBuf, RuntimeError> {
     let raw = git_text(root, args)?;
     let path = PathBuf::from(raw);
@@ -657,6 +1122,10 @@ fn valid_prefixed_hash(value: &str, prefix: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     })
+}
+
+fn contract<T>(message: impl Into<String>) -> Result<T, RuntimeError> {
+    Err(RuntimeError::Contract(message.into()))
 }
 
 fn repository_id(value: &Value) -> Option<&str> {

@@ -193,12 +193,21 @@ def create_session_worktree(
     branch_name = branch or f"agent/{name}"
     if not branch_name or branch_name.startswith("-") or ".." in branch_name:
         raise ContractError("session branch is invalid")
+    branch_format = _git(source_root, "check-ref-format", "--branch", branch_name, check=False)
+    if branch_format.returncode != 0:
+        raise ContractError("session branch is invalid")
     branch_exists = _git(source_root, "show-ref", "--verify", "--quiet", f"refs/heads/{branch_name}", check=False)
     if branch_exists.returncode == 0:
         raise ContractError(f"session branch already exists: {branch_name}")
     if branch_exists.returncode not in {0, 1}:
         raise ContractError("unable to inspect session branch")
-    parent = Path(worktree_root).expanduser().resolve() if worktree_root else source_root.parent / ".agent-worktrees" / source_root.name
+    if worktree_root is not None:
+        parent_input = Path(worktree_root).expanduser()
+        if parent_input.is_symlink():
+            raise ContractError("session worktree root must not be a symlink")
+        parent = parent_input.resolve()
+    else:
+        parent = source_root.parent / ".agent-worktrees" / source_root.name
     target = (parent / name).resolve()
     if target == source_root or source_root in target.parents:
         raise ContractError("session worktree must not be nested inside the source worktree")
@@ -207,11 +216,29 @@ def create_session_worktree(
     parent.mkdir(parents=True, exist_ok=True)
     if parent.is_symlink():
         raise ContractError("session worktree root must not be a symlink")
-    _git(source_root, "worktree", "add", str(target), "-b", branch_name, base_commit)
+    branch_ref = f"refs/heads/{branch_name}"
+    _git(source_root, "update-ref", "--no-deref", branch_ref, base_commit, "")
+    try:
+        _git(source_root, "worktree", "add", str(target), branch_name)
+    except (ContractError, OSError) as error:
+        try:
+            _compensate_failed_worktree_add(
+                source_root=source_root,
+                expected_common=common,
+                worktree_path=target,
+                branch=branch_name,
+                base_commit=base_commit,
+            )
+        except (ContractError, OSError) as cleanup_error:
+            raise ContractError(
+                f"worktree creation failed ({error}); exact compensation was blocked ({cleanup_error})"
+            ) from error
+        raise
     try:
         created, created_common = resolve_worktree(target)
         if created != target or created_common != common:
             raise ContractError("created worktree does not belong to the expected Git common dir")
+        _validate_direct_branch_ref(source_root, branch_ref, base_commit)
         record = inspect_repository(
             created,
             repository_id=repository_id,
@@ -219,6 +246,8 @@ def create_session_worktree(
             base_ref=base_commit,
             base_source=effective_source,
         )
+        if record["branch"] != branch_name:
+            raise ContractError("created worktree branch identity is invalid")
     except (ContractError, OSError) as error:
         try:
             _remove_exact_created_worktree(
@@ -255,7 +284,7 @@ def remove_created_session_worktree(record: dict[str, Any], *, source_repository
     if source_common != common:
         raise ContractError("created worktree compensation source is invalid")
     _git(source_root, "worktree", "remove", str(worktree))
-    _git(source_root, "branch", "-D", branch)
+    _delete_branch_exact(source_root, branch, record["base"]["commit"])
 
 
 def _remove_exact_created_worktree(
@@ -275,8 +304,61 @@ def _remove_exact_created_worktree(
     active_branch = _git_text(worktree, "symbolic-ref", "--short", "-q", "HEAD")
     if active_branch != branch or resolve_commit(source_root, f"refs/heads/{branch}") != base_commit:
         raise ContractError("created worktree branch changed; refusing automatic compensation")
+    _validate_direct_branch_ref(source_root, f"refs/heads/{branch}", base_commit)
     _git(source_root, "worktree", "remove", str(worktree))
-    _git(source_root, "branch", "-D", branch)
+    _delete_branch_exact(source_root, branch, base_commit)
+
+
+def _compensate_failed_worktree_add(
+    *,
+    source_root: Path,
+    expected_common: Path,
+    worktree_path: Path,
+    branch: str,
+    base_commit: str,
+) -> None:
+    if worktree_path.exists() or worktree_path.is_symlink():
+        _remove_exact_created_worktree(
+            source_root=source_root,
+            expected_common=expected_common,
+            worktree_path=worktree_path,
+            branch=branch,
+            base_commit=base_commit,
+        )
+        return
+    _delete_branch_exact(source_root, branch, base_commit)
+
+
+def _delete_branch_exact(source_root: Path, branch: str, base_commit: str) -> None:
+    branch_ref = f"refs/heads/{branch}"
+    current = _git(source_root, "show-ref", "--verify", "--quiet", branch_ref, check=False)
+    if current.returncode == 1:
+        return
+    if current.returncode != 0:
+        raise ContractError("unable to inspect created worktree branch")
+    if resolve_commit(source_root, branch_ref) != base_commit:
+        raise ContractError("created worktree branch changed; refusing automatic compensation")
+    _validate_direct_branch_ref(source_root, branch_ref, base_commit)
+    deleted = _git(
+        source_root,
+        "update-ref",
+        "--no-deref",
+        "-d",
+        branch_ref,
+        base_commit,
+        check=False,
+    )
+    if deleted.returncode != 0:
+        raise ContractError("created worktree branch changed; refusing automatic compensation")
+    remaining = _git(source_root, "show-ref", "--verify", "--quiet", branch_ref, check=False)
+    if remaining.returncode != 1:
+        raise ContractError("created worktree branch changed; refusing automatic compensation")
+
+
+def _validate_direct_branch_ref(source_root: Path, branch_ref: str, base_commit: str) -> None:
+    symbolic = _git(source_root, "symbolic-ref", "-q", branch_ref, check=False)
+    if symbolic.returncode != 1 or resolve_commit(source_root, branch_ref) != base_commit:
+        raise ContractError("created worktree branch identity is invalid")
 
 
 def repository_patch(

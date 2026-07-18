@@ -41,12 +41,18 @@ from agent_workflow.recipes import automatic_recipe_capabilities
 from agent_workflow.registry import ManifestRegistry
 from agent_workflow.runtime import FakeAdapterExecutor, RecordedAdapterExecutor, RunLedger
 from agent_workflow.worktree_sessions.git_workspace import (
+    create_session_worktree,
     freeze_checkpoint,
     inspect_repository,
     refresh_session_source_identity,
+    remove_created_session_worktree,
     repository_patch,
     session_source_identity,
     worktree_status,
+)
+from agent_workflow.worktree_sessions.gate import (
+    attach_adapter_result,
+    evaluate_session_gate,
 )
 from agent_workflow.worktree_sessions.registry import SessionRegistry, new_session_context
 
@@ -2337,6 +2343,849 @@ class RustCompatibilityTests(unittest.TestCase):
             self.assertEqual(
                 _normalize_runtime_ledger(json.loads(actual_recovered.stdout)),
                 _normalize_runtime_ledger(expected_recovered),
+            )
+
+    def test_session_worktree_create_and_exact_compensation_match_python(
+        self,
+    ) -> None:
+        from tests.test_worktree_sessions import git, make_repo
+
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = make_repo(parent)
+            base = git(root, "rev-parse", "HEAD")
+            worktrees = parent / "worktrees"
+            (root / "file.txt").write_text("source-only dirty\n", encoding="utf-8")
+
+            rejected = self.run_rust(
+                "session-worktree-create",
+                str(root),
+                "implicit",
+                "--worktree-root",
+                str(worktrees),
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn("dirty worktree", rejected.stderr)
+
+            expected_record, expected_notice = create_session_worktree(
+                root,
+                name="isolated",
+                base_ref=base,
+                worktree_root=worktrees,
+            )
+            remove_created_session_worktree(
+                expected_record,
+                source_repository=root,
+            )
+            actual = self.run_rust(
+                "session-worktree-create",
+                str(root),
+                "isolated",
+                "--base-ref",
+                base,
+                "--worktree-root",
+                str(worktrees),
+            )
+            self.assertEqual(actual.returncode, 0, actual.stderr)
+            self.assertEqual(
+                json.loads(actual.stdout),
+                {
+                    "notice": expected_notice,
+                    "repository": expected_record,
+                },
+            )
+            record_path = parent / "created-record.json"
+            dump(json.loads(actual.stdout)["repository"], record_path)
+            removed = self.run_rust(
+                "session-worktree-remove",
+                str(root),
+                str(record_path),
+            )
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            self.assertEqual(json.loads(removed.stdout), {"removed": True})
+            self.assertFalse((worktrees / "isolated").exists())
+            self.assertEqual(git(root, "branch", "--list", "agent/isolated"), "")
+
+            created = self.run_rust(
+                "session-worktree-create",
+                str(root),
+                "changed",
+                "--base-ref",
+                base,
+                "--worktree-root",
+                str(worktrees),
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            changed_record = json.loads(created.stdout)["repository"]
+            changed_path = Path(changed_record["worktree_path"])
+            (changed_path / "file.txt").write_text("changed\n", encoding="utf-8")
+            dump(changed_record, record_path)
+            guarded = self.run_rust(
+                "session-worktree-remove",
+                str(root),
+                str(record_path),
+            )
+            self.assertEqual(guarded.returncode, 2)
+            self.assertIn(
+                "refusing automatic compensation",
+                guarded.stderr,
+            )
+            self.assertTrue(changed_path.exists())
+            git(root, "worktree", "remove", "--force", str(changed_path))
+            git(root, "branch", "-D", "agent/changed")
+
+            context_input = {
+                "capability_closure": {},
+                "created_at": "2026-07-18T00:00:00+00:00",
+                "dependencies": [],
+                "platform_contexts": {},
+                "project_id": "project",
+                "repositories": [],
+                "selected_platforms": [],
+                "session_id": "registered",
+            }
+            context_input_path = parent / "context-input.json"
+            dump(context_input, context_input_path)
+            registered = self.run_rust(
+                "session-create",
+                str(root),
+                "registered",
+                str(context_input_path),
+                "--base-ref",
+                base,
+                "--worktree-root",
+                str(worktrees),
+            )
+            self.assertEqual(registered.returncode, 0, registered.stderr)
+            registered_value = json.loads(registered.stdout)
+            self.assertEqual(registered_value["operation"], "create")
+            self.assertEqual(
+                registered_value["session"]["lifecycle"]["state"],
+                "active",
+            )
+            self.assertEqual(
+                SessionRegistry(root).load("registered"),
+                registered_value["session"],
+            )
+            registered_record = registered_value["session"]["repositories"][0]
+            dump(registered_record, record_path)
+            removed = self.run_rust(
+                "session-worktree-remove",
+                str(root),
+                str(record_path),
+            )
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+
+            invalid_input = deepcopy(context_input)
+            invalid_input["project_id"] = ""
+            invalid_input["session_id"] = "invalid-context"
+            dump(invalid_input, context_input_path)
+            invalid = self.run_rust(
+                "session-create",
+                str(root),
+                "invalid-context",
+                str(context_input_path),
+                "--base-ref",
+                base,
+                "--worktree-root",
+                str(worktrees),
+            )
+            self.assertEqual(invalid.returncode, 2)
+            self.assertFalse((worktrees / "invalid-context").exists())
+            self.assertEqual(
+                git(root, "branch", "--list", "agent/invalid-context"),
+                "",
+            )
+
+            nested_root = root / "must-not-exist" / "worktrees"
+            nested = self.run_rust(
+                "session-worktree-create",
+                str(root),
+                "nested",
+                "--base-ref",
+                base,
+                "--worktree-root",
+                str(nested_root),
+            )
+            self.assertEqual(nested.returncode, 2)
+            self.assertIn(
+                "must not be nested inside the source worktree",
+                nested.stderr,
+            )
+            self.assertFalse((root / "must-not-exist").exists())
+            with self.assertRaisesRegex(
+                ContractError,
+                "must not be nested inside the source worktree",
+            ):
+                create_session_worktree(
+                    root,
+                    name="python-nested",
+                    base_ref=base,
+                    worktree_root=nested_root,
+                )
+            self.assertFalse((root / "must-not-exist").exists())
+
+            invalid_branch = self.run_rust(
+                "session-worktree-create",
+                str(root),
+                "invalid-branch",
+                "--base-ref",
+                base,
+                "--worktree-root",
+                str(worktrees),
+                "--branch",
+                "HEAD",
+            )
+            self.assertEqual(invalid_branch.returncode, 2)
+            self.assertIn("session branch is invalid", invalid_branch.stderr)
+            self.assertEqual(git(root, "branch", "--list", "HEAD"), "")
+            self.assertFalse((worktrees / "invalid-branch").exists())
+
+            if os.name != "nt":
+                real_worktree_root = parent / "real-worktree-root"
+                real_worktree_root.mkdir()
+                linked_worktree_root = parent / "linked-worktree-root"
+                linked_worktree_root.symlink_to(
+                    real_worktree_root,
+                    target_is_directory=True,
+                )
+                linked = self.run_rust(
+                    "session-worktree-create",
+                    str(root),
+                    "linked-root",
+                    "--base-ref",
+                    base,
+                    "--worktree-root",
+                    str(linked_worktree_root),
+                )
+                self.assertEqual(linked.returncode, 2)
+                self.assertIn(
+                    "session worktree root",
+                    linked.stderr,
+                )
+                with self.assertRaisesRegex(
+                    ContractError,
+                    "session worktree root",
+                ):
+                    create_session_worktree(
+                        root,
+                        name="python-linked-root",
+                        base_ref=base,
+                        worktree_root=linked_worktree_root,
+                    )
+                self.assertFalse((real_worktree_root / "linked-root").exists())
+                self.assertFalse(
+                    (real_worktree_root / "python-linked-root").exists()
+                )
+
+            checkout_failure = make_repo(parent, "checkout-failure")
+            (checkout_failure / ".gitattributes").write_text(
+                "file.txt filter=required-failure\n",
+                encoding="utf-8",
+            )
+            git(checkout_failure, "add", ".gitattributes")
+            git(checkout_failure, "commit", "-q", "-m", "require filter")
+            failed_base = git(checkout_failure, "rev-parse", "HEAD")
+            git(
+                checkout_failure,
+                "config",
+                "filter.required-failure.smudge",
+                "false",
+            )
+            git(
+                checkout_failure,
+                "config",
+                "filter.required-failure.clean",
+                "cat",
+            )
+            git(
+                checkout_failure,
+                "config",
+                "filter.required-failure.required",
+                "true",
+            )
+            failed_worktrees = parent / "failed-worktrees"
+            failed = self.run_rust(
+                "session-worktree-create",
+                str(checkout_failure),
+                "broken",
+                "--base-ref",
+                failed_base,
+                "--worktree-root",
+                str(failed_worktrees),
+            )
+            self.assertEqual(failed.returncode, 2)
+            self.assertFalse((failed_worktrees / "broken").exists())
+            self.assertEqual(
+                git(
+                    checkout_failure,
+                    "branch",
+                    "--list",
+                    "agent/broken",
+                ),
+                "",
+            )
+            with self.assertRaises(ContractError):
+                create_session_worktree(
+                    checkout_failure,
+                    name="python-broken",
+                    base_ref=failed_base,
+                    worktree_root=failed_worktrees,
+                )
+            self.assertFalse((failed_worktrees / "python-broken").exists())
+            self.assertEqual(
+                git(
+                    checkout_failure,
+                    "branch",
+                    "--list",
+                    "agent/python-broken",
+                ),
+                "",
+            )
+
+            if os.name != "nt":
+                cas_repo = make_repo(parent, "cas-repository")
+                cas_base = git(cas_repo, "rev-parse", "HEAD")
+                cas_worktrees = parent / "cas-worktrees"
+                cas_created = self.run_rust(
+                    "session-worktree-create",
+                    str(cas_repo),
+                    "cas",
+                    "--base-ref",
+                    cas_base,
+                    "--worktree-root",
+                    str(cas_worktrees),
+                )
+                self.assertEqual(cas_created.returncode, 0, cas_created.stderr)
+                cas_record = json.loads(cas_created.stdout)["repository"]
+                (cas_repo / "file.txt").write_text(
+                    "advanced\n",
+                    encoding="utf-8",
+                )
+                git(cas_repo, "add", "file.txt")
+                git(cas_repo, "commit", "-q", "-m", "advanced")
+                advanced_commit = git(cas_repo, "rev-parse", "HEAD")
+                primary_ref = git(cas_repo, "symbolic-ref", "HEAD")
+                git(cas_repo, "reset", "--hard", "-q", cas_base)
+
+                real_git = shutil.which("git")
+                self.assertIsNotNone(real_git)
+                wrapper_directory = parent / "git-wrapper"
+                wrapper_directory.mkdir()
+                wrapper = wrapper_directory / "git"
+                wrapper_log = parent / "git-wrapper.log"
+                wrapper.write_text(
+                    "#!/bin/sh\n"
+                    f"echo \"$*\" >> '{wrapper_log}'\n"
+                    'case "$*" in\n'
+                    '  *"symbolic-ref -q refs/heads/agent/cas"*)\n'
+                    f"    '{real_git}' -C \"$PWD\" symbolic-ref "
+                    f"refs/heads/agent/cas {primary_ref}\n"
+                    "    ;;\n"
+                    '  *"update-ref --no-deref -d refs/heads/agent/python-cas "*)\n'
+                    f"    '{real_git}' -C \"$PWD\" update-ref "
+                    f"refs/heads/agent/python-cas {advanced_commit}\n"
+                    "    ;;\n"
+                    "esac\n"
+                    f"exec '{real_git}' \"$@\"\n",
+                    encoding="utf-8",
+                )
+                wrapper.chmod(0o755)
+
+                dump(cas_record, record_path)
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "PATH": (
+                            str(wrapper_directory)
+                            + os.pathsep
+                            + os.environ["PATH"]
+                        )
+                    },
+                ):
+                    cas_removed = self.run_rust(
+                        "session-worktree-remove",
+                        str(cas_repo),
+                        str(record_path),
+                    )
+                self.assertEqual(
+                    cas_removed.returncode,
+                    2,
+                    wrapper_log.read_text(encoding="utf-8"),
+                )
+                self.assertTrue(Path(cas_record["worktree_path"]).exists())
+                self.assertEqual(
+                    git(cas_repo, "rev-parse", primary_ref),
+                    cas_base,
+                )
+                self.assertEqual(
+                    git(
+                        cas_repo,
+                        "symbolic-ref",
+                        "refs/heads/agent/cas",
+                    ),
+                    primary_ref,
+                )
+                git(
+                    cas_repo,
+                    "worktree",
+                    "remove",
+                    "--force",
+                    cas_record["worktree_path"],
+                )
+                git(
+                    cas_repo,
+                    "update-ref",
+                    "--no-deref",
+                    "-d",
+                    "refs/heads/agent/cas",
+                )
+
+                python_cas_record, _ = create_session_worktree(
+                    cas_repo,
+                    name="python-cas",
+                    base_ref=cas_base,
+                    worktree_root=cas_worktrees,
+                )
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "PATH": (
+                            str(wrapper_directory)
+                            + os.pathsep
+                            + os.environ["PATH"]
+                        )
+                    },
+                ):
+                    with self.assertRaisesRegex(
+                        ContractError,
+                        "refusing automatic compensation",
+                    ):
+                        remove_created_session_worktree(
+                            python_cas_record,
+                            source_repository=cas_repo,
+                        )
+                self.assertFalse(
+                    Path(python_cas_record["worktree_path"]).exists()
+                )
+                self.assertEqual(
+                    git(
+                        cas_repo,
+                        "rev-parse",
+                        "refs/heads/agent/python-cas",
+                    ),
+                    advanced_commit,
+                )
+                git(cas_repo, "branch", "-D", "agent/python-cas")
+
+    def test_session_registry_checkpoint_matches_python_without_committing(
+        self,
+    ) -> None:
+        from tests.test_worktree_sessions import git, make_repo
+
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = make_repo(parent)
+            base = git(root, "rev-parse", "HEAD")
+            context = new_session_context(
+                session_id="checkpoint",
+                project_id="project",
+                repositories=[
+                    inspect_repository(
+                        root,
+                        repository_id="app",
+                        base_ref=base,
+                    )
+                ],
+            )
+            registry = SessionRegistry(root)
+            registry.create(context)
+            active = registry.transition("checkpoint", "active")
+            expected = deepcopy(active)
+            freeze_checkpoint(expected)
+
+            (root / "file.txt").write_text("dirty\n", encoding="utf-8")
+            rejected = self.run_rust(
+                "session-registry-checkpoint",
+                str(root),
+                "checkpoint",
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn("clean worktree", rejected.stderr)
+            self.assertEqual(
+                registry.load("checkpoint")["lifecycle"]["state"],
+                "active",
+            )
+            git(root, "checkout", "--", "file.txt")
+
+            actual = self.run_rust(
+                "session-registry-checkpoint",
+                str(root),
+                "checkpoint",
+            )
+            self.assertEqual(actual.returncode, 0, actual.stderr)
+            self.assertEqual(
+                json.loads(actual.stdout),
+                {
+                    "notice": {
+                        "commits_created": False,
+                        "staging_changed": False,
+                    },
+                    "operation": "checkpoint",
+                    "schema_version": "1.0",
+                    "session": expected,
+                },
+            )
+            self.assertEqual(git(root, "rev-parse", "HEAD"), base)
+            self.assertEqual(
+                registry.load("checkpoint"),
+                expected,
+            )
+
+            created_context = new_session_context(
+                session_id="created-checkpoint",
+                project_id="project",
+                repositories=[
+                    inspect_repository(
+                        root,
+                        repository_id="app",
+                        base_ref=base,
+                    )
+                ],
+            )
+            registry.create(created_context)
+            (root / "file.txt").write_text("dirty again\n", encoding="utf-8")
+            created_rejected = self.run_rust(
+                "session-registry-checkpoint",
+                str(root),
+                "created-checkpoint",
+            )
+            self.assertEqual(created_rejected.returncode, 2)
+            self.assertEqual(
+                registry.load("created-checkpoint")["lifecycle"]["state"],
+                "created",
+            )
+
+    def test_session_final_gate_and_registry_persistence_match_python(
+        self,
+    ) -> None:
+        from tests.test_worktree_sessions import GateTests
+
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            fixture = GateTests()
+            root, context, pairs, ledger, artifacts = fixture._fixture(parent)
+            context_path = parent / "context.json"
+            pairs_path = parent / "pairs.json"
+            ledger_path = parent / "ledger.json"
+            request_path = parent / "request.json"
+            result_path = parent / "result.json"
+
+            unattached = deepcopy(context)
+            unattached["verification"] = {
+                "adapter_result_refs": [],
+                "status": "pending",
+            }
+            unattached["review"] = {
+                "adapter_result_refs": [],
+                "status": "pending",
+            }
+            expected_attached = deepcopy(unattached)
+            attach_adapter_result(
+                expected_attached,
+                attempt_id=pairs[0]["attempt_id"],
+                request=pairs[0]["request"],
+                result=pairs[0]["result"],
+            )
+            dump(unattached, context_path)
+            dump(pairs[0]["request"], request_path)
+            dump(pairs[0]["result"], result_path)
+            actual_attached = self.run_rust(
+                "session-gate-attach",
+                str(context_path),
+                pairs[0]["attempt_id"],
+                str(request_path),
+                str(result_path),
+            )
+            self.assertEqual(
+                actual_attached.returncode,
+                0,
+                actual_attached.stderr,
+            )
+            self.assertEqual(
+                json.loads(actual_attached.stdout),
+                expected_attached,
+            )
+
+            expected_gate = evaluate_session_gate(
+                context,
+                adapter_pairs=pairs,
+                ledger=ledger,
+                artifact_root=artifacts,
+            )
+            dump(context, context_path)
+            dump(pairs, pairs_path)
+            dump(ledger, ledger_path)
+            actual_gate = self.run_rust(
+                "session-gate-evaluate",
+                str(context_path),
+                str(pairs_path),
+                str(ledger_path),
+                str(artifacts),
+            )
+            self.assertEqual(actual_gate.returncode, 0, actual_gate.stderr)
+            self.assertEqual(json.loads(actual_gate.stdout), expected_gate)
+
+            malformed_ledger = deepcopy(ledger)
+            malformed_ledger["node_attempts"].append(
+                deepcopy(malformed_ledger["node_attempts"][0])
+            )
+            dump(malformed_ledger, ledger_path)
+            before_malformed = SessionRegistry(root).load(
+                context["session_id"]
+            )
+            malformed = self.run_rust(
+                "session-registry-gate",
+                str(root),
+                context["session_id"],
+                str(pairs_path),
+                str(ledger_path),
+                str(artifacts),
+            )
+            self.assertEqual(malformed.returncode, 2)
+            self.assertEqual(
+                SessionRegistry(root).load(context["session_id"]),
+                before_malformed,
+            )
+            dump(ledger, ledger_path)
+
+            persisted = self.run_rust(
+                "session-registry-gate",
+                str(root),
+                context["session_id"],
+                str(pairs_path),
+                str(ledger_path),
+                str(artifacts),
+            )
+            self.assertEqual(persisted.returncode, 0, persisted.stderr)
+            self.assertEqual(json.loads(persisted.stdout), expected_gate)
+            self.assertEqual(
+                SessionRegistry(root)
+                .load(context["session_id"])["lifecycle"]["state"],
+                "gated",
+            )
+
+            source_file = root / "file.txt"
+            source_contents = source_file.read_bytes()
+            source_file.write_text("post-checkpoint mutation\n", encoding="utf-8")
+            expected_source_blocked = evaluate_session_gate(
+                context,
+                adapter_pairs=pairs,
+                ledger=ledger,
+                artifact_root=artifacts,
+            )
+            source_blocked = self.run_rust(
+                "session-gate-evaluate",
+                str(context_path),
+                str(pairs_path),
+                str(ledger_path),
+                str(artifacts),
+            )
+            self.assertEqual(
+                source_blocked.returncode,
+                0,
+                source_blocked.stderr,
+            )
+            self.assertEqual(
+                json.loads(source_blocked.stdout),
+                expected_source_blocked,
+            )
+            source_file.write_bytes(source_contents)
+
+            (artifacts / "verification.json").write_text(
+                "tampered\n",
+                encoding="utf-8",
+            )
+            expected_blocked = evaluate_session_gate(
+                context,
+                adapter_pairs=pairs,
+                ledger=ledger,
+                artifact_root=artifacts,
+            )
+            blocked = self.run_rust(
+                "session-gate-evaluate",
+                str(context_path),
+                str(pairs_path),
+                str(ledger_path),
+                str(artifacts),
+            )
+            self.assertEqual(blocked.returncode, 0, blocked.stderr)
+            self.assertEqual(json.loads(blocked.stdout), expected_blocked)
+
+            verification = artifacts / "verification.json"
+            verification.unlink()
+            expected_missing = evaluate_session_gate(
+                context,
+                adapter_pairs=pairs,
+                ledger=ledger,
+                artifact_root=artifacts,
+            )
+            missing = self.run_rust(
+                "session-gate-evaluate",
+                str(context_path),
+                str(pairs_path),
+                str(ledger_path),
+                str(artifacts),
+            )
+            self.assertEqual(missing.returncode, 0, missing.stderr)
+            self.assertEqual(json.loads(missing.stdout), expected_missing)
+
+            preserved = artifacts / "preserved.json"
+            verification.write_text(
+                '{"passed":true}\n',
+                encoding="utf-8",
+            )
+            preserved.write_bytes(verification.read_bytes())
+            if os.name != "nt":
+                verification.unlink()
+                verification.symlink_to(preserved.name)
+                expected_symlink = evaluate_session_gate(
+                    context,
+                    adapter_pairs=pairs,
+                    ledger=ledger,
+                    artifact_root=artifacts,
+                )
+                symlinked = self.run_rust(
+                    "session-gate-evaluate",
+                    str(context_path),
+                    str(pairs_path),
+                    str(ledger_path),
+                    str(artifacts),
+                )
+                self.assertEqual(
+                    symlinked.returncode,
+                    0,
+                    symlinked.stderr,
+                )
+                self.assertEqual(
+                    json.loads(symlinked.stdout),
+                    expected_symlink,
+                )
+                self.assertEqual(
+                    preserved.read_text(encoding="utf-8"),
+                    '{"passed":true}\n',
+                )
+                verification.unlink()
+                verification.write_text(
+                    '{"passed":true}\n',
+                    encoding="utf-8",
+                )
+
+                artifact_alias = parent / "artifact-alias"
+                artifact_alias.symlink_to(artifacts, target_is_directory=True)
+                expected_root_symlink = evaluate_session_gate(
+                    context,
+                    adapter_pairs=pairs,
+                    ledger=ledger,
+                    artifact_root=artifact_alias,
+                )
+                root_symlink = self.run_rust(
+                    "session-gate-evaluate",
+                    str(context_path),
+                    str(pairs_path),
+                    str(ledger_path),
+                    str(artifact_alias),
+                )
+                self.assertEqual(
+                    root_symlink.returncode,
+                    0,
+                    root_symlink.stderr,
+                )
+                self.assertEqual(
+                    json.loads(root_symlink.stdout),
+                    expected_root_symlink,
+                )
+                self.assertEqual(expected_root_symlink["status"], "blocked")
+
+                verification.unlink()
+                os.mkfifo(verification)
+                expected_fifo = evaluate_session_gate(
+                    context,
+                    adapter_pairs=pairs,
+                    ledger=ledger,
+                    artifact_root=artifacts,
+                )
+                fifo = self.run_rust(
+                    "session-gate-evaluate",
+                    str(context_path),
+                    str(pairs_path),
+                    str(ledger_path),
+                    str(artifacts),
+                )
+                self.assertEqual(fifo.returncode, 0, fifo.stderr)
+                self.assertEqual(json.loads(fifo.stdout), expected_fifo)
+                self.assertEqual(expected_fifo["status"], "blocked")
+                verification.unlink()
+                verification.write_text(
+                    '{"passed":true}\n',
+                    encoding="utf-8",
+                )
+
+            duplicate_pairs = pairs + [deepcopy(pairs[0])]
+            dump(duplicate_pairs, pairs_path)
+            duplicate_pair = self.run_rust(
+                "session-gate-evaluate",
+                str(context_path),
+                str(pairs_path),
+                str(ledger_path),
+                str(artifacts),
+            )
+            self.assertEqual(duplicate_pair.returncode, 2)
+            self.assertIn(
+                "worktree session adapter pairs must be unique",
+                duplicate_pair.stderr,
+            )
+
+            dump(pairs, pairs_path)
+            duplicate_ledger = deepcopy(ledger)
+            duplicate_ledger["node_attempts"].append(
+                deepcopy(duplicate_ledger["node_attempts"][0])
+            )
+            dump(duplicate_ledger, ledger_path)
+            duplicate_attempt = self.run_rust(
+                "session-gate-evaluate",
+                str(context_path),
+                str(pairs_path),
+                str(ledger_path),
+                str(artifacts),
+            )
+            self.assertEqual(duplicate_attempt.returncode, 2)
+            self.assertIn(
+                "attempt ids must be globally unique",
+                duplicate_attempt.stderr,
+            )
+
+            dump(pairs, pairs_path)
+            dump(ledger, ledger_path)
+            before_gated_failure = SessionRegistry(root).load(
+                context["session_id"]
+            )
+            gated_failure = self.run_rust(
+                "session-registry-gate",
+                str(root),
+                context["session_id"],
+                str(pairs_path),
+                str(ledger_path),
+                str(artifacts),
+            )
+            self.assertEqual(gated_failure.returncode, 2)
+            self.assertIn(
+                "requires a checkpointed worktree session",
+                gated_failure.stderr,
+            )
+            self.assertEqual(
+                SessionRegistry(root).load(context["session_id"]),
+                before_gated_failure,
             )
 
     def test_git_workspace_patch_and_source_identity_match_python(self) -> None:

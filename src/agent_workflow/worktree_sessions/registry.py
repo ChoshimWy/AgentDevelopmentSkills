@@ -14,7 +14,7 @@ from typing import Any, Iterator
 from ..canonical_json import dumps, load
 from ..contracts import validate_worktree_session_context, validate_worktree_session_gate
 from ..models import ContractError
-from .git_workspace import refresh_session_source_identity, resolve_worktree
+from .git_workspace import freeze_checkpoint, refresh_session_source_identity, resolve_worktree
 
 
 _TRANSITIONS = {
@@ -93,6 +93,24 @@ class SessionRegistry:
             self._atomic_write(path, context)
         return deepcopy(context)
 
+    def create_active(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Validate a created Context and publish only its active form."""
+        validate_worktree_session_context(context)
+        if context["lifecycle"]["state"] != "created":
+            raise ContractError("new worktree session registry entries must start in created state")
+        active = deepcopy(context)
+        active["lifecycle"]["state"] = "active"
+        validate_worktree_session_context(active)
+        session_id = active["session_id"]
+        with self._locked():
+            self._validate_registry_owner(active)
+            self._validate_stacked_dependencies(active)
+            path = self._path(session_id)
+            if path.exists() or path.is_symlink():
+                raise ContractError(f"worktree session already exists: {session_id}")
+            self._atomic_write(path, active)
+        return deepcopy(active)
+
     def load(self, session_id: str) -> dict[str, Any]:
         path = self._path(session_id)
         if path.is_symlink() or not path.is_file():
@@ -159,6 +177,19 @@ class SessionRegistry:
             self._atomic_write(self._path(session_id), context)
             return context
 
+    def checkpoint(self, session_id: str) -> dict[str, Any]:
+        """Freeze an active or newly-created Session without partial state."""
+        with self._locked():
+            context = self.load(session_id)
+            if context["lifecycle"]["state"] == "created":
+                context["lifecycle"]["state"] = "active"
+                validate_worktree_session_context(context)
+            if context["lifecycle"]["state"] != "active":
+                raise ContractError("checkpoint requires an active worktree session")
+            freeze_checkpoint(context)
+            self._atomic_write(self._path(session_id), context)
+            return context
+
     def evaluate_and_gate(
         self,
         session_id: str,
@@ -185,6 +216,43 @@ class SessionRegistry:
             self._validate_gate_result(context, result)
             context["lifecycle"]["state"] = "gated"
             validate_worktree_session_context(context)
+            self._atomic_write(self._path(session_id), context)
+            return result
+
+    def attach_and_gate(
+        self,
+        session_id: str,
+        *,
+        adapter_pairs: list[dict[str, Any]],
+        ledger: dict[str, Any],
+        artifact_root: str | Path,
+    ) -> dict[str, Any]:
+        """Attach evidence and conditionally gate in one locked operation."""
+        from .gate import attach_adapter_result, evaluate_session_gate
+
+        with self._locked():
+            context = self.load(session_id)
+            if context["lifecycle"]["state"] != "checkpointed":
+                raise ContractError("Final Gate requires a checkpointed worktree session")
+            for pair in adapter_pairs:
+                if not isinstance(pair, dict) or set(pair) != {"attempt_id", "request", "result"}:
+                    raise ContractError("gate pair file fields are invalid")
+                attach_adapter_result(
+                    context,
+                    attempt_id=pair["attempt_id"],
+                    request=pair["request"],
+                    result=pair["result"],
+                )
+            result = evaluate_session_gate(
+                context,
+                adapter_pairs=adapter_pairs,
+                ledger=ledger,
+                artifact_root=artifact_root,
+            )
+            if result["status"] == "passed":
+                self._validate_gate_result(context, result)
+                context["lifecycle"]["state"] = "gated"
+                validate_worktree_session_context(context)
             self._atomic_write(self._path(session_id), context)
             return result
 

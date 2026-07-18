@@ -1,8 +1,11 @@
 //! Persistent Worktree Session Registry operations.
 
 use crate::RuntimeError;
+use crate::gate::{attach_adapter_result, evaluate_session_gate, validate_worktree_session_gate};
 use crate::git_workspace::resolve_worktree;
-use crate::sessions::{transition_session_context, validate_worktree_session_context};
+use crate::sessions::{
+    freeze_checkpoint, transition_session_context, validate_worktree_session_context,
+};
 use agent_contracts::{MAX_CONTRACT_JSON_BYTES, canonical_json, parse_json};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
@@ -14,6 +17,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Assert that one Session id is not present while holding the Registry lock.
+///
+/// # Errors
+/// Returns an error for an invalid id, unsafe Registry, or existing entry.
+pub fn registry_assert_available(repository: &Path, session_id: &str) -> Result<(), RuntimeError> {
+    with_registry(repository, |registry| {
+        let file_name = session_file_name(session_id)?;
+        if registry.entry_exists(&file_name)? {
+            return contract(format!("worktree session already exists: {session_id}"));
+        }
+        Ok(())
+    })
+}
 
 /// Create one validated Registry entry in `created` state.
 ///
@@ -38,6 +55,33 @@ pub fn registry_create(repository: &Path, context: &Value) -> Result<Value, Runt
         }
         registry.atomic_write(&file_name, context, false)?;
         Ok(context.clone())
+    })
+}
+
+/// Validate a `created` Context and publish only its `active` form.
+///
+/// # Errors
+/// Returns an error for invalid identity, duplicate id, stale dependencies, or
+/// unsafe Registry persistence.
+pub fn registry_create_active(repository: &Path, context: &Value) -> Result<Value, RuntimeError> {
+    validate_worktree_session_context(context)?;
+    if state(context)? != "created" {
+        return contract("new worktree session registry entries must start in created state");
+    }
+    let active = transition_session_context(context, "active")?;
+    with_registry(repository, |registry| {
+        registry.validate_owner(&active)?;
+        registry.validate_stacked_dependencies(&active)?;
+        let session_id = active
+            .get("session_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RuntimeError::Contract("worktree session id is invalid".to_owned()))?;
+        let file_name = session_file_name(session_id)?;
+        if registry.entry_exists(&file_name)? {
+            return contract(format!("worktree session already exists: {session_id}"));
+        }
+        registry.atomic_write(&file_name, &active, false)?;
+        Ok(active)
     })
 }
 
@@ -113,6 +157,126 @@ pub fn registry_transition(
         let candidate = transition_session_context(&context, target)?;
         registry.atomic_write(&session_file_name(session_id)?, &candidate, true)?;
         Ok(candidate)
+    })
+}
+
+/// Freeze one active Registry Session at existing clean HEAD Commits.
+///
+/// This operation never stages or commits source. A `created` Session is first
+/// activated, matching the Python lifecycle CLI.
+///
+/// # Errors
+/// Returns an error for non-active state, dirty repositories, source drift, or
+/// unsafe Registry persistence.
+pub fn registry_checkpoint(repository: &Path, session_id: &str) -> Result<Value, RuntimeError> {
+    with_registry(repository, |registry| {
+        let mut context = registry.load(session_id)?;
+        if state(&context)? == "created" {
+            context = transition_session_context(&context, "active")?;
+        }
+        if state(&context)? != "active" {
+            return contract("checkpoint requires an active worktree session");
+        }
+        let checkpointed = freeze_checkpoint(&context)?;
+        registry.atomic_write(&session_file_name(session_id)?, &checkpointed, true)?;
+        Ok(checkpointed)
+    })
+}
+
+/// Evaluate already-attached evidence and persist `gated` only on a passed
+/// Final Gate Result.
+///
+/// # Errors
+/// Returns an error for non-checkpointed state, malformed evidence contracts,
+/// Gate identity mismatch, or unsafe persistence.
+pub fn registry_evaluate_and_gate(
+    repository: &Path,
+    session_id: &str,
+    adapter_pairs: &Value,
+    ledger: &Value,
+    artifact_root: &Path,
+) -> Result<Value, RuntimeError> {
+    with_registry(repository, |registry| {
+        let mut context = registry.load(session_id)?;
+        if state(&context)? != "checkpointed" {
+            return contract("Final Gate requires a checkpointed worktree session");
+        }
+        let result = evaluate_session_gate(&context, adapter_pairs, ledger, artifact_root)?;
+        if result.get("status").and_then(Value::as_str) != Some("passed") {
+            return Ok(result);
+        }
+        validate_gate_result(&context, &result)?;
+        context
+            .pointer_mut("/lifecycle/state")
+            .ok_or_else(|| RuntimeError::Contract("session lifecycle state is missing".to_owned()))?
+            .clone_from(&Value::String("gated".to_owned()));
+        validate_worktree_session_context(&context)?;
+        registry.atomic_write(&session_file_name(session_id)?, &context, true)?;
+        Ok(result)
+    })
+}
+
+/// Attach all supplied Adapter Results, persist their frozen references, then
+/// evaluate and conditionally persist the Final Gate transition under one
+/// Registry lock.
+///
+/// # Errors
+/// Returns an error for invalid pair files, attachment failures, non-
+/// checkpointed state, malformed Ledger input, or unsafe persistence.
+pub fn registry_attach_and_gate(
+    repository: &Path,
+    session_id: &str,
+    adapter_pairs: &Value,
+    ledger: &Value,
+    artifact_root: &Path,
+) -> Result<Value, RuntimeError> {
+    with_registry(repository, |registry| {
+        let mut context = registry.load(session_id)?;
+        if state(&context)? != "checkpointed" {
+            return contract("Final Gate requires a checkpointed worktree session");
+        }
+        let pairs = adapter_pairs.as_array().ok_or_else(|| {
+            RuntimeError::Contract("worktree session adapter pairs must be an array".to_owned())
+        })?;
+        for pair in pairs {
+            let pair = pair.as_object().ok_or_else(|| {
+                RuntimeError::Contract("gate pair file fields are invalid".to_owned())
+            })?;
+            if pair.len() != 3
+                || !["attempt_id", "request", "result"]
+                    .iter()
+                    .all(|field| pair.contains_key(*field))
+            {
+                return contract("gate pair file fields are invalid");
+            }
+            attach_adapter_result(
+                &mut context,
+                pair.get("attempt_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        RuntimeError::Contract("gate pair attempt_id is invalid".to_owned())
+                    })?,
+                pair.get("request").ok_or_else(|| {
+                    RuntimeError::Contract("gate pair request is missing".to_owned())
+                })?,
+                pair.get("result").ok_or_else(|| {
+                    RuntimeError::Contract("gate pair result is missing".to_owned())
+                })?,
+            )?;
+        }
+        let result = evaluate_session_gate(&context, adapter_pairs, ledger, artifact_root)?;
+        if result.get("status").and_then(Value::as_str) == Some("passed") {
+            validate_gate_result(&context, &result)?;
+            context
+                .pointer_mut("/lifecycle/state")
+                .ok_or_else(|| {
+                    RuntimeError::Contract("session lifecycle state is missing".to_owned())
+                })?
+                .clone_from(&Value::String("gated".to_owned()));
+            validate_worktree_session_context(&context)?;
+        }
+        registry.atomic_write(&session_file_name(session_id)?, &context, true)?;
+        Ok(result)
     })
 }
 
@@ -468,6 +632,76 @@ fn legal_transition(current: &str, target: &str) -> bool {
         "blocked" => matches!(target, "active" | "closed"),
         _ => false,
     }
+}
+
+fn validate_gate_result(context: &Value, result: &Value) -> Result<(), RuntimeError> {
+    validate_worktree_session_gate(result)?;
+    let mut expected_commits = Map::new();
+    for repository in context
+        .get("repositories")
+        .and_then(Value::as_array)
+        .ok_or_else(|| RuntimeError::Contract("session repositories are invalid".to_owned()))?
+    {
+        if let Some(checkpoint) = repository.get("checkpoint").and_then(Value::as_object) {
+            let repository_id = repository
+                .get("repository_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    RuntimeError::Contract("session repository id is invalid".to_owned())
+                })?;
+            expected_commits.insert(
+                repository_id.to_owned(),
+                checkpoint.get("commit").cloned().ok_or_else(|| {
+                    RuntimeError::Contract(
+                        "session repository checkpoint commit is missing".to_owned(),
+                    )
+                })?,
+            );
+        }
+    }
+    let refs = |label: &str| -> Result<Value, RuntimeError> {
+        let mut values = context
+            .pointer(&format!("/{label}/adapter_result_refs"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| RuntimeError::Contract(format!("session {label} evidence is invalid")))?
+            .iter()
+            .map(|reference| {
+                Ok(Value::String(format!(
+                    "{}:{}",
+                    reference
+                        .get("attempt_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            RuntimeError::Contract(
+                                "adapter reference attempt_id is invalid".to_owned(),
+                            )
+                        })?,
+                    reference
+                        .get("invocation_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            RuntimeError::Contract(
+                                "adapter reference invocation_id is invalid".to_owned(),
+                            )
+                        })?,
+                )))
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        values.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+        Ok(Value::Array(values))
+    };
+    if result.get("status").and_then(Value::as_str) != Some("passed")
+        || result.get("session_id") != context.get("session_id")
+        || result.get("source_identity") != context.pointer("/source_identity/value")
+        || result.get("checkpoint_commits") != Some(&Value::Object(expected_commits))
+        || result.get("verification_refs") != Some(&refs("verification")?)
+        || result.get("review_refs") != Some(&refs("review")?)
+    {
+        return contract(
+            "worktree session Final Gate result does not match current registry state",
+        );
+    }
+    Ok(())
 }
 
 fn valid_identifier(value: &str) -> bool {

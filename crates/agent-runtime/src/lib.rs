@@ -1,23 +1,27 @@
 //! Native workflow runtime compatibility primitives.
 //!
 //! The crate executes deterministic fake adapter outcomes, consumes validated
-//! recorded Adapter Results, and owns native Worktree/Session identity and
-//! Registry primitives. External provider invocation, Worktree creation, and
-//! Final Gate execution remain outside the native boundary while Phase 4 is
-//! migrated incrementally.
+//! recorded Adapter Results, and owns native Worktree/Session creation,
+//! identity, Registry, checkpoint, and Final Gate primitives. External
+//! provider invocation and production CLI cutover remain outside the native
+//! boundary while Phase 4 is migrated incrementally.
 
 mod adapters;
+mod gate;
 mod git_workspace;
 mod session_registry;
 mod sessions;
 
 pub use adapters::{build_adapter_request, validate_adapter_request, validate_adapter_result};
+pub use gate::{attach_adapter_result, evaluate_session_gate, validate_worktree_session_gate};
 pub use git_workspace::{
-    inspect_repository, repository_patch, resolve_commit, resolve_worktree,
-    session_source_identity, worktree_status,
+    create_session_worktree, inspect_repository, remove_created_session_worktree, repository_patch,
+    resolve_commit, resolve_worktree, session_source_identity, worktree_status,
 };
 pub use session_registry::{
-    registry_create, registry_list, registry_load, registry_transition, registry_write,
+    registry_assert_available, registry_attach_and_gate, registry_checkpoint, registry_create,
+    registry_create_active, registry_evaluate_and_gate, registry_list, registry_load,
+    registry_transition, registry_write,
 };
 pub use sessions::{
     freeze_checkpoint, new_session_context, refresh_session_source_identity,
@@ -557,7 +561,7 @@ impl RunLedger {
 
     fn finalize(mut self, status: &str) -> Result<Value, RuntimeError> {
         self.append("run-finalized", json!({"status": status}))?;
-        validate_fake_run_ledger(&self.value)?;
+        validate_run_ledger(&self.value)?;
         Ok(self.value)
     }
 
@@ -665,7 +669,7 @@ impl RunLedger {
             let value = required_value(event, "value", "ledger-event")?.clone();
             ledger.append(&event_type, value)?;
         }
-        validate_fake_run_ledger(&ledger.value)?;
+        validate_run_ledger(&ledger.value)?;
         file.seek(SeekFrom::End(0))?;
         ledger.file = Some(file);
         Ok(ledger)
@@ -2114,7 +2118,7 @@ fn reserve_ledger_events(
 }
 
 #[allow(clippy::too_many_lines)]
-fn validate_fake_run_ledger(value: &Value) -> Result<(), RuntimeError> {
+pub(crate) fn validate_run_ledger(value: &Value) -> Result<(), RuntimeError> {
     let ledger = object(value, "run-ledger")?;
     if optional_str(ledger, "schema_version") != Some("1.0") {
         return Err(RuntimeError::Contract(
