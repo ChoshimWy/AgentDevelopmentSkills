@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 pub struct LifecycleLock {
     active: bool,
     identity: cap_std::fs::Metadata,
+    lock_directory: Option<Dir>,
     target: PathBuf,
     target_directory: Dir,
 }
@@ -81,6 +82,7 @@ impl LifecycleLock {
         Ok(Self {
             active: true,
             identity: current,
+            lock_directory: Some(lock),
             target,
             target_directory,
         })
@@ -101,6 +103,12 @@ impl LifecycleLock {
             return invalid("lifecycle lock token is no longer active");
         }
         canonical_path_for_directory(&self.target, &self.target_directory)?;
+        let held_lock = self.lock_directory.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid("lifecycle lock token is no longer active".into())
+        })?;
+        if !same_object_cap(&self.identity, &held_lock.dir_metadata()?) {
+            return invalid("lifecycle lock token is no longer active");
+        }
         let current = open_child_directory(
             &self.target_directory,
             LIFECYCLE_LOCK_DIRECTORY,
@@ -140,6 +148,8 @@ impl LifecycleLock {
     /// Fails closed when the lock was replaced or contains unexpected residue.
     pub fn release(mut self) -> Result<(), LifecycleError> {
         self.validate()?;
+        #[cfg(windows)]
+        drop(self.lock_directory.take());
         self.target_directory.remove_dir(LIFECYCLE_LOCK_DIRECTORY)?;
         self.active = false;
         Ok(())
@@ -148,14 +158,16 @@ impl LifecycleLock {
 
 impl Drop for LifecycleLock {
     fn drop(&mut self) {
-        if self.active
-            && self.validate().is_ok()
-            && self
+        if self.active && self.validate().is_ok() {
+            #[cfg(windows)]
+            drop(self.lock_directory.take());
+            if self
                 .target_directory
                 .remove_dir(LIFECYCLE_LOCK_DIRECTORY)
                 .is_ok()
-        {
-            self.active = false;
+            {
+                self.active = false;
+            }
         }
     }
 }
@@ -381,6 +393,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn replaced_lock_is_not_accepted_or_removed_by_drop() {
         let root = temporary_path("replacement");
@@ -401,6 +414,7 @@ mod tests {
         std::fs::remove_dir_all(&root).expect("remove replacement test root");
     }
 
+    #[cfg(unix)]
     #[test]
     fn replaced_target_path_invalidates_old_lock_and_preserves_new_lock() {
         let root = temporary_path("target-replacement");
