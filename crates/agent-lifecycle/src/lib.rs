@@ -3,6 +3,8 @@
 //! This crate deliberately starts with the non-mutating Doctor boundary. It
 //! does not install, upgrade, roll back, or remove managed content.
 
+mod packages;
+
 use agent_contracts::{
     ContractError, MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256, parse_json,
 };
@@ -39,6 +41,8 @@ pub enum LifecycleError {
     Contract(#[from] ContractError),
     #[error(transparent)]
     Engine(#[from] agent_engine::EngineError),
+    #[error(transparent)]
+    Registry(#[from] agent_registry::RegistryError),
     #[error("lifecycle input cannot be read: {0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
@@ -49,6 +53,7 @@ pub enum LifecycleError {
 struct BaselineState {
     checks: Vec<Value>,
     install_lock: Option<Value>,
+    installed_semantics: Option<Value>,
     package_lock: Option<Value>,
     recovery_candidates: Vec<Value>,
     recovery_unknown: bool,
@@ -59,6 +64,7 @@ impl BaselineState {
         Self {
             checks: Vec::new(),
             install_lock: None,
+            installed_semantics: None,
             package_lock: None,
             recovery_candidates: Vec::new(),
             recovery_unknown: true,
@@ -115,8 +121,9 @@ impl BaselineState {
 /// The returned projection contains the existing Doctor check records for the
 /// safe-target, recovery-residue, managed-layout, Install Lock, persistent
 /// Lockfile, Core runtime identity, Schema inventory, and Activation integrity
-/// checks. It is intentionally a compatibility probe rather than a new public
-/// artifact schema.
+/// checks, plus installed package/Manifest integrity and rebuilt package
+/// semantics. It is intentionally a compatibility probe rather than a new
+/// public artifact schema.
 ///
 /// Target and managed directories are held as directory capabilities. Contract
 /// files are opened without following symlinks and their identities are checked
@@ -322,6 +329,39 @@ pub fn inspect_doctor_baseline(
             "schema",
             "skipped",
             "Schema inventory check requires a valid package Lockfile",
+            json!({}),
+        );
+    }
+
+    if let (Some(target_directory), Some(install_lock), Some(package_lock)) = (
+        target_directory.as_ref(),
+        state.install_lock.as_ref(),
+        state.package_lock.as_ref(),
+    ) {
+        match packages::check_package_integrity(target_directory, install_lock, package_lock) {
+            Ok(inspection) => {
+                state.installed_semantics = Some(inspection.semantics);
+                state.record(
+                    "package.integrity",
+                    "package",
+                    "passed",
+                    "Installed packages and Manifests match both Lockfiles",
+                    inspection.details,
+                );
+            }
+            Err(error) => state.failed(
+                "package.integrity",
+                "package",
+                "Installed packages and Manifests match both Lockfiles",
+                error,
+            ),
+        }
+    } else {
+        state.record(
+            "package.integrity",
+            "package",
+            "skipped",
+            "Package verification requires both Lockfiles",
             json!({}),
         );
     }

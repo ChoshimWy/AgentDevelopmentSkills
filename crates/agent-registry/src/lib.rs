@@ -52,6 +52,16 @@ pub struct ManifestRegistry {
     core_version: String,
 }
 
+/// Validate one Manifest's local syntax without resolving registry-wide graph
+/// relationships.
+///
+/// # Errors
+/// Returns the same fail-closed syntax error used while constructing a
+/// [`ManifestRegistry`].
+pub fn validate_manifest_syntax(value: &Value) -> Result<(), RegistryError> {
+    validate_manifest(value)
+}
+
 impl ManifestRegistry {
     /// Load a standard repository collection rooted at `platforms/`.
     ///

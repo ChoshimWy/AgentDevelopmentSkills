@@ -1386,6 +1386,7 @@ class RustCompatibilityTests(unittest.TestCase):
             "lock.persistent",
             "environment.core",
             "schema.inventory",
+            "package.integrity",
             "activation.integrity",
         }
 
@@ -1439,6 +1440,108 @@ class RustCompatibilityTests(unittest.TestCase):
                         )
                     )
             return entries
+
+        def forge_installed_package_file(
+            target: Path,
+            package_id: str,
+            relative: str,
+            value: dict,
+        ) -> None:
+            managed = target / ".agent-skills"
+            install_lock_path = managed / "install-lock.json"
+            package_lock_path = managed / "agent-skills.lock"
+            install_lock = json.loads(
+                install_lock_path.read_text(encoding="utf-8")
+            )
+            package_lock = json.loads(
+                package_lock_path.read_text(encoding="utf-8")
+            )
+            installed_path = (
+                managed / "packages" / package_id / relative
+            )
+            dump(value, installed_path)
+            file_sha256 = hashlib.sha256(
+                installed_path.read_bytes()
+            ).hexdigest()
+            record = next(
+                item
+                for item in install_lock["packages"]
+                if item["id"] == package_id
+            )
+            file_record = next(
+                item
+                for item in record["files"]
+                if item["path"] == relative
+            )
+            file_record["sha256"] = file_sha256
+            record["files_sha256"] = sha256(record["files"])
+            if relative == "manifest.json":
+                record["manifest_sha256"] = sha256(value)
+            else:
+                record["provider_manifest_sha256"] = sha256(value)
+            selected = next(
+                item
+                for item in install_lock["selected_packages"]
+                if item["id"] == package_id
+            )
+            selected["source_sha256"] = record["files_sha256"]
+            for asset in install_lock["assets"]:
+                if (
+                    asset["package"] == package_id
+                    and asset["path"] == relative
+                ):
+                    asset["sha256"] = file_sha256
+            for provider in install_lock["capability_providers"].values():
+                if provider["package"] == package_id:
+                    provider["source_sha256"] = record["files_sha256"]
+            install_lock["asset_summary"]["content_sha256"] = sha256(
+                install_lock["assets"]
+            )
+            persistent = next(
+                item
+                for item in package_lock["packages"]
+                if item["id"] == package_id
+            )
+            persistent["manifest_sha256"] = record["manifest_sha256"]
+            persistent["provider_manifest_sha256"] = (
+                record["provider_manifest_sha256"]
+            )
+            persistent["source"]["sha256"] = record["files_sha256"]
+            if package_id == "core":
+                package_lock["core"]["source_sha256"] = (
+                    record["files_sha256"]
+                )
+            for provider in package_lock["capability_providers"].values():
+                if provider["package"] == package_id:
+                    provider["source_sha256"] = record["files_sha256"]
+            package_lock["assets_sha256"] = sha256(
+                install_lock["assets"]
+            )
+            package_lock["install_plan_identity_hash"] = sha256({
+                key: item
+                for key, item in install_lock.items()
+                if key
+                not in {
+                    "fingerprint",
+                    "package_lock_hash",
+                    "status",
+                }
+            })
+            package_lock["fingerprint"] = sha256({
+                key: item
+                for key, item in package_lock.items()
+                if key != "fingerprint"
+            })
+            install_lock["package_lock_hash"] = (
+                package_lock["fingerprint"]
+            )
+            install_lock["fingerprint"] = sha256({
+                key: item
+                for key, item in install_lock.items()
+                if key not in {"fingerprint", "status"}
+            })
+            dump(package_lock, package_lock_path)
+            dump(install_lock, install_lock_path)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1602,7 +1705,533 @@ class RustCompatibilityTests(unittest.TestCase):
                     for check in actual["checks"]
                     if check["status"] == "failed"
                 ],
-                ["environment.core"],
+                ["environment.core", "package.integrity"],
+            )
+            self.assertEqual(filesystem_identity(target), before)
+
+        for mutation in (
+            "missing-asset-root",
+            "missing-skill-and-asset-root",
+            "provider-role",
+            "provider-invalid-role",
+        ):
+            with self.subTest(
+                package_semantic_mutation=mutation
+            ), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                target = root / "codex"
+                install_bundle(
+                    build_install_bundle(
+                        ROOT / "platforms",
+                        platforms=["apple", "desktop"],
+                    ),
+                    target,
+                )
+                if mutation in {
+                    "missing-asset-root",
+                    "missing-skill-and-asset-root",
+                }:
+                    package_id = "core"
+                    relative = "manifest.json"
+                    installed_path = (
+                        target
+                        / ".agent-skills"
+                        / "packages"
+                        / package_id
+                        / relative
+                    )
+                    value = json.loads(
+                        installed_path.read_text(encoding="utf-8")
+                    )
+                    value["installation"]["asset_roots"] = [
+                        "missing-assets"
+                    ]
+                    if mutation == "missing-skill-and-asset-root":
+                        value["installation"]["skill_roots"] = [
+                            "missing-skills"
+                        ]
+                        expected_error = (
+                            "skill root is missing: missing-skills"
+                        )
+                    else:
+                        expected_error = (
+                            "installation asset path is missing: "
+                            "missing-assets"
+                        )
+                else:
+                    package_id = "apple"
+                    package_manifest_path = (
+                        target
+                        / ".agent-skills"
+                        / "packages"
+                        / package_id
+                        / "manifest.json"
+                    )
+                    package_manifest = json.loads(
+                        package_manifest_path.read_text(encoding="utf-8")
+                    )
+                    relative = package_manifest["installation"][
+                        "provider_manifest"
+                    ]
+                    installed_path = (
+                        target
+                        / ".agent-skills"
+                        / "packages"
+                        / package_id
+                        / relative
+                    )
+                    value = json.loads(
+                        installed_path.read_text(encoding="utf-8")
+                    )
+                    if mutation == "provider-role":
+                        value["role"] = "builtin"
+                        expected_error = (
+                            "installation provider is not a provider "
+                            "manifest: apple"
+                        )
+                    else:
+                        value["role"] = 7
+                        expected_error = (
+                            "plugin-manifest role is invalid"
+                        )
+                forge_installed_package_file(
+                    target,
+                    package_id,
+                    relative,
+                    value,
+                )
+                before = filesystem_identity(target)
+                expected = python_projection(target)
+                result = self.run_rust(
+                    "doctor-baseline",
+                    str(target),
+                    "--schemas",
+                    str(ROOT / "schemas"),
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                actual = json.loads(result.stdout)
+                self.assertEqual(
+                    next(
+                        check["status"]
+                        for check in actual["checks"]
+                        if check["id"] == "install.lock"
+                    ),
+                    "passed",
+                    actual["checks"],
+                )
+                self.assertEqual(
+                    next(
+                        check["status"]
+                        for check in actual["checks"]
+                        if check["id"] == "lock.persistent"
+                    ),
+                    "passed",
+                    actual["checks"],
+                )
+                self.assertEqual(
+                    normalize_failures(actual),
+                    normalize_failures(expected),
+                )
+                actual_package = next(
+                    check
+                    for check in actual["checks"]
+                    if check["id"] == "package.integrity"
+                )
+                expected_package = next(
+                    check
+                    for check in expected["checks"]
+                    if check["id"] == "package.integrity"
+                )
+                self.assertEqual(actual_package, expected_package)
+                self.assertEqual(
+                    actual_package["details"],
+                    {"errors": [expected_error]},
+                )
+                self.assertEqual(filesystem_identity(target), before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["apple", "desktop"],
+                ),
+                target,
+            )
+            manifest_path = (
+                target
+                / ".agent-skills"
+                / "packages"
+                / "apple"
+                / "manifest.json"
+            )
+            manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+            manifest["installation"]["provider_manifest"] = (
+                "./provider//manifest.json/"
+            )
+            forge_installed_package_file(
+                target,
+                "apple",
+                "manifest.json",
+                manifest,
+            )
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            actual = json.loads(result.stdout)
+            actual.pop("fingerprint")
+            self.assertEqual(actual, expected)
+            self.assertEqual(filesystem_identity(target), before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["apple", "desktop"],
+                ),
+                target,
+            )
+            manifest_path = (
+                target
+                / ".agent-skills"
+                / "packages"
+                / "core"
+                / "manifest.json"
+            )
+            manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+            manifest["installation"]["asset_roots"] = [
+                "missing-assets"
+            ]
+            forge_installed_package_file(
+                target,
+                "core",
+                "manifest.json",
+                manifest,
+            )
+            managed = target / ".agent-skills"
+            install_lock_path = managed / "install-lock.json"
+            package_lock_path = managed / "agent-skills.lock"
+            install_lock = json.loads(
+                install_lock_path.read_text(encoding="utf-8")
+            )
+            package_lock = json.loads(
+                package_lock_path.read_text(encoding="utf-8")
+            )
+            persistent = next(
+                item
+                for item in package_lock["packages"]
+                if item["id"] == "apple"
+            )
+            persistent["core_compatibility"] = ">=0.0.0"
+            package_lock["fingerprint"] = sha256({
+                key: value
+                for key, value in package_lock.items()
+                if key != "fingerprint"
+            })
+            install_lock["package_lock_hash"] = (
+                package_lock["fingerprint"]
+            )
+            install_lock["fingerprint"] = sha256({
+                key: value
+                for key, value in install_lock.items()
+                if key not in {"fingerprint", "status"}
+            })
+            dump(package_lock, package_lock_path)
+            dump(install_lock, install_lock_path)
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            actual_package = next(
+                check
+                for check in json.loads(result.stdout)["checks"]
+                if check["id"] == "package.integrity"
+            )
+            expected_package = next(
+                check
+                for check in expected["checks"]
+                if check["id"] == "package.integrity"
+            )
+            self.assertEqual(actual_package, expected_package)
+            self.assertEqual(
+                actual_package["details"],
+                {
+                    "errors": [
+                        "installed package identity differs from "
+                        "persistent Lockfile: apple"
+                    ]
+                },
+            )
+            self.assertEqual(filesystem_identity(target), before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["apple", "desktop"],
+                ),
+                target,
+            )
+            managed = target / ".agent-skills"
+            install_lock_path = managed / "install-lock.json"
+            package_lock_path = managed / "agent-skills.lock"
+            install_lock = json.loads(
+                install_lock_path.read_text(encoding="utf-8")
+            )
+            package_lock = json.loads(
+                package_lock_path.read_text(encoding="utf-8")
+            )
+            selected = next(
+                item
+                for item in install_lock["selected_packages"]
+                if item["provider_version"] is not None
+            )
+            persistent = next(
+                item
+                for item in package_lock["packages"]
+                if item["id"] == selected["id"]
+            )
+            for item in (selected, persistent):
+                item["core_compatibility"] = ">=0.0.0"
+                item["provider_compatibility"] = ">=0.0.0"
+            package_lock["install_plan_identity_hash"] = sha256({
+                key: value
+                for key, value in install_lock.items()
+                if key
+                not in {
+                    "fingerprint",
+                    "package_lock_hash",
+                    "status",
+                }
+            })
+            package_lock["fingerprint"] = sha256({
+                key: value
+                for key, value in package_lock.items()
+                if key != "fingerprint"
+            })
+            install_lock["package_lock_hash"] = package_lock["fingerprint"]
+            install_lock["fingerprint"] = sha256({
+                key: value
+                for key, value in install_lock.items()
+                if key not in {"fingerprint", "status"}
+            })
+            dump(package_lock, package_lock_path)
+            dump(install_lock, install_lock_path)
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            actual = json.loads(result.stdout)
+            self.assertEqual(
+                normalize_failures(actual),
+                normalize_failures(expected),
+            )
+            actual_package = next(
+                check
+                for check in actual["checks"]
+                if check["id"] == "package.integrity"
+            )
+            expected_package = next(
+                check
+                for check in expected["checks"]
+                if check["id"] == "package.integrity"
+            )
+            self.assertEqual(actual_package, expected_package)
+            self.assertEqual(
+                actual_package["details"],
+                {
+                    "errors": [
+                        "Lockfile package semantics differ from installed "
+                        f"Manifests: {selected['id']}"
+                    ]
+                },
+            )
+            self.assertEqual(filesystem_identity(target), before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["apple", "desktop"],
+                ),
+                target,
+            )
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            actual = json.loads(result.stdout)
+            actual.pop("fingerprint")
+            self.assertEqual(actual, expected)
+            package_details = next(
+                check["details"]
+                for check in actual["checks"]
+                if check["id"] == "package.integrity"
+            )
+            self.assertEqual(
+                package_details["package_count"],
+                len(package_details["packages"]),
+            )
+            self.assertEqual(package_details["packages"], sorted(
+                package_details["packages"]
+            ))
+            self.assertEqual(filesystem_identity(target), before)
+
+            manifest_path = (
+                target
+                / ".agent-skills"
+                / "packages"
+                / "core"
+                / "manifest.json"
+            )
+            manifest_path.chmod(0o755)
+            mode_before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            actual_package = next(
+                check
+                for check in json.loads(result.stdout)["checks"]
+                if check["id"] == "package.integrity"
+            )
+            expected_package = next(
+                check
+                for check in expected["checks"]
+                if check["id"] == "package.integrity"
+            )
+            self.assertEqual(actual_package, expected_package)
+            self.assertEqual(
+                actual_package["details"],
+                {
+                    "errors": [
+                        "installed package content differs: core"
+                    ]
+                },
+            )
+            self.assertEqual(filesystem_identity(target), mode_before)
+            manifest_path.chmod(0o644)
+
+            manifest_path.write_text("{}\n", encoding="utf-8")
+            tampered_before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            actual = json.loads(result.stdout)
+            self.assertEqual(
+                normalize_failures(actual),
+                normalize_failures(expected),
+            )
+            actual_package = next(
+                check
+                for check in actual["checks"]
+                if check["id"] == "package.integrity"
+            )
+            expected_package = next(
+                check
+                for check in expected["checks"]
+                if check["id"] == "package.integrity"
+            )
+            self.assertEqual(actual_package, expected_package)
+            self.assertEqual(
+                actual_package["details"],
+                {
+                    "errors": [
+                        "installed package content differs: core"
+                    ]
+                },
+            )
+            self.assertEqual(filesystem_identity(target), tampered_before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["apple", "desktop"],
+                ),
+                target,
+            )
+            manifest_path = (
+                target
+                / ".agent-skills"
+                / "packages"
+                / "core"
+                / "manifest.json"
+            )
+            real_manifest = manifest_path.with_name("real-manifest.json")
+            manifest_path.rename(real_manifest)
+            manifest_path.symlink_to(real_manifest.name)
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            actual_package = next(
+                check
+                for check in json.loads(result.stdout)["checks"]
+                if check["id"] == "package.integrity"
+            )
+            expected_package = next(
+                check
+                for check in expected["checks"]
+                if check["id"] == "package.integrity"
+            )
+            self.assertEqual(actual_package, expected_package)
+            self.assertEqual(
+                actual_package["details"],
+                {
+                    "errors": [
+                        "install tree must not contain symlinks: "
+                        "manifest.json"
+                    ]
+                },
             )
             self.assertEqual(filesystem_identity(target), before)
 

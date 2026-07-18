@@ -187,14 +187,20 @@ retrying claim or submit. The first native lifecycle slice now provides a
 read-only Doctor compatibility projection for the safe target, recovery
 residue, managed layout, Install/Persistent Lock anchors, Core runtime
 identity, runtime Schema inventory, and managed Activation file integrity. It
-holds directory capabilities and opens contract files without following
+also verifies installed package trees, package and Provider Manifests, the
+ordered package closure, and installed package identity, dependency, and
+side-effect semantics against both Lockfiles. Binding, permission, Skill, and
+instruction semantics are rebuilt for subsequent Doctor checks, whose native
+projections remain to be migrated.
+It holds directory capabilities and opens contract files without following
 symlinks; it does not repair, install, upgrade, roll back, uninstall, or
 otherwise write the target. Failed projected checks keep canonical JSON on
 stdout and return exit status 2. Core also does not create commits, change
 staging, switch the production CLI, or make installation changes.
-Activation mode parity is currently a POSIX contract; Windows-native Doctor
-still verifies the Lock shape, paths, no-follow traversal, and content hashes
-but does not interpret POSIX mode bits as a Windows ACL guarantee.
+Activation and installed-package tree mode parity are currently POSIX
+contracts; Windows-native Doctor still verifies the Lock shape, paths,
+no-follow traversal, and content hashes but does not interpret POSIX mode
+bits as a Windows ACL guarantee.
 
 ## Release governance
 

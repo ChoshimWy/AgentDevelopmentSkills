@@ -34,6 +34,7 @@ version = "0.2.0"
 dependencies = [
  "agent-contracts",
  "agent-engine",
+ "agent-registry",
  "cap-fs-ext",
  "cap-std",
  "libc",
