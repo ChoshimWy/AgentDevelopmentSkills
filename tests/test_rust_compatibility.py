@@ -49,6 +49,7 @@ from agent_workflow.contracts import (
 )
 from agent_workflow.doctor import diagnose_install
 from agent_workflow.installation import (
+    _load_package,
     _resolve_packages,
     build_install_bundle,
     install_bundle,
@@ -966,6 +967,126 @@ name = "one"
             result = self.run_rust("registry-snapshot", str(missing))
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, dumps(expected))
+
+    def test_source_package_snapshot_matches_python(self) -> None:
+        cases = (
+            (["apple"], [], [], False),
+            ([], ["qa"], [], False),
+            ([], [], ["codex"], False),
+            ([], [], [], True),
+        )
+        for platforms, disciplines, runtime_configs, core_only in cases:
+            with self.subTest(
+                platforms=platforms,
+                disciplines=disciplines,
+                runtime_configs=runtime_configs,
+                core_only=core_only,
+            ):
+                if (disciplines or runtime_configs) and not platforms and not core_only:
+                    selected: tuple[str, ...] = ()
+                else:
+                    selected = resolve_platform_selection(
+                        ROOT / "platforms",
+                        platforms=platforms,
+                        core_only=core_only,
+                    )
+                source = _resolve_packages(
+                    (ROOT / "platforms").resolve(),
+                    selected_platforms=selected,
+                    disciplines=disciplines,
+                    runtime_configs=runtime_configs,
+                )
+                packages = []
+                for identifier, path in source.package_roots:
+                    package = _load_package(path, identifier)
+                    packages.append({
+                        "directories": list(package.directories),
+                        "files": list(package.files),
+                        "fragments": list(package.fragments),
+                        "id": package.package_id,
+                        "manifest": package.manifest,
+                        "manifest_sha256": package.manifest_digest,
+                        "provider": package.provider,
+                        "provider_manifest_sha256": package.provider_digest,
+                        "skills": [
+                            {
+                                "directories": list(skill.directories),
+                                "files": list(skill.files),
+                                "name": skill.name,
+                            }
+                            for skill in package.skills
+                        ],
+                    })
+                arguments = [
+                    "install-source-snapshot",
+                    str(ROOT / "platforms"),
+                ]
+                for platform in platforms:
+                    arguments.extend(("--platform", platform))
+                for discipline in disciplines:
+                    arguments.extend(("--discipline", discipline))
+                for runtime_config in runtime_configs:
+                    arguments.extend(("--runtime-config", runtime_config))
+                if core_only:
+                    arguments.append("--core-only")
+                result = self.run_rust(*arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, dumps({"packages": packages}))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink support is required")
+    def test_source_package_snapshot_rejects_symlink_assets_like_python(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            platforms = root / "platforms"
+            shutil.copytree(ROOT / "platforms" / "core", platforms / "core")
+            fragment = platforms / "core" / "agent-instructions" / "global.md"
+            external = root / "global.md"
+            external.write_text(fragment.read_text(encoding="utf-8"), encoding="utf-8")
+            fragment.unlink()
+            try:
+                fragment.symlink_to(external)
+            except OSError as error:
+                self.skipTest(f"file symlink is unavailable: {error}")
+
+            with self.assertRaises(ContractError):
+                _load_package(platforms / "core", "core")
+            native = self.run_rust(
+                "install-source-snapshot",
+                str(platforms),
+                "--core-only",
+            )
+            self.assertEqual(native.returncode, 2)
+            self.assertEqual(native.stdout, "")
+            self.assertIn("missing or unsafe", native.stderr)
+
+    @unittest.skipIf(os.name == "nt", "POSIX source modes are required")
+    def test_source_package_snapshot_normalizes_private_mode_like_python(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            platforms = Path(directory) / "platforms"
+            shutil.copytree(ROOT / "platforms" / "core", platforms / "core")
+            manifest_path = platforms / "core" / "manifest.json"
+            manifest_path.chmod(0o600)
+            package = _load_package((platforms / "core").resolve(), "core")
+            expected = {
+                "packages": [{
+                    "directories": list(package.directories),
+                    "files": list(package.files),
+                    "fragments": list(package.fragments),
+                    "id": package.package_id,
+                    "manifest": package.manifest,
+                    "manifest_sha256": package.manifest_digest,
+                    "provider": package.provider,
+                    "provider_manifest_sha256": package.provider_digest,
+                    "skills": [],
+                }]
+            }
+            native = self.run_rust(
+                "install-source-snapshot",
+                str(platforms),
+                "--core-only",
+            )
+            self.assertEqual(native.returncode, 0, native.stderr)
+            self.assertEqual(native.stdout, dumps(expected))
 
     def test_registry_contract_normalization_corpus_matches_python(self) -> None:
         accepted_mutations = {

@@ -49,6 +49,7 @@ struct VisitFrame {
 #[derive(Debug, Clone)]
 pub struct SourceInstallSelection {
     package_roots: Vec<(String, PathBuf)>,
+    manifest_digests: BTreeMap<String, String>,
     selected_platforms: Vec<String>,
     selected_disciplines: Vec<String>,
     selected_runtime_configs: Vec<String>,
@@ -61,6 +62,10 @@ impl SourceInstallSelection {
     #[must_use]
     pub fn package_roots(&self) -> &[(String, PathBuf)] {
         &self.package_roots
+    }
+
+    pub(super) fn manifest_digest(&self, package_id: &str) -> Option<&str> {
+        self.manifest_digests.get(package_id).map(String::as_str)
     }
 
     /// Selected installable platform IDs.
@@ -429,6 +434,20 @@ fn resolve_packages(
             )
         })
         .collect();
+    let manifest_digests = ordered
+        .iter()
+        .map(|identifier| {
+            Ok((
+                identifier.clone(),
+                canonical_sha256(
+                    &catalog
+                        .get(identifier)
+                        .expect("ordered package is cataloged")
+                        .manifest,
+                )?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, LifecycleError>>()?;
     let selection_reasons = ordered
         .iter()
         .map(|identifier| {
@@ -448,6 +467,7 @@ fn resolve_packages(
     selected_runtime_configs.sort();
     Ok(SourceInstallSelection {
         package_roots,
+        manifest_digests,
         selected_platforms,
         selected_disciplines,
         selected_runtime_configs,

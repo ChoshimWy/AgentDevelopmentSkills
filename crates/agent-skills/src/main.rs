@@ -11,6 +11,7 @@ use agent_engine::{
 use agent_lifecycle::{
     LifecycleError, LifecycleWorkspace, inspect_doctor_baseline, inspect_doctor_report_v1,
     inspect_uninstall_plan, render_codex_config, resolve_source_install_selection,
+    snapshot_source_packages,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
@@ -81,6 +82,18 @@ enum Command {
     },
     /// Emit the native source-package selection compatibility projection.
     InstallSelection {
+        root: PathBuf,
+        #[arg(long = "platform")]
+        platforms: Vec<String>,
+        #[arg(long = "discipline")]
+        disciplines: Vec<String>,
+        #[arg(long = "runtime-config")]
+        runtime_configs: Vec<String>,
+        #[arg(long)]
+        core_only: bool,
+    },
+    /// Freeze selected package assets into the native source-snapshot projection.
+    InstallSourceSnapshot {
         root: PathBuf,
         #[arg(long = "platform")]
         platforms: Vec<String>,
@@ -493,6 +506,26 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             print!(
                 "{}",
                 String::from_utf8(canonical_json(&selection.compatibility_projection())?)?
+            );
+        }
+        Command::InstallSourceSnapshot {
+            root,
+            platforms,
+            disciplines,
+            runtime_configs,
+            core_only,
+        } => {
+            let selection = resolve_source_install_selection(
+                root,
+                &platforms,
+                &disciplines,
+                &runtime_configs,
+                core_only,
+            )?;
+            let packages = snapshot_source_packages(&selection)?;
+            print!(
+                "{}",
+                String::from_utf8(canonical_json(&packages.compatibility_projection())?)?
             );
         }
         Command::RecipeCapabilities { targets } => {

@@ -297,8 +297,11 @@ The parallel `install-selection` compatibility command now resolves the
 installable source package catalog, explicit platform/discipline/runtime
 selection, required and optional dependency closure, version constraints,
 deterministic topological order, and selection reasons with Python
-differential parity. It does not yet snapshot assets, compile the complete
-Install Bundle, or install files.
+differential parity. The follow-on `install-source-snapshot` command freezes
+declared package assets, Package/Provider Manifests, instruction Fragments,
+and installable Skill trees through bounded no-follow traversal and source
+mutation revalidation. Both are differential-tested against Python. This lane
+does not yet compose a complete Install Bundle/Plan/Lock or install files.
 
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
