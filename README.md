@@ -83,6 +83,16 @@ bootstrap also remains on that compatibility path because Windows is blocked
 as a production source-install target until its complete install contract is
 enabled.
 
+An Apple native install publishes the verified executable as both
+`~/.codex/bin/agent-session` and `~/.codex/bin/agent-skills`. The latter exposes
+the guarded Rust lifecycle CLI. Preview before removing the exact managed
+installation:
+
+```bash
+~/.codex/bin/agent-skills uninstall ~/.codex --platform all --dry-run
+~/.codex/bin/agent-skills uninstall ~/.codex --platform all
+```
+
 ## Development
 
 - [Contributing guide](CONTRIBUTING.md)

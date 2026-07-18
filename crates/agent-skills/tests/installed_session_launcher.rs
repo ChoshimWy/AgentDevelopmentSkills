@@ -177,4 +177,54 @@ fn fresh_apple_install_publishes_a_compatible_agent_session_cli() {
         Some(1),
         "created Session must be listed"
     );
+
+    let native_cli = target.join("bin/agent-skills");
+    let uninstall_preview = Command::new(&native_cli)
+        .args([
+            "uninstall",
+            target.to_str().expect("UTF-8 target"),
+            "--platform",
+            "all",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("run installed native uninstall preview");
+    assert!(
+        uninstall_preview.status.success(),
+        "installed native uninstall preview failed: {}",
+        String::from_utf8_lossy(&uninstall_preview.stderr)
+    );
+    let preview: Value =
+        serde_json::from_slice(&uninstall_preview.stdout).expect("uninstall preview JSON");
+    assert_eq!(preview["status"], "planned");
+    assert_eq!(preview["selected_platforms"], serde_json::json!(["apple"]));
+    assert!(target.join("AGENTS.md").is_file());
+
+    let uninstall = Command::new(&native_cli)
+        .args([
+            "uninstall",
+            target.to_str().expect("UTF-8 target"),
+            "--platform",
+            "all",
+            "--json",
+        ])
+        .output()
+        .expect("run installed native uninstall");
+    assert!(
+        uninstall.status.success(),
+        "installed native uninstall failed: {}",
+        String::from_utf8_lossy(&uninstall.stderr)
+    );
+    let uninstall: Value =
+        serde_json::from_slice(&uninstall.stdout).expect("uninstall JSON report");
+    assert_eq!(uninstall["status"], "uninstalled");
+    for managed in ["AGENTS.md", "skills", ".agent-skills"] {
+        assert!(
+            !target.join(managed).exists(),
+            "managed root survived uninstall: {managed}"
+        );
+    }
+    assert!(!target.join("bin/agent-session").exists());
+    assert!(!target.join("bin/agent-skills").exists());
 }

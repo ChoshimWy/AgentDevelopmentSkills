@@ -58,6 +58,7 @@ PROFILE_NAMES = (
     "readonly.config.toml",
 )
 SUPPORTED_ACTIVATED_PATHS = frozenset(destination for _, destination, _ in ACTIVATED_FILES)
+NATIVE_INSTALLER_ACTIVATED_PATHS = SUPPORTED_ACTIVATED_PATHS | {"bin/agent-skills"}
 # Stable source-install baseline. Newer checkouts may add activation files, but
 # users must still be able to uninstall an intact earlier source installation.
 SOURCE_INSTALLER_ACTIVATION_BASELINE = frozenset(
@@ -77,7 +78,11 @@ SOURCE_INSTALLER_ACTIVATION_BASELINE = frozenset(
     }
 )
 SUPPORTED_ACTIVATED_PATH_SETS = frozenset(
-    {SUPPORTED_ACTIVATED_PATHS, SOURCE_INSTALLER_ACTIVATION_BASELINE}
+    {
+        NATIVE_INSTALLER_ACTIVATED_PATHS,
+        SUPPORTED_ACTIVATED_PATHS,
+        SOURCE_INSTALLER_ACTIVATION_BASELINE,
+    }
 )
 MANAGED_INSTRUCTIONS_ASSIGNMENT = re.compile(
     r'''^[ \t]*(?:model_instructions_file|"model_instructions_file"|'model_instructions_file')[ \t]*='''

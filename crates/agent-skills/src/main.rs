@@ -319,6 +319,7 @@ enum Command {
         existing_config: Option<PathBuf>,
     },
     /// Execute the guarded native full-uninstall compatibility path.
+    #[command(name = "uninstall", visible_alias = "lifecycle-uninstall")]
     LifecycleUninstall {
         target_root: PathBuf,
         #[arg(long = "platform")]

@@ -81,6 +81,15 @@ Python。可设置
 该兼容路径。Windows 原生二进制已经进入发布矩阵，但完整 Windows 安装合同
 启用前，仍不是 production source-install target。
 
+Apple 原生安装会把已验证的同一可执行文件发布为
+`~/.codex/bin/agent-session` 与 `~/.codex/bin/agent-skills`；后者提供受保护的
+Rust 生命周期 CLI。移除精确受管安装前可先预览：
+
+```bash
+~/.codex/bin/agent-skills uninstall ~/.codex --platform all --dry-run
+~/.codex/bin/agent-skills uninstall ~/.codex --platform all
+```
+
 ## 开发与验证
 
 完整 Conformance：

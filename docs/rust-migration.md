@@ -273,11 +273,14 @@ context refresh/checkpoint semantics, locked Registry lifecycle operations,
 Manifest-driven native Session creation with bootstrap-only and trusted-root
 gates, and Final Gate Adapter/Ledger/artifact revalidation with passed-state
 persistence. The parallel CLI also exposes guarded full uninstall through
-`lifecycle-uninstall`; this remains a compatibility route rather than a
-bootstrap-installed default command. Host-specific live Provider execution
-and complete production CLI parity remain later phase gates. Although the
-release matrix includes Windows binaries, Windows production source install
-remains blocked until its full filesystem contract is enabled.
+the public `uninstall` command (`lifecycle-uninstall` remains a compatibility
+alias). Eligible Apple installs publish the frozen executable as both
+`bin/agent-session` and `bin/agent-skills`, so installed users can preview and
+execute the native full-uninstall transaction without Python. Host-specific
+live Provider execution and complete production CLI parity remain later phase
+gates. Although the release matrix includes Windows binaries, Windows
+production source install remains blocked until its full filesystem contract
+is enabled.
 
 The native and Python lanes now also expose the same Provider Invocation v1
 transport. `prepare` freezes the Adapter Request together with the node's

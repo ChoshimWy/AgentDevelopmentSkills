@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -338,6 +339,40 @@ class UninstallScriptTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "uninstalled")
             self.assertFalse((target / "AGENTS.md").exists())
+            self.assertFalse((target / ".agent-skills").exists())
+
+    def test_native_activation_lock_can_use_python_compatibility_uninstall(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".codex"
+            self.install(target)
+            session = target / "bin" / "agent-session"
+            native_cli = target / "bin" / "agent-skills"
+            shutil.copy2(session, native_cli)
+
+            lock_path = target / ".agent-skills" / "activation-lock.json"
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            lock["files"].append(
+                {
+                    "mode": native_cli.stat().st_mode & 0o777,
+                    "path": "bin/agent-skills",
+                    "sha256": hashlib.sha256(native_cli.read_bytes()).hexdigest(),
+                }
+            )
+            lock["files"].sort(key=lambda item: item["path"])
+            lock_path.write_text(
+                json.dumps(lock, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            preview = json.loads(self.uninstall(target, "--dry-run").stdout)
+            self.assertEqual(preview["status"], "planned")
+            self.assertIn("bin/agent-skills", preview["activated_files"])
+            self.assertTrue(native_cli.is_file())
+
+            result = json.loads(self.uninstall(target).stdout)
+            self.assertEqual(result["status"], "uninstalled")
+            self.assertFalse(native_cli.exists())
+            self.assertFalse(session.exists())
             self.assertFalse((target / ".agent-skills").exists())
 
     def test_preexisting_empty_activation_directories_are_preserved(self) -> None:

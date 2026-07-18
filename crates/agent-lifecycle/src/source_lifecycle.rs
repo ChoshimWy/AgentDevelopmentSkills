@@ -457,6 +457,10 @@ mod tests {
             std::fs::read(target.join("bin/agent-session")).expect("read installed launcher"),
             launcher
         );
+        assert_eq!(
+            std::fs::read(target.join("bin/agent-skills")).expect("read installed native CLI"),
+            launcher
+        );
         assert!(target.join(".agent-skills/activation-lock.json").is_file());
     }
 }

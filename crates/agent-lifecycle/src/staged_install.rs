@@ -2842,6 +2842,11 @@ mod tests {
             b"native session launcher\n"
         );
         assert_eq!(
+            std::fs::read(fixture.target().join("bin/agent-skills"))
+                .expect("read native lifecycle CLI"),
+            b"native session launcher\n"
+        );
+        assert_eq!(
             std::fs::read(fixture.target().join("readonly.config.toml"))
                 .expect("read preserved user profile"),
             b"# user readonly\n"

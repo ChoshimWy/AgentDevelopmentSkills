@@ -129,6 +129,7 @@ pub(super) const PROFILE_NAMES: &[&str] = &[
     "readonly.config.toml",
 ];
 const SHARED_CONFIG_SOURCE: &str = "assets/codex/codex.shared.toml";
+const CLI_DESTINATION: &str = "bin/agent-skills";
 const SESSION_DESTINATION: &str = "bin/agent-session";
 
 #[derive(Debug)]
@@ -651,9 +652,11 @@ impl SourceDeactivation {
             .iter()
             .map(|asset| asset.destination)
             .collect::<BTreeSet<_>>();
-        let mut current = baseline.clone();
-        current.insert(SESSION_DESTINATION);
-        if actual != baseline && actual != current {
+        let mut session_enabled = baseline.clone();
+        session_enabled.insert(SESSION_DESTINATION);
+        let mut native_cli_enabled = session_enabled.clone();
+        native_cli_enabled.insert(CLI_DESTINATION);
+        if actual != baseline && actual != session_enabled && actual != native_cli_enabled {
             return invalid("activation Lock does not cover the supported managed file set");
         }
         Ok(())
@@ -780,14 +783,13 @@ fn load_activation_candidate_values(
             return invalid("native source activation asset destinations must be unique");
         }
     }
-    if values
-        .insert(
-            SESSION_DESTINATION.to_owned(),
-            (session_launcher.to_vec(), 0o755),
-        )
-        .is_some()
-    {
-        return invalid("native source activation asset destinations must be unique");
+    for destination in [CLI_DESTINATION, SESSION_DESTINATION] {
+        if values
+            .insert(destination.to_owned(), (session_launcher.to_vec(), 0o755))
+            .is_some()
+        {
+            return invalid("native source activation asset destinations must be unique");
+        }
     }
     Ok(values)
 }
@@ -2244,6 +2246,10 @@ mod tests {
             b"native session launcher\n"
         );
         assert_eq!(
+            std::fs::read(target_path.join("bin/agent-skills")).expect("read native lifecycle CLI"),
+            b"native session launcher\n"
+        );
+        assert_eq!(
             std::fs::read(target_path.join("readonly.config.toml"))
                 .expect("read preserved user profile"),
             b"# user profile\n"
@@ -2309,6 +2315,7 @@ mod tests {
         )
         .expect("prepare fresh source activation");
         assert!(prepared.scope().contains(&"config.toml".to_owned()));
+        assert!(prepared.scope().contains(&"bin/agent-skills".to_owned()));
         assert!(prepared.scope().contains(&"bin/agent-session".to_owned()));
         assert!(prepared.migration.is_none());
         std::fs::rename(
@@ -2334,6 +2341,11 @@ mod tests {
         assert_eq!(
             std::fs::read(destination_path.join("bin/agent-session"))
                 .expect("read fresh session launcher"),
+            b"fresh native session launcher\n"
+        );
+        assert_eq!(
+            std::fs::read(destination_path.join("bin/agent-skills"))
+                .expect("read fresh native lifecycle CLI"),
             b"fresh native session launcher\n"
         );
         assert_eq!(
