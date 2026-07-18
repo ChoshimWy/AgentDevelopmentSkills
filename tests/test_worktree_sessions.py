@@ -886,7 +886,8 @@ mkdir "$CODEX_VERIFY_JOB_DIR/verification-report.json"
                 self.assertEqual(1, len(failed_jobs))
                 self.assertEqual("failed", (failed_jobs[0] / "state").read_text(encoding="utf-8").strip())
                 self.assertFalse(lease.exists())
-                daemon_pid = int((queue / "daemon.pid").read_text(encoding="utf-8").strip())
+                if (queue / "daemon.pid").is_file():
+                    daemon_pid = int((queue / "daemon.pid").read_text(encoding="utf-8").strip())
             finally:
                 if daemon_pid is None and (queue / "daemon.pid").is_file():
                     daemon_pid = int((queue / "daemon.pid").read_text(encoding="utf-8").strip())
