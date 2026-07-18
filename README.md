@@ -185,12 +185,13 @@ reads only a caller-supplied, owner-private, high-entropy transport claim
 token. After a failure around result publication, inspect the request before
 retrying claim or submit. The first native lifecycle slice now provides a
 read-only Doctor compatibility projection for the safe target, recovery
-residue, managed layout, Install/Persistent Lock anchors, and runtime Schema
-inventory. It holds directory capabilities and opens contract files without
-following symlinks; it does not repair, install, upgrade, roll back, uninstall,
-or otherwise write the target. Failed projected checks keep canonical JSON on
-stdout and return exit status 2. Core also does not create commits, change
-staging, switch the production CLI, or make installation changes.
+residue, managed layout, Install/Persistent Lock anchors, Core runtime
+identity, and runtime Schema inventory. It holds directory capabilities and
+opens contract files without following symlinks; it does not repair, install,
+upgrade, roll back, uninstall, or otherwise write the target. Failed projected
+checks keep canonical JSON on stdout and return exit status 2. Core also does
+not create commits, change staging, switch the production CLI, or make
+installation changes.
 
 ## Release governance
 

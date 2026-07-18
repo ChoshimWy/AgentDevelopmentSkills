@@ -91,10 +91,10 @@ contains:
   explicit request-ID selection for Recorded Runtime consumption;
 - an `agent-lifecycle` crate with the first read-only Doctor compatibility
   slice: safe target acquisition, interrupted-transaction residue discovery,
-  managed-root layout checks, Install/Persistent Lock anchoring, and runtime
-  Schema inventory comparison. It holds directory capabilities and opens
-  contract files without following symlinks, and it never repairs or writes
-  the inspected installation;
+  managed-root layout checks, Install/Persistent Lock anchoring, Core runtime
+  identity comparison, and runtime Schema inventory comparison. It holds
+  directory capabilities and opens contract files without following symlinks,
+  and it never repairs or writes the inspected installation;
 - schema-aligned capability-contract type validation shared by the Python
   baseline and native normalization path;
 - Python-to-Rust byte-level differential tests covering malicious provider

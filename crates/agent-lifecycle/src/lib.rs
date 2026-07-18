@@ -110,8 +110,9 @@ impl BaselineState {
 ///
 /// The returned projection contains the existing Doctor check records for the
 /// safe-target, recovery-residue, managed-layout, Install Lock, persistent
-/// Lockfile, and Schema inventory checks. It is intentionally a compatibility
-/// probe rather than a new public artifact schema.
+/// Lockfile, Core runtime identity, and Schema inventory checks. It is
+/// intentionally a compatibility probe rather than a new public artifact
+/// schema.
 ///
 /// Target and managed directories are held as directory capabilities. Contract
 /// files are opened without following symlinks and their identities are checked
@@ -263,6 +264,34 @@ pub fn inspect_doctor_baseline(
             "lock",
             "skipped",
             "Persistent Lockfile check requires a valid Install Lock",
+            json!({}),
+        );
+    }
+
+    if let (Some(install_lock), Some(package_lock)) =
+        (state.install_lock.as_ref(), state.package_lock.as_ref())
+    {
+        match check_core_identity(install_lock, package_lock) {
+            Ok(details) => state.record(
+                "environment.core",
+                "environment",
+                "passed",
+                "Core runtime identity matches both Lockfiles",
+                details,
+            ),
+            Err(error) => state.failed(
+                "environment.core",
+                "environment",
+                "Core runtime identity matches both Lockfiles",
+                error,
+            ),
+        }
+    } else {
+        state.record(
+            "environment.core",
+            "environment",
+            "skipped",
+            "Core identity check requires both Lockfiles",
             json!({}),
         );
     }
@@ -494,6 +523,26 @@ fn load_package_lock(managed: &Dir, install_lock: &Value) -> Result<Value, Lifec
         ));
     }
     Ok(value)
+}
+
+fn check_core_identity(
+    install_lock: &Value,
+    package_lock: &Value,
+) -> Result<Value, LifecycleError> {
+    let versions = json!({
+        "install_lock": install_lock.get("core_version").cloned().unwrap_or(Value::Null),
+        "package_lock": package_lock.pointer("/core/runtime_version").cloned().unwrap_or(Value::Null),
+        "runtime": env!("CARGO_PKG_VERSION"),
+    });
+    let install_version = versions.get("install_lock").and_then(Value::as_str);
+    let package_version = versions.get("package_lock").and_then(Value::as_str);
+    let runtime_version = versions.get("runtime").and_then(Value::as_str);
+    if install_version != runtime_version || package_version != runtime_version {
+        return Err(LifecycleError::Invalid(
+            "Core runtime version differs from the installed Lockfiles".to_owned(),
+        ));
+    }
+    Ok(versions)
 }
 
 fn check_schema_inventory(schemas: &Path, package_lock: &Value) -> Result<Value, LifecycleError> {
@@ -884,6 +933,10 @@ mod tests {
             Some(&json!("skipped"))
         );
         assert_eq!(
+            check(&value, "environment.core").get("status"),
+            Some(&json!("skipped"))
+        );
+        assert_eq!(
             check(&value, "schema.inventory").get("status"),
             Some(&json!("skipped"))
         );
@@ -921,6 +974,28 @@ mod tests {
             ]))
         );
         std::fs::remove_dir_all(&root).expect("remove lifecycle test root");
+    }
+
+    #[test]
+    fn core_identity_requires_runtime_and_both_locks_to_match() {
+        let install_lock = json!({"core_version": env!("CARGO_PKG_VERSION")});
+        let package_lock = json!({"core": {"runtime_version": env!("CARGO_PKG_VERSION")}});
+        assert_eq!(
+            check_core_identity(&install_lock, &package_lock).expect("matching Core identity"),
+            json!({
+                "install_lock": env!("CARGO_PKG_VERSION"),
+                "package_lock": env!("CARGO_PKG_VERSION"),
+                "runtime": env!("CARGO_PKG_VERSION"),
+            })
+        );
+
+        let stale_install = json!({"core_version": "stale"});
+        let error = check_core_identity(&stale_install, &package_lock)
+            .expect_err("stale Install Lock Core version must fail");
+        assert_eq!(
+            error.to_string(),
+            "Core runtime version differs from the installed Lockfiles"
+        );
     }
 
     #[cfg(unix)]

@@ -1384,6 +1384,7 @@ class RustCompatibilityTests(unittest.TestCase):
             "filesystem.layout",
             "install.lock",
             "lock.persistent",
+            "environment.core",
             "schema.inventory",
         }
 
@@ -1501,6 +1502,108 @@ class RustCompatibilityTests(unittest.TestCase):
                 normalize_failures(expected),
             )
             self.assertEqual(filesystem_identity(target), tampered_before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["apple", "desktop"],
+                ),
+                target,
+            )
+            managed = target / ".agent-skills"
+            install_lock_path = managed / "install-lock.json"
+            package_lock_path = managed / "agent-skills.lock"
+            install_lock = json.loads(
+                install_lock_path.read_text(encoding="utf-8")
+            )
+            package_lock = json.loads(
+                package_lock_path.read_text(encoding="utf-8")
+            )
+            major, minor, patch = (
+                int(part)
+                for part in PYTHON_CORE_VERSION.split(".")
+            )
+            mismatched_core_version = f"{major}.{minor}.{patch + 1}"
+            install_lock["core_version"] = mismatched_core_version
+            for package in install_lock["selected_packages"]:
+                package["core_compatibility"] = (
+                    f"=={mismatched_core_version}"
+                )
+            package_lock["install_plan_identity_hash"] = sha256({
+                key: value
+                for key, value in install_lock.items()
+                if key
+                not in {
+                    "fingerprint",
+                    "package_lock_hash",
+                    "status",
+                }
+            })
+            package_lock["fingerprint"] = sha256({
+                key: value
+                for key, value in package_lock.items()
+                if key != "fingerprint"
+            })
+            install_lock["package_lock_hash"] = package_lock["fingerprint"]
+            install_lock["fingerprint"] = sha256({
+                key: value
+                for key, value in install_lock.items()
+                if key not in {"fingerprint", "status"}
+            })
+            dump(package_lock, package_lock_path)
+            dump(install_lock, install_lock_path)
+
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(result.stderr, "")
+            actual = json.loads(result.stdout)
+            self.assertEqual(
+                normalize_failures(actual),
+                normalize_failures(expected),
+            )
+            self.assertEqual(
+                next(
+                    check
+                    for check in actual["checks"]
+                    if check["id"] == "install.lock"
+                )["status"],
+                "passed",
+            )
+            self.assertEqual(
+                next(
+                    check
+                    for check in actual["checks"]
+                    if check["id"] == "lock.persistent"
+                )["status"],
+                "passed",
+            )
+            self.assertEqual(
+                next(
+                    check
+                    for check in actual["checks"]
+                    if check["id"] == "environment.core"
+                )["status"],
+                "failed",
+            )
+            self.assertEqual(
+                [
+                    check["id"]
+                    for check in actual["checks"]
+                    if check["status"] == "failed"
+                ],
+                ["environment.core"],
+            )
+            self.assertEqual(filesystem_identity(target), before)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
