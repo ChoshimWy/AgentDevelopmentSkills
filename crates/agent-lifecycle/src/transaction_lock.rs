@@ -35,7 +35,7 @@ impl LifecycleLock {
         let requested_target = absolute_path(target_root.as_ref())?;
         let target_directory = open_or_create_directory(&requested_target)?;
         let target = canonical_path_for_directory(&requested_target, &target_directory)?;
-        match target_directory.create_dir(LIFECYCLE_LOCK_DIRECTORY) {
+        match create_lock_directory(&target_directory) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 return invalid(format!(
@@ -92,6 +92,10 @@ impl LifecycleLock {
     #[must_use]
     pub fn target(&self) -> &Path {
         &self.target
+    }
+
+    pub(super) fn target_directory(&self) -> Result<Dir, LifecycleError> {
+        Ok(self.target_directory.try_clone()?)
     }
 
     /// Prove that the lock directory still denotes the acquired object.
@@ -169,6 +173,21 @@ impl Drop for LifecycleLock {
                 self.active = false;
             }
         }
+    }
+}
+
+fn create_lock_directory(target: &Dir) -> std::io::Result<()> {
+    #[cfg(all(unix, not(target_os = "wasi")))]
+    {
+        use cap_std::fs::{DirBuilder, DirBuilderExt as _};
+
+        let mut builder = DirBuilder::new();
+        builder.mode(MANAGED_DIRECTORY_MODE);
+        target.create_dir_with(LIFECYCLE_LOCK_DIRECTORY, &builder)
+    }
+    #[cfg(any(not(unix), target_os = "wasi"))]
+    {
+        target.create_dir(LIFECYCLE_LOCK_DIRECTORY)
     }
 }
 
@@ -290,6 +309,53 @@ mod tests {
             .find(|check| check.get("id").and_then(Value::as_str) == Some(check_id))?
             .get("status")?
             .as_str()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_directory_is_created_with_managed_mode_atomically() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const CHILD_TARGET: &str = "AGENT_LIFECYCLE_LOCK_MODE_CHILD_TARGET";
+        if let Some(target) = std::env::var_os(CHILD_TARGET) {
+            let target_path = PathBuf::from(target);
+            let target_directory =
+                Dir::open_ambient_dir(&target_path, cap_std::ambient_authority())
+                    .expect("open lock mode-test target");
+            create_lock_directory(&target_directory).expect("create private lock directory");
+            assert_eq!(
+                std::fs::metadata(target_path.join(LIFECYCLE_LOCK_DIRECTORY))
+                    .expect("inspect initial lock mode")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                MANAGED_DIRECTORY_MODE
+            );
+            return;
+        }
+
+        let root = temporary_path("initial-mode");
+        std::fs::create_dir(&root).expect("create lock mode-test target");
+        let test_name =
+            "transaction_lock::tests::lock_directory_is_created_with_managed_mode_atomically";
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("umask 000; exec \"$TEST_EXE\" --exact \"$TEST_NAME\" --nocapture")
+            .env(
+                "TEST_EXE",
+                std::env::current_exe().expect("resolve test executable"),
+            )
+            .env("TEST_NAME", test_name)
+            .env(CHILD_TARGET, &root)
+            .output()
+            .expect("run lock mode child");
+        assert!(
+            output.status.success(),
+            "lock mode child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        std::fs::remove_dir_all(&root).expect("remove lock mode-test target");
     }
 
     #[test]

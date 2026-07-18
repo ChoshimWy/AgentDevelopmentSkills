@@ -109,6 +109,10 @@ contains:
   interpreter. The crate also exposes the first mutating-lifecycle prerequisite:
   an identity-bound RAII directory lock with atomic exclusion, capability-safe
   missing-target creation, visible crash residue, and identity-checked cleanup.
+  A `LifecycleWorkspace` now adds unique POSIX mode-`0700` stage/backup
+  directories under the held lock, capability-bound access, recursive
+  no-follow cleanup, crash visibility, and explicit incomplete-recovery backup
+  preservation. It does not yet stage or swap managed content.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit

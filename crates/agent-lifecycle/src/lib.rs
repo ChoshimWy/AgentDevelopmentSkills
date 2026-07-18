@@ -1,20 +1,22 @@
 //! Lifecycle diagnostics and transaction foundations for the native migration.
 //!
-//! Doctor inspection is non-mutating. The explicit [`LifecycleLock`] API only
-//! creates missing target directories and its lock directory; it does not
-//! install, upgrade, roll back, or remove managed content and is not yet wired
-//! into production commands.
+//! Doctor inspection is non-mutating. The explicit [`LifecycleLock`] and
+//! [`LifecycleWorkspace`] APIs create only the target/lock and temporary
+//! stage/backup foundations; they do not install, upgrade, roll back, or remove
+//! managed content and are not yet wired into production commands.
 
 mod doctor_report;
 mod packages;
 mod post_install;
 mod rollback;
 mod transaction_lock;
+mod transaction_workspace;
 
 pub use doctor_report::inspect_doctor_report_v1;
 #[cfg(test)]
 use doctor_report::validate_doctor_report_v1;
 pub use transaction_lock::LifecycleLock;
+pub use transaction_workspace::LifecycleWorkspace;
 
 use agent_contracts::{
     ContractError, MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256, parse_json,
@@ -38,10 +40,13 @@ const PERSISTENT_PACKAGE_LOCK: &str = "agent-skills.lock";
 const EXTERNAL_ACTIVATION_LOCK: &str = "activation-lock.json";
 const ROLLBACK_POINT_DIRECTORY: &str = "rollback-point";
 const LIFECYCLE_LOCK_DIRECTORY: &str = ".agent-skills-lifecycle.lock";
+const INSTALL_BACKUP_PREFIX: &str = ".agent-skills-backup-";
+const INSTALL_STAGE_PREFIX: &str = ".agent-skills-stage-";
+const UNINSTALL_BACKUP_PREFIX: &str = ".agent-skills-uninstall-backup-";
 const RECOVERY_PREFIXES: [(&str, &str); 3] = [
-    (".agent-skills-backup-", "install-backup"),
-    (".agent-skills-stage-", "install-stage"),
-    (".agent-skills-uninstall-backup-", "uninstall-backup"),
+    (INSTALL_BACKUP_PREFIX, "install-backup"),
+    (INSTALL_STAGE_PREFIX, "install-stage"),
+    (UNINSTALL_BACKUP_PREFIX, "uninstall-backup"),
 ];
 
 /// Native lifecycle inspection failures.

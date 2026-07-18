@@ -208,12 +208,17 @@ on the Python path. As their first native prerequisite, `agent-lifecycle` now
 exposes an identity-bound RAII directory lock with atomic exclusion, safe
 missing-target creation, crash-residue visibility, and identity-checked
 cleanup; it is not yet wired into production install or upgrade commands.
+The companion `LifecycleWorkspace` now creates a unique POSIX mode-`0700`
+stage/backup pair under that lock, holds both directory capabilities, exposes
+them for later native staging, removes symlink-safe temporary trees, and can
+preserve an incomplete-recovery backup. It still does not copy or swap managed
+content.
 The target parent namespace must remain trusted while portable name-based
-release runs. Callers must
-expand `~` before using its API. The Doctor path holds directory capabilities
-and opens contract files without following symlinks; unlike the explicit lock
-API, it does not repair, install, upgrade, roll back, uninstall, or otherwise
-write the target. Failed projected checks keep canonical JSON on
+release runs. Callers must expand `~` before using these APIs. The Doctor path
+holds directory capabilities and opens contract files without following
+symlinks; unlike the explicit lock API, it does not repair, install, upgrade,
+roll back, uninstall, or otherwise write the target. Failed projected checks
+keep canonical JSON on
 stdout and return exit status 2. Core also does not create commits, change
 staging, switch the production CLI, or make installation changes.
 Activation and installed-package tree mode parity are currently POSIX
