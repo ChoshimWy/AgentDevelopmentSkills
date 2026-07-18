@@ -7,7 +7,8 @@ use agent_engine::{
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
-    build_adapter_request, execute_fake_plan, validate_adapter_request, validate_adapter_result,
+    build_adapter_request, execute_fake_plan, execute_recorded_plan, validate_adapter_request,
+    validate_adapter_result,
 };
 use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
@@ -155,6 +156,20 @@ enum Command {
     AdapterRequestValidate { request: PathBuf },
     /// Validate one Adapter Result v1 against its frozen request.
     AdapterResultValidate { request: PathBuf, result: PathBuf },
+    /// Consume recorded Adapter Result v1 objects without invoking Providers.
+    RuntimeExecuteRecorded {
+        plan: PathBuf,
+        results: PathBuf,
+        context: PathBuf,
+        #[arg(long)]
+        lock: Option<PathBuf>,
+        #[arg(long)]
+        ledger: Option<PathBuf>,
+        #[arg(long)]
+        resume: bool,
+        #[arg(long)]
+        identity_seed: Option<String>,
+    },
 }
 
 #[allow(clippy::too_many_lines)]
@@ -387,6 +402,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let result = load_json(result)?;
             validate_adapter_result(&request, &result)?;
             print!("{}", String::from_utf8(canonical_json(&result)?)?);
+        }
+        Command::RuntimeExecuteRecorded {
+            plan,
+            results,
+            context,
+            lock,
+            ledger,
+            resume,
+            identity_seed,
+        } => {
+            let plan = load_json(plan)?;
+            let results = load_json(results)?;
+            let context = load_json(context)?;
+            let lock = lock.map(load_json).transpose()?;
+            let value = execute_recorded_plan(
+                &plan,
+                &results,
+                &context,
+                lock.as_ref(),
+                ledger.as_deref(),
+                resume,
+                identity_seed.as_deref(),
+            )?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
     }
     Ok(())

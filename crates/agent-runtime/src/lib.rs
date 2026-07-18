@@ -1,9 +1,9 @@
 //! Native workflow runtime compatibility primitives.
 //!
-//! The crate deliberately executes only deterministic fake adapter outcomes.
-//! External provider invocation remains outside the runtime boundary.  This
-//! mirrors the Python conformance executor while Phase 4 is migrated
-//! incrementally.
+//! The crate executes deterministic fake adapter outcomes and consumes
+//! validated recorded Adapter Results. External provider invocation remains
+//! outside the runtime boundary. This mirrors the Python conformance executor
+//! while Phase 4 is migrated incrementally.
 
 mod adapters;
 
@@ -667,7 +667,6 @@ impl RunLedger {
 /// Returns an error for invalid plans, lock mismatches, malformed runtime
 /// controls, unsafe ledger replay, or an invalid state transition.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]
 pub fn execute_fake_plan(
     plan: &Value,
     behaviors: Option<&Value>,
@@ -677,8 +676,67 @@ pub fn execute_fake_plan(
     resume: bool,
     identity_seed: Option<&str>,
 ) -> Result<Value, RuntimeError> {
+    execute_plan(
+        plan,
+        behaviors,
+        None,
+        None,
+        approval_decisions,
+        package_lock,
+        ledger_path,
+        resume,
+        identity_seed,
+    )
+}
+
+/// Consume recorded Adapter Result v1 objects through the native runtime.
+///
+/// This function validates and records externally produced results but never
+/// invokes a Provider, Skill, command, or package code.
+///
+/// # Errors
+/// Returns an error for invalid Adapter contracts, reused invocation identity,
+/// unsafe ledger replay, lock mismatch, or an invalid runtime transition.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_recorded_plan(
+    plan: &Value,
+    results: &Value,
+    context: &Value,
+    package_lock: Option<&Value>,
+    ledger_path: Option<&Path>,
+    resume: bool,
+    identity_seed: Option<&str>,
+) -> Result<Value, RuntimeError> {
+    execute_plan(
+        plan,
+        None,
+        Some(results),
+        Some(context),
+        None,
+        package_lock,
+        ledger_path,
+        resume,
+        identity_seed,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+fn execute_plan(
+    plan: &Value,
+    behaviors: Option<&Value>,
+    recorded_results: Option<&Value>,
+    recorded_context: Option<&Value>,
+    approval_decisions: Option<&Value>,
+    package_lock: Option<&Value>,
+    ledger_path: Option<&Path>,
+    resume: bool,
+    identity_seed: Option<&str>,
+) -> Result<Value, RuntimeError> {
     let plan_object = object(plan, "workflow-plan")?;
     preflight_runtime_plan(plan_object)?;
+    let result_map = optional_object(recorded_results, "recorded adapter results")?;
+    preflight_recorded_event_budget(plan_object, result_map)?;
     let plan_fingerprint = required_str(plan_object, "fingerprint", "workflow-plan")?;
     let plan_package_lock_hash = contract_optional_hash(
         plan_object,
@@ -700,6 +758,16 @@ pub fn execute_fake_plan(
         (None, None) => {}
     }
     let behavior_map = optional_object(behaviors, "runtime behaviors")?;
+    if behavior_map.is_some() && result_map.is_some() {
+        return Err(RuntimeError::Contract(
+            "runtime cannot combine fake behaviors with recorded adapter results".to_owned(),
+        ));
+    }
+    if result_map.is_some() && recorded_context.is_none() {
+        return Err(RuntimeError::Contract(
+            "recorded adapter runtime requires task context".to_owned(),
+        ));
+    }
     let approval_map = optional_object(approval_decisions, "runtime approval decisions")?;
     validate_behavior_map(behavior_map)?;
     validate_approval_map(approval_map)?;
@@ -725,7 +793,8 @@ pub fn execute_fake_plan(
                 "cannot resume ledger with a different package lock".to_owned(),
             ));
         }
-        let required_events = runtime_event_budget(plan_object)?;
+        let required_events = runtime_event_budget(plan_object)?
+            .saturating_add(recorded_event_budget(plan_object, result_map)?);
         reserve_ledger_events(ledger.event_count, required_events)?;
         ledger.append(
             "run-resumed",
@@ -801,8 +870,26 @@ pub fn execute_fake_plan(
         let node = nodes
             .get(&node_id)
             .ok_or_else(|| RuntimeError::Contract("workflow-plan node is missing".to_owned()))?;
-        if latest.get(&node_id) == Some(&NodeStatus::Passed) {
-            record_successors(plan, &node_id, NodeStatus::Passed, &mut predecessor_status)?;
+        let reusable = if let Some(results) = result_map {
+            reusable_recorded_status(
+                plan,
+                node,
+                &ledger.value,
+                latest.get(&node_id).copied(),
+                results,
+                recorded_context.ok_or_else(|| {
+                    RuntimeError::Contract(
+                        "recorded adapter runtime requires task context".to_owned(),
+                    )
+                })?,
+            )?
+        } else if latest.get(&node_id) == Some(&NodeStatus::Passed) {
+            Some(NodeStatus::Passed)
+        } else {
+            None
+        };
+        if let Some(status) = reusable {
+            record_successors(plan, &node_id, status, &mut predecessor_status)?;
             continue;
         }
         let incoming = predecessor_status
@@ -849,6 +936,40 @@ pub fn execute_fake_plan(
             {
                 machine.transition(&mut attempt, NodeStatus::Ready, "dependencies-satisfied")?;
             }
+            if let Some(results) = result_map
+                && let Err(error) = prepare_recorded_adapter(
+                    plan,
+                    node,
+                    &ledger.value,
+                    results,
+                    recorded_context.ok_or_else(|| {
+                        RuntimeError::Contract(
+                            "recorded adapter runtime requires task context".to_owned(),
+                        )
+                    })?,
+                )
+            {
+                machine.transition(
+                    &mut attempt,
+                    NodeStatus::Blocked,
+                    "adapter-contract-invalid",
+                )?;
+                ledger.append("node-attempt", attempt.clone())?;
+                record_adapter_contract_failure(
+                    plan,
+                    node,
+                    &attempt,
+                    &mut ledger,
+                    results,
+                    recorded_context.ok_or_else(|| {
+                        RuntimeError::Contract(
+                            "recorded adapter runtime requires task context".to_owned(),
+                        )
+                    })?,
+                    &error,
+                )?;
+                return Err(error);
+            }
             let attempt_id = required_str(
                 object(&attempt, "node-attempt")?,
                 "attempt_id",
@@ -864,24 +985,40 @@ pub fn execute_fake_plan(
             resource_cursor = flush_resource_events(&scheduler, &mut ledger, resource_cursor)?;
             machine.transition(&mut attempt, NodeStatus::Running, "fake-adapter-started")?;
             let capability = required_str(node_object, "capability", "workflow-plan.node")?;
-            let behavior = next_behavior(behavior_map, capability, &mut behavior_cursors)?;
-            let (target, reason) = if behavior == "timed-out" {
-                (NodeStatus::Blocked, "fake-adapter-timed-out".to_owned())
+            let (behavior, target, reason) = if let Some(results) = result_map {
+                recorded_adapter_outcome(
+                    plan,
+                    node,
+                    &attempt,
+                    &mut ledger,
+                    results,
+                    recorded_context.ok_or_else(|| {
+                        RuntimeError::Contract(
+                            "recorded adapter runtime requires task context".to_owned(),
+                        )
+                    })?,
+                )?
             } else {
-                let candidate = NodeStatus::parse(&behavior).unwrap_or(NodeStatus::Failed);
-                let target = if matches!(
-                    candidate,
-                    NodeStatus::Passed
-                        | NodeStatus::Failed
-                        | NodeStatus::Blocked
-                        | NodeStatus::Skipped
-                        | NodeStatus::Cancelled
-                ) {
-                    candidate
+                let behavior = next_behavior(behavior_map, capability, &mut behavior_cursors)?;
+                let (target, reason) = if behavior == "timed-out" {
+                    (NodeStatus::Blocked, "fake-adapter-timed-out".to_owned())
                 } else {
-                    NodeStatus::Failed
+                    let candidate = NodeStatus::parse(&behavior).unwrap_or(NodeStatus::Failed);
+                    let target = if matches!(
+                        candidate,
+                        NodeStatus::Passed
+                            | NodeStatus::Failed
+                            | NodeStatus::Blocked
+                            | NodeStatus::Skipped
+                            | NodeStatus::Cancelled
+                    ) {
+                        candidate
+                    } else {
+                        NodeStatus::Failed
+                    };
+                    (target, format!("fake-adapter-{}", target.as_str()))
                 };
-                (target, format!("fake-adapter-{}", target.as_str()))
+                (behavior, target, reason)
             };
             machine.transition(&mut attempt, target, &reason)?;
             let release_action = if behavior == "timed-out" {
@@ -902,7 +1039,8 @@ pub fn execute_fake_plan(
             let max_retries = optional_u64(node_object, "max_retries").unwrap_or(0);
             let idempotent = node_object.get("idempotent").is_some_and(json_truthy);
             let retryable = target == NodeStatus::Failed || behavior == "timed-out";
-            if !retryable
+            if result_map.is_some()
+                || !retryable
                 || !NodeStateMachine::can_auto_retry(idempotent, attempt_number, max_retries)
             {
                 break target;
@@ -933,6 +1071,11 @@ pub fn execute_fake_plan(
         "blocked"
     } else {
         "partial"
+    };
+    let final_status = if result_map.is_some() {
+        adjust_recorded_final_status(final_status, &ledger.value)?
+    } else {
+        final_status
     };
     ledger.finalize(final_status)
 }
@@ -1231,6 +1374,347 @@ fn next_behavior(
     *cursor = cursor.saturating_add(1);
     values[index].as_str().map(str::to_owned).ok_or_else(|| {
         RuntimeError::Contract("runtime behavior entries must be strings".to_owned())
+    })
+}
+
+fn prepare_recorded_adapter(
+    plan: &Value,
+    node: &Value,
+    ledger: &Value,
+    results: &Map<String, Value>,
+    context: &Value,
+) -> Result<(), RuntimeError> {
+    let node = object(node, "workflow-plan.node")?;
+    if optional_str(node, "provider") == Some("core") {
+        return Ok(());
+    }
+    let node_id = required_str(node, "id", "workflow-plan.node")?;
+    let Some(result) = results.get(node_id) else {
+        return Ok(());
+    };
+    let result_object = result.as_object().ok_or_else(|| {
+        RuntimeError::Contract("recorded adapter result must be an object".to_owned())
+    })?;
+    let invocation_id = result_object
+        .get("invocation_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            RuntimeError::Contract("recorded adapter result invocation_id is required".to_owned())
+        })?;
+    let request = build_adapter_request(plan, node_id, context, invocation_id)?;
+    validate_adapter_result(&request, result)?;
+    let outcomes = array(
+        object(ledger, "run-ledger")?,
+        "adapter_outcomes",
+        "run-ledger",
+    )?;
+    let request_id = required_str(
+        object(&request, "adapter-request")?,
+        "request_id",
+        "adapter-request",
+    )?;
+    if outcomes.iter().any(|outcome| {
+        outcome.get("request_id").and_then(Value::as_str) == Some(request_id)
+            || outcome.get("invocation_id").and_then(Value::as_str) == Some(invocation_id)
+    }) {
+        return Err(RuntimeError::Contract(
+            "recorded adapter result has already been consumed by an attempt".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn reusable_recorded_status(
+    plan: &Value,
+    node: &Value,
+    ledger: &Value,
+    latest_status: Option<NodeStatus>,
+    results: &Map<String, Value>,
+    context: &Value,
+) -> Result<Option<NodeStatus>, RuntimeError> {
+    let node = object(node, "workflow-plan.node")?;
+    if optional_str(node, "provider") == Some("core") {
+        return Ok((latest_status == Some(NodeStatus::Passed)).then_some(NodeStatus::Passed));
+    }
+    let node_id = required_str(node, "id", "workflow-plan.node")?;
+    let Some(result) = results.get(node_id).and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let Some(invocation_id) = result
+        .get("invocation_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let request = build_adapter_request(plan, node_id, context, invocation_id)?;
+    let Some(attempt) = latest_attempt(ledger, node_id)? else {
+        return Ok(None);
+    };
+    let attempt_id = required_str(
+        object(attempt, "node-attempt")?,
+        "attempt_id",
+        "node-attempt",
+    )?;
+    let outcomes = array(
+        object(ledger, "run-ledger")?,
+        "adapter_outcomes",
+        "run-ledger",
+    )?;
+    let Some(outcome) = outcomes
+        .iter()
+        .rev()
+        .find(|outcome| outcome.get("attempt_id").and_then(Value::as_str) == Some(attempt_id))
+    else {
+        return Ok(None);
+    };
+    let request_id = required_str(
+        object(&request, "adapter-request")?,
+        "request_id",
+        "adapter-request",
+    )?;
+    if outcome.get("request_id").and_then(Value::as_str) != Some(request_id)
+        || outcome.get("status") != result.get("status")
+    {
+        return Ok(None);
+    }
+    let result_status = result.get("status").and_then(Value::as_str);
+    Ok(match (latest_status, result_status) {
+        (Some(NodeStatus::Passed), Some("completed")) => Some(NodeStatus::Passed),
+        (Some(NodeStatus::Skipped), Some("partial")) => Some(NodeStatus::Skipped),
+        (Some(NodeStatus::Blocked), Some("partial")) => Some(NodeStatus::Blocked),
+        _ => None,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn recorded_adapter_outcome(
+    plan: &Value,
+    node: &Value,
+    attempt: &Value,
+    ledger: &mut RunLedger,
+    results: &Map<String, Value>,
+    context: &Value,
+) -> Result<(String, NodeStatus, String), RuntimeError> {
+    let node = object(node, "workflow-plan.node")?;
+    if optional_str(node, "provider") == Some("core") {
+        return Ok((
+            "passed".to_owned(),
+            NodeStatus::Passed,
+            "fake-adapter-passed".to_owned(),
+        ));
+    }
+    let node_id = required_str(node, "id", "workflow-plan.node")?;
+    let Some(result) = results.get(node_id) else {
+        return Ok((
+            "blocked".to_owned(),
+            NodeStatus::Blocked,
+            "fake-adapter-blocked".to_owned(),
+        ));
+    };
+    let result_object = object(result, "recorded adapter result")?;
+    let invocation_id = required_str(result_object, "invocation_id", "adapter-result")?;
+    let request = build_adapter_request(plan, node_id, context, invocation_id)?;
+    validate_adapter_result(&request, result)?;
+    let request_object = object(&request, "adapter-request")?;
+    let attempt_id = required_str(
+        object(attempt, "node-attempt")?,
+        "attempt_id",
+        "node-attempt",
+    )?;
+    let provider = required_str(node, "provider", "workflow-plan.node")?;
+    let result_status = required_str(result_object, "status", "adapter-result")?;
+    ledger.append(
+        "adapter-outcome",
+        json!({
+            "attempt_id": attempt_id,
+            "cleanup": required_value(result_object, "cleanup", "adapter-result")?.clone(),
+            "failure_attribution": required_value(
+                result_object,
+                "failure_attribution",
+                "adapter-result",
+            )?.clone(),
+            "invocation_id": invocation_id,
+            "node_id": node_id,
+            "provider": provider,
+            "request_id": required_str(
+                request_object,
+                "request_id",
+                "adapter-request",
+            )?,
+            "status": result_status,
+        }),
+    )?;
+    for artifact in array(result_object, "artifacts", "adapter-result")? {
+        let mut recorded = object(artifact, "adapter-result.artifact")?.clone();
+        recorded.insert(
+            "attempt_id".to_owned(),
+            Value::String(attempt_id.to_owned()),
+        );
+        recorded.insert("node_id".to_owned(), Value::String(node_id.to_owned()));
+        ledger.append("artifact-hash", Value::Object(recorded))?;
+    }
+    for evidence in array(result_object, "evidence", "adapter-result")? {
+        let mut recorded = object(evidence, "adapter-result.evidence")?.clone();
+        recorded.insert(
+            "attempt_id".to_owned(),
+            Value::String(attempt_id.to_owned()),
+        );
+        recorded.insert("node_id".to_owned(), Value::String(node_id.to_owned()));
+        recorded.insert("provider".to_owned(), Value::String(provider.to_owned()));
+        ledger.append("adapter-evidence", Value::Object(recorded))?;
+    }
+    let no_test_reason = result_object
+        .get("no_test_reason")
+        .filter(|value| !value.is_null());
+    if let Some(reason) = no_test_reason {
+        ledger.append(
+            "adapter-evidence",
+            json!({
+                "attempt_id": attempt_id,
+                "node_id": node_id,
+                "provider": provider,
+                "kind": "validation",
+                "status": result_status,
+                "summary": reason.clone(),
+                "data": {
+                    "suggested_validation": required_value(
+                        result_object,
+                        "suggested_validation",
+                        "adapter-result",
+                    )?.clone(),
+                },
+                "artifact_ids": [],
+            }),
+        )?;
+    }
+    let capability = required_str(node, "capability", "workflow-plan.node")?;
+    let target = if result_status == "partial"
+        && no_test_reason.is_some()
+        && capability
+            .rsplit_once('.')
+            .is_some_and(|(_, suffix)| suffix == "auto")
+    {
+        NodeStatus::Skipped
+    } else {
+        match result_status {
+            "completed" => NodeStatus::Passed,
+            "partial" | "blocked" => NodeStatus::Blocked,
+            "failed" => NodeStatus::Failed,
+            _ => {
+                return Err(RuntimeError::Contract(
+                    "adapter-result status is invalid".to_owned(),
+                ));
+            }
+        }
+    };
+    Ok((
+        target.as_str().to_owned(),
+        target,
+        format!("fake-adapter-{}", target.as_str()),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_adapter_contract_failure(
+    plan: &Value,
+    node: &Value,
+    attempt: &Value,
+    ledger: &mut RunLedger,
+    results: &Map<String, Value>,
+    context: &Value,
+    error: &RuntimeError,
+) -> Result<(), RuntimeError> {
+    let node = object(node, "workflow-plan.node")?;
+    let node_id = required_str(node, "id", "workflow-plan.node")?;
+    let attempt_id = required_str(
+        object(attempt, "node-attempt")?,
+        "attempt_id",
+        "node-attempt",
+    )?;
+    let submitted_invocation_id = results
+        .get(node_id)
+        .and_then(Value::as_object)
+        .and_then(|result| result.get("invocation_id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unavailable");
+    let invocation_id = format!("contract-failure-{attempt_id}");
+    let request_id = build_adapter_request(plan, node_id, context, &invocation_id)
+        .ok()
+        .and_then(|request| {
+            request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| format!("adapter-request-unavailable-{attempt_id}"));
+    ledger.append(
+        "adapter-outcome",
+        json!({
+            "attempt_id": attempt_id,
+            "cleanup": [],
+            "failure_attribution": {
+                "category": "contract",
+                "summary": format!(
+                    "{error}; submitted_invocation_id={submitted_invocation_id}"
+                ),
+            },
+            "invocation_id": invocation_id,
+            "node_id": node_id,
+            "provider": optional_str(node, "provider").unwrap_or("unknown-provider"),
+            "request_id": request_id,
+            "status": "blocked",
+        }),
+    )
+}
+
+fn adjust_recorded_final_status<'a>(
+    status: &'a str,
+    ledger: &Value,
+) -> Result<&'a str, RuntimeError> {
+    if status != "blocked" {
+        return Ok(status);
+    }
+    let ledger_object = object(ledger, "run-ledger")?;
+    let mut latest = BTreeMap::<String, &Value>::new();
+    for attempt in array(ledger_object, "node_attempts", "run-ledger")? {
+        let node_id = required_str(object(attempt, "node-attempt")?, "node_id", "node-attempt")?;
+        latest.insert(node_id.to_owned(), attempt);
+    }
+    let outcomes = array(ledger_object, "adapter_outcomes", "run-ledger")?;
+    let mut has_current_partial = false;
+    for attempt in latest.values() {
+        let attempt_object = object(attempt, "node-attempt")?;
+        if required_str(attempt_object, "status", "node-attempt")? != "blocked" {
+            continue;
+        }
+        let attempt_id = required_str(attempt_object, "attempt_id", "node-attempt")?;
+        let outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.get("attempt_id").and_then(Value::as_str) == Some(attempt_id));
+        if outcome
+            .and_then(|item| item.get("status"))
+            .and_then(Value::as_str)
+            == Some("partial")
+        {
+            has_current_partial = true;
+            continue;
+        }
+        let reason = array(attempt_object, "events", "node-attempt")?
+            .last()
+            .and_then(|event| event.get("reason"))
+            .and_then(Value::as_str);
+        if reason == Some("upstream-not-passed") {
+            continue;
+        }
+        return Ok(status);
+    }
+    Ok(if has_current_partial {
+        "partial"
+    } else {
+        status
     })
 }
 
@@ -1544,6 +2028,62 @@ fn runtime_event_budget(plan: &Map<String, Value>) -> Result<usize, RuntimeError
         }
     }
     Ok(projected_events)
+}
+
+fn recorded_event_budget(
+    plan: &Map<String, Value>,
+    results: Option<&Map<String, Value>>,
+) -> Result<usize, RuntimeError> {
+    let Some(results) = results else {
+        return Ok(0);
+    };
+    let mut projected = 0_usize;
+    for node in array(plan, "nodes", "workflow-plan")? {
+        let node = object(node, "workflow-plan.node")?;
+        if optional_str(node, "provider") == Some("core") {
+            continue;
+        }
+        let node_id = required_str(node, "id", "workflow-plan.node")?;
+        let Some(result) = results.get(node_id) else {
+            continue;
+        };
+        projected = projected.saturating_add(1);
+        if let Some(result) = result.as_object() {
+            projected = projected.saturating_add(
+                result
+                    .get("artifacts")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len),
+            );
+            projected = projected.saturating_add(
+                result
+                    .get("evidence")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len),
+            );
+            if result
+                .get("no_test_reason")
+                .is_some_and(|value| !value.is_null())
+            {
+                projected = projected.saturating_add(1);
+            }
+        }
+    }
+    Ok(projected)
+}
+
+fn preflight_recorded_event_budget(
+    plan: &Map<String, Value>,
+    results: Option<&Map<String, Value>>,
+) -> Result<(), RuntimeError> {
+    let projected =
+        runtime_event_budget(plan)?.saturating_add(recorded_event_budget(plan, results)?);
+    if projected > MAX_LEDGER_EVENTS {
+        return Err(RuntimeError::Contract(format!(
+            "workflow runtime projected events exceed maximum {MAX_LEDGER_EVENTS}"
+        )));
+    }
+    Ok(())
 }
 
 fn reserve_ledger_events(

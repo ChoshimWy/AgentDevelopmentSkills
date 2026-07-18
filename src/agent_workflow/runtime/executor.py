@@ -46,7 +46,15 @@ class FakeAdapterExecutor:
         package_lock: dict[str, Any] | None = None,
         resume: bool = False,
     ) -> dict[str, Any]:
-        required_events = _preflight_runtime_plan(plan)
+        required_events = (
+            _preflight_runtime_plan(plan)
+            + self._additional_event_budget(plan)
+        )
+        if required_events > MAX_RUNTIME_LEDGER_EVENTS:
+            raise ContractError(
+                "workflow runtime projected events exceed maximum "
+                f"{MAX_RUNTIME_LEDGER_EVENTS}"
+            )
         if plan.get("package_lock_hash") is not None:
             if package_lock is None:
                 raise ContractError("locked workflow execution requires the current package Lockfile")
@@ -276,6 +284,9 @@ class FakeAdapterExecutor:
     ) -> None:
         """Let structured executors persist contract-failure provenance."""
 
+    def _additional_event_budget(self, plan: dict[str, Any]) -> int:
+        return 0
+
     def _flush_resource_events(self, ledger: RunLedger, cursor: int) -> int:
         for event in self.scheduler.events[cursor:]:
             ledger.append("resource-event", deepcopy(event))
@@ -318,6 +329,26 @@ class RecordedAdapterExecutor(FakeAdapterExecutor):
         if has_current_partial:
             return "partial"
         return status
+
+    def _additional_event_budget(self, plan: dict[str, Any]) -> int:
+        if not isinstance(self.results, dict):
+            raise ContractError("recorded adapter results must be an object")
+        projected = 0
+        for node in plan["nodes"]:
+            if node.get("provider") == "core":
+                continue
+            result = self.results.get(node["id"])
+            if result is None:
+                continue
+            projected += 1
+            if isinstance(result, dict):
+                artifacts = result.get("artifacts")
+                evidence = result.get("evidence")
+                projected += len(artifacts) if isinstance(artifacts, list) else 0
+                projected += len(evidence) if isinstance(evidence, list) else 0
+                if result.get("no_test_reason") is not None:
+                    projected += 1
+        return projected
 
     def _can_auto_retry(self, node: dict[str, Any], attempt: dict[str, Any]) -> bool:
         # One recorded result represents one external invocation. A retry needs
@@ -474,7 +505,7 @@ class RecordedAdapterExecutor(FakeAdapterExecutor):
                     **deepcopy(evidence),
                 },
             )
-        if "no_test_reason" in result:
+        if result.get("no_test_reason") is not None:
             ledger.append(
                 "adapter-evidence",
                 {
@@ -490,7 +521,7 @@ class RecordedAdapterExecutor(FakeAdapterExecutor):
             )
         if (
             result["status"] == "partial"
-            and "no_test_reason" in result
+            and result.get("no_test_reason") is not None
             and node["capability"].endswith(".auto")
         ):
             return "skipped"

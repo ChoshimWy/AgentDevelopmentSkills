@@ -115,6 +115,9 @@ cargo run --locked -p agent-skills-rs -- \
 cargo run --locked -p agent-skills-rs -- \
   adapter-result-validate /path/to/adapter-request.json \
   /path/to/adapter-result.json
+cargo run --locked -p agent-skills-rs -- \
+  runtime-execute-recorded /path/to/workflow-plan.json \
+  /path/to/adapter-results.json /path/to/task-context.json
 ```
 
 The migration sequence and cutover gates are documented in
@@ -126,9 +129,10 @@ compilation, plus package Lockfile resolution, validation, diff, explanation,
 and locked-plan binding checks. Phase 4 has started with a native deterministic
 fake-adapter runtime covering node state transitions, retries, approvals,
 resource scheduling, append-only ledger replay, and locked-plan execution. It
-also freezes and validates Adapter Request/Result v1 contracts before the next
-Recorded Adapter execution increment. It does not invoke external providers,
-execute package code, or make installation changes.
+also freezes and validates Adapter Request/Result v1 contracts and consumes
+those recorded results through the same ledger, resource, resume, and
+final-status contracts. It does not invoke external providers, execute package
+code, or make installation changes.
 
 ## Release governance
 

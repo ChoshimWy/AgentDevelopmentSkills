@@ -119,9 +119,12 @@ cargo run --locked -p agent-skills-rs -- \
 cargo run --locked -p agent-skills-rs -- \
   adapter-result-validate /path/to/adapter-request.json \
   /path/to/adapter-result.json
+cargo run --locked -p agent-skills-rs -- \
+  runtime-execute-recorded /path/to/workflow-plan.json \
+  /path/to/adapter-results.json /path/to/task-context.json
 ```
 
-迁移顺序和切换门禁见 [Rust 迁移计划](docs/rust-migration.md)。当前原生路径已覆盖 canonical contracts、只读 Manifest Registry、仓库发现、策略解析、计划编译，以及 Package Lock 的解析、验证、差异、解释与锁定计划绑定检查。Phase 4 已开始迁移确定性 fake-adapter Runtime，覆盖节点状态转换、重试、审批、资源调度、append-only Ledger 回放和锁定计划执行，并已迁移 Recorded Adapter 下一增量所需的 Adapter Request/Result v1 冻结与验证合同；它不会调用外部 Provider、执行 package 代码或修改安装目标。在所有相关差分测试和发布门禁通过前，Python CLI 仍是生产入口。
+迁移顺序和切换门禁见 [Rust 迁移计划](docs/rust-migration.md)。当前原生路径已覆盖 canonical contracts、只读 Manifest Registry、仓库发现、策略解析、计划编译，以及 Package Lock 的解析、验证、差异、解释与锁定计划绑定检查。Phase 4 已迁移确定性 fake-adapter Runtime、Adapter Request/Result v1 冻结与验证合同，以及 Recorded Result 在同一 Ledger、资源、恢复和终态合同中的消费路径；它不会调用外部 Provider、执行 package 代码或修改安装目标。在所有相关差分测试和发布门禁通过前，Python CLI 仍是生产入口。
 
 ## 发布治理
 

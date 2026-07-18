@@ -80,7 +80,7 @@ contains:
   lifecycle transitions, idempotent retry limits, attempt-scoped approvals,
   resource scheduling, append-only JSONL ledger replay, and package-Lock-bound
   workflow execution, plus Adapter Request/Result v1 identity freezing and
-  structured evidence validation;
+  structured evidence validation and recorded-result consumption;
 - schema-aligned capability-contract type validation shared by the Python
   baseline and native normalization path;
 - Python-to-Rust byte-level differential tests covering malicious provider
@@ -103,10 +103,11 @@ relative-path, and pinned HTTPS sources, deterministic lineage, validation,
 diff, explanation, and plan freezing. Phase 4 now also exposes a deterministic
 fake-adapter runtime for semantic differential testing; it never invokes an
 external Provider or package code. Adapter Request/Result v1 contracts are now
-available through the parallel CLI and are the validated foundation for the
-next Recorded Adapter execution increment. Recorded Result consumption,
-session/worktree orchestration, and transactional lifecycle operations remain
-the next Phase 4 boundaries; production CLI parity remains a later phase gate.
+available through the parallel CLI, and validated Recorded Results can be
+consumed with resume, stale-context, no-retry, structured-evidence, and partial
+status semantics matching the Python baseline. Session/worktree orchestration
+and transactional lifecycle operations remain the next Phase 4 boundaries;
+production CLI parity remains a later phase gate.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

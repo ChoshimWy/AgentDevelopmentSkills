@@ -37,7 +37,7 @@ from agent_workflow.planning import PlanCompiler
 from agent_workflow.policy import PolicyResolver
 from agent_workflow.recipes import automatic_recipe_capabilities
 from agent_workflow.registry import ManifestRegistry
-from agent_workflow.runtime import FakeAdapterExecutor, RunLedger
+from agent_workflow.runtime import FakeAdapterExecutor, RecordedAdapterExecutor, RunLedger
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +73,16 @@ def _normalize_runtime_ledger(value: dict) -> dict:
         for item in normalized.get(collection, []):
             if "attempt_id" in item:
                 item["attempt_id"] = attempt_ids[item["attempt_id"]]
+            if (
+                collection == "adapter_outcomes"
+                and item.get("invocation_id", "").startswith(
+                    "contract-failure-attempt-"
+                )
+            ):
+                item["invocation_id"] = (
+                    f"contract-failure-{item['attempt_id']}"
+                )
+                item["request_id"] = "adapter-request:contract-failure"
     return normalized
 
 
@@ -1951,6 +1961,372 @@ class RustCompatibilityTests(unittest.TestCase):
                         self.assertEqual(json.loads(native.stdout), result)
                     else:
                         self.assertEqual(native.stdout, "")
+
+    def test_recorded_adapter_runtime_matches_python(self) -> None:
+        from tests.test_adapters import AppleProviderAnchorSliceTests
+
+        fixture = AppleProviderAnchorSliceTests()
+        fixture.setUp()
+
+        def complete_results(
+            *,
+            context: dict | None = None,
+            suffix: str = "1",
+        ) -> dict:
+            active_context = context or fixture.context
+            return {
+                **fixture._supporting_results(
+                    context=active_context,
+                    invocation_suffix=suffix,
+                ),
+                "apple-1": fixture._result(
+                    "apple-1",
+                    "delivery",
+                    {"changed_files": ["Fixture.swift"]},
+                    context=active_context,
+                    invocation_id=f"apple-1-invocation-{suffix}",
+                ),
+                "apple-2": fixture._result(
+                    "apple-2",
+                    "validation",
+                    {"level": "affected-tests", "tests": 1},
+                    context=active_context,
+                    invocation_id=f"apple-2-invocation-{suffix}",
+                ),
+                "review": fixture._result(
+                    "review",
+                    "review",
+                    {
+                        "blocking_issues": [],
+                        "implementation_actor": "builder-1",
+                        "reviewer_actor": "reviewer-1",
+                    },
+                    context=active_context,
+                    invocation_id=f"review-invocation-{suffix}",
+                ),
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_path = root / "plan.json"
+            results_path = root / "results.json"
+            context_path = root / "context.json"
+            dump(fixture.plan, plan_path)
+
+            def native(
+                results: dict,
+                context: dict,
+                *,
+                ledger: Path | None = None,
+                resume: bool = False,
+            ) -> subprocess.CompletedProcess[str]:
+                dump(results, results_path)
+                dump(context, context_path)
+                arguments = [
+                    "runtime-execute-recorded",
+                    str(plan_path),
+                    str(results_path),
+                    str(context_path),
+                    "--identity-seed",
+                    "0123456789abcdef",
+                ]
+                if ledger is not None:
+                    arguments.extend(["--ledger", str(ledger)])
+                if resume:
+                    arguments.append("--resume")
+                return self.run_rust(*arguments)
+
+            results = complete_results()
+            expected = RecordedAdapterExecutor(
+                results,
+                context=fixture.context,
+            ).run(fixture.plan)
+            actual = native(results, fixture.context)
+            self.assertEqual(actual.returncode, 0, actual.stderr)
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(actual.stdout)),
+                _normalize_runtime_ledger(expected),
+            )
+
+            null_gap_results = complete_results()
+            null_gap_results["apple-2"]["no_test_reason"] = None
+            null_gap_results["apple-2"]["suggested_validation"] = None
+            expected_null_gap = RecordedAdapterExecutor(
+                null_gap_results,
+                context=fixture.context,
+            ).run(fixture.plan)
+            actual_null_gap = native(null_gap_results, fixture.context)
+            self.assertEqual(
+                actual_null_gap.returncode,
+                0,
+                actual_null_gap.stderr,
+            )
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(actual_null_gap.stdout)),
+                _normalize_runtime_ledger(expected_null_gap),
+            )
+
+            null_auto_results = complete_results()
+            null_auto_results["apple-3"].update(
+                {
+                    "status": "partial",
+                    "no_test_reason": None,
+                    "suggested_validation": None,
+                }
+            )
+            null_auto_results["apple-3"]["evidence"][0]["status"] = "partial"
+            expected_null_auto = RecordedAdapterExecutor(
+                null_auto_results,
+                context=fixture.context,
+            ).run(fixture.plan)
+            actual_null_auto = native(null_auto_results, fixture.context)
+            self.assertEqual(
+                actual_null_auto.returncode,
+                0,
+                actual_null_auto.stderr,
+            )
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(actual_null_auto.stdout)),
+                _normalize_runtime_ledger(expected_null_auto),
+            )
+
+            expected = RecordedAdapterExecutor(
+                {},
+                context=fixture.context,
+            ).run(fixture.plan)
+            actual = native({}, fixture.context)
+            self.assertEqual(actual.returncode, 0, actual.stderr)
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(actual.stdout)),
+                _normalize_runtime_ledger(expected),
+            )
+
+            failed_results = {
+                **fixture._supporting_results(include_downstream=False),
+                "apple-1": fixture._result(
+                    "apple-1",
+                    "delivery",
+                    {"changed_files": ["Fixture.swift"]},
+                ),
+                "apple-2": fixture._result(
+                    "apple-2",
+                    "validation",
+                    {"level": "affected-tests", "tests": 1},
+                ),
+            }
+            failed_results["apple-2"].update(
+                {
+                    "status": "failed",
+                    "failure_attribution": {
+                        "category": "code",
+                        "summary": "test failed",
+                    },
+                }
+            )
+            failed_results["apple-2"]["evidence"][0]["status"] = "failed"
+            expected = RecordedAdapterExecutor(
+                failed_results,
+                context=fixture.context,
+            ).run(fixture.plan)
+            actual = native(failed_results, fixture.context)
+            self.assertEqual(actual.returncode, 0, actual.stderr)
+            actual_ledger = json.loads(actual.stdout)
+            self.assertEqual(
+                _normalize_runtime_ledger(actual_ledger),
+                _normalize_runtime_ledger(expected),
+            )
+            self.assertEqual(
+                len(
+                    [
+                        item
+                        for item in actual_ledger["adapter_outcomes"]
+                        if item["node_id"] == "apple-2"
+                    ]
+                ),
+                1,
+            )
+
+            partial_results = complete_results()
+            partial_results["apple-2"].update(
+                {
+                    "status": "partial",
+                    "evidence": [],
+                    "artifacts": [],
+                    "no_test_reason": "fixture has no executable test target",
+                    "suggested_validation": "run the smallest project smoke",
+                }
+            )
+            python_ledger = root / "python-partial.jsonl"
+            rust_ledger = root / "rust-partial.jsonl"
+            expected_first = RecordedAdapterExecutor(
+                partial_results,
+                context=fixture.context,
+            ).run(fixture.plan, ledger_path=python_ledger)
+            actual_first = native(
+                partial_results,
+                fixture.context,
+                ledger=rust_ledger,
+            )
+            self.assertEqual(actual_first.returncode, 0, actual_first.stderr)
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(actual_first.stdout)),
+                _normalize_runtime_ledger(expected_first),
+            )
+            expected_resumed = RecordedAdapterExecutor(
+                partial_results,
+                context=fixture.context,
+            ).run(fixture.plan, ledger_path=python_ledger, resume=True)
+            actual_resumed = native(
+                partial_results,
+                fixture.context,
+                ledger=rust_ledger,
+                resume=True,
+            )
+            self.assertEqual(actual_resumed.returncode, 0, actual_resumed.stderr)
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(actual_resumed.stdout)),
+                _normalize_runtime_ledger(expected_resumed),
+            )
+
+            auto_results = complete_results()
+            auto_results["apple-3"].update(
+                {
+                    "status": "partial",
+                    "evidence": [],
+                    "artifacts": [],
+                    "no_test_reason": "fixture has no executable test target",
+                    "suggested_validation": "run the smallest approved smoke",
+                }
+            )
+            expected_auto = RecordedAdapterExecutor(
+                auto_results,
+                context=fixture.context,
+            ).run(fixture.plan)
+            actual_auto = native(auto_results, fixture.context)
+            self.assertEqual(actual_auto.returncode, 0, actual_auto.stderr)
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(actual_auto.stdout)),
+                _normalize_runtime_ledger(expected_auto),
+            )
+
+            python_stale_ledger = root / "python-stale.jsonl"
+            rust_stale_ledger = root / "rust-stale.jsonl"
+            RecordedAdapterExecutor(
+                results,
+                context=fixture.context,
+            ).run(fixture.plan, ledger_path=python_stale_ledger)
+            created = native(
+                results,
+                fixture.context,
+                ledger=rust_stale_ledger,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            changed_context = deepcopy(fixture.context)
+            changed_context["target_modules"] = ["DifferentModule"]
+            with self.assertRaisesRegex(ContractError, "does not match request"):
+                RecordedAdapterExecutor(
+                    results,
+                    context=changed_context,
+                ).run(
+                    fixture.plan,
+                    ledger_path=python_stale_ledger,
+                    resume=True,
+                )
+            stale = native(
+                results,
+                changed_context,
+                ledger=rust_stale_ledger,
+                resume=True,
+            )
+            self.assertEqual(stale.returncode, 2)
+            self.assertEqual(stale.stdout, "")
+            self.assertEqual(
+                _normalize_runtime_ledger(
+                    RunLedger.replay(
+                        rust_stale_ledger,
+                        fixture.plan["fingerprint"],
+                    ).value
+                ),
+                _normalize_runtime_ledger(
+                    RunLedger.replay(
+                        python_stale_ledger,
+                        fixture.plan["fingerprint"],
+                    ).value
+                ),
+            )
+
+            invalid_results = {
+                **fixture._supporting_results(include_downstream=False),
+                "apple-1": fixture._result(
+                    "apple-1",
+                    "delivery",
+                    {"changed_files": ["Fixture.swift"]},
+                    invocation_id="apple-1-invalid-invocation",
+                ),
+            }
+            invalid_results["apple-1"]["request_id"] = "tampered"
+            python_invalid_ledger = root / "python-invalid.jsonl"
+            rust_invalid_ledger = root / "rust-invalid.jsonl"
+            with self.assertRaises(ContractError):
+                RecordedAdapterExecutor(
+                    invalid_results,
+                    context=fixture.context,
+                ).run(fixture.plan, ledger_path=python_invalid_ledger)
+            rejected = native(
+                invalid_results,
+                fixture.context,
+                ledger=rust_invalid_ledger,
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(rejected.stdout, "")
+            python_replayed = RunLedger.replay(
+                python_invalid_ledger,
+                fixture.plan["fingerprint"],
+            ).value
+            rust_replayed = RunLedger.replay(
+                rust_invalid_ledger,
+                fixture.plan["fingerprint"],
+            ).value
+            self.assertEqual(
+                _normalize_runtime_ledger(rust_replayed),
+                _normalize_runtime_ledger(python_replayed),
+            )
+            invalid_attempt = next(
+                item
+                for item in rust_replayed["node_attempts"]
+                if item["node_id"] == "apple-1"
+            )
+            self.assertFalse(
+                any(
+                    item["attempt_id"] == invalid_attempt["attempt_id"]
+                    for item in rust_replayed["resource_events"]
+                )
+            )
+
+            corrected_results = complete_results(suffix="corrected")
+            expected_recovered = RecordedAdapterExecutor(
+                corrected_results,
+                context=fixture.context,
+            ).run(
+                fixture.plan,
+                ledger_path=python_invalid_ledger,
+                resume=True,
+            )
+            actual_recovered = native(
+                corrected_results,
+                fixture.context,
+                ledger=rust_invalid_ledger,
+                resume=True,
+            )
+            self.assertEqual(
+                actual_recovered.returncode,
+                0,
+                actual_recovered.stderr,
+            )
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(actual_recovered.stdout)),
+                _normalize_runtime_ledger(expected_recovered),
+            )
 
     def test_fake_runtime_semantics_resume_and_lock_match_python(self) -> None:
         registry = ManifestRegistry.from_directory(ROOT / "platforms")
