@@ -313,7 +313,10 @@ fn contract_path_for_directory(requested: &Path, canonical: &Path, expected: &Di
     let Ok(candidate_identity) = candidate_directory.dir_metadata() else {
         return canonical.to_path_buf();
     };
-    if same_object_cap(expected, &candidate_identity) {
+    let Ok(expected_identity) = expected.dir_metadata() else {
+        return canonical.to_path_buf();
+    };
+    if same_object_cap(&expected_identity, &candidate_identity) {
         candidate
     } else {
         canonical.to_path_buf()
