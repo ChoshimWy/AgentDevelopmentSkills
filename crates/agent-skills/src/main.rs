@@ -34,6 +34,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const CLI_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+const MAX_NATIVE_LAUNCHER_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -1741,14 +1742,14 @@ fn read_frozen_executable(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Er
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
         || metadata.len() == 0
-        || metadata.len() > MAX_CONTRACT_JSON_BYTES as u64
+        || metadata.len() > MAX_NATIVE_LAUNCHER_BYTES
     {
         return Err("native session launcher is missing, empty, or exceeds its size limit".into());
     }
     let expected = usize::try_from(metadata.len())
         .map_err(|_| "native session launcher size cannot be represented")?;
     let mut bytes = Vec::with_capacity(expected);
-    file.take((MAX_CONTRACT_JSON_BYTES + 1) as u64)
+    file.take(MAX_NATIVE_LAUNCHER_BYTES + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() != expected {
         return Err("native session launcher changed while it was being read".into());
