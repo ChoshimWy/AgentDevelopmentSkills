@@ -547,6 +547,7 @@ fn make_owned_tree_removable(directory: &Dir) -> Result<(), LifecycleError> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn make_owned_tree_removable(_directory: &Dir) -> Result<(), LifecycleError> {
     Ok(())
 }

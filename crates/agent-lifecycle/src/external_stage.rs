@@ -51,11 +51,8 @@ enum EntryKind {
         length: u64,
         sha256: String,
     },
+    #[cfg(not(windows))]
     Symlink {
-        target: PathBuf,
-    },
-    #[cfg(windows)]
-    SymlinkDirectory {
         target: PathBuf,
     },
 }
@@ -254,12 +251,21 @@ fn scan_directory(
                 path,
             });
         } else if file_type.is_symlink() {
-            let target = stable_link_target(directory, &name, "external .system symlink")?;
-            entries.push(TreeEntry {
-                kind: symlink_kind(file_type, target),
-                mode: None,
-                path,
-            });
+            #[cfg(windows)]
+            {
+                return invalid(
+                    "external .system symlinks are unsupported on Windows without following them",
+                );
+            }
+            #[cfg(not(windows))]
+            {
+                let target = stable_link_target(directory, &name, "external .system symlink")?;
+                entries.push(TreeEntry {
+                    kind: EntryKind::Symlink { target },
+                    mode: None,
+                    path,
+                });
+            }
         } else {
             return invalid("external .system tree contains an unsupported filesystem object");
         }
@@ -321,14 +327,10 @@ fn copy_system_skills(
                 *length,
                 sha256,
             )?,
+            #[cfg(not(windows))]
             EntryKind::Symlink { target } => {
-                require_source_link(&source_parent, name, target, false)?;
-                create_symlink(&destination_parent, name, target, false)?;
-            }
-            #[cfg(windows)]
-            EntryKind::SymlinkDirectory { target } => {
-                require_source_link(&source_parent, name, target, true)?;
-                create_symlink(&destination_parent, name, target, true)?;
+                require_source_link(&source_parent, name, target)?;
+                create_symlink(&destination_parent, name, target)?;
             }
         }
     }
@@ -719,6 +721,7 @@ fn write_independent_file(
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn stable_link_target(parent: &Dir, name: &OsStr, label: &str) -> Result<PathBuf, LifecycleError> {
     let before = parent.symlink_metadata(name)?;
     if !before.file_type().is_symlink() {
@@ -737,41 +740,20 @@ fn stable_link_target(parent: &Dir, name: &OsStr, label: &str) -> Result<PathBuf
     Ok(target)
 }
 
-fn require_source_link(
-    parent: &Dir,
-    name: &OsStr,
-    expected: &Path,
-    directory: bool,
-) -> Result<(), LifecycleError> {
+#[cfg(not(windows))]
+fn require_source_link(parent: &Dir, name: &OsStr, expected: &Path) -> Result<(), LifecycleError> {
     let metadata = parent.symlink_metadata(name)?;
     if !metadata.file_type().is_symlink()
         || stable_link_target(parent, name, "external .system symlink")? != expected
-        || symlink_directory_kind(metadata.file_type()).is_some_and(|kind| kind != directory)
     {
         return invalid("external .system symlink changed before copying");
     }
     Ok(())
 }
 
-fn create_symlink(
-    parent: &Dir,
-    name: &OsStr,
-    target: &Path,
-    directory: bool,
-) -> Result<(), LifecycleError> {
-    #[cfg(not(windows))]
-    {
-        let _ = directory;
-        parent.symlink_contents(target, name)?;
-    }
-    #[cfg(windows)]
-    {
-        if directory {
-            parent.symlink_dir(target, name)?;
-        } else {
-            parent.symlink_file(target, name)?;
-        }
-    }
+#[cfg(not(windows))]
+fn create_symlink(parent: &Dir, name: &OsStr, target: &Path) -> Result<(), LifecycleError> {
+    parent.symlink_contents(target, name)?;
     if stable_link_target(parent, name, "staged .system symlink")? != target {
         return invalid("staged .system symlink differs after creation");
     }
@@ -794,6 +776,7 @@ fn preserved_mode(metadata: &cap_std::fs::Metadata) -> Option<u32> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn preserved_mode(_metadata: &cap_std::fs::Metadata) -> Option<u32> {
     None
 }
@@ -812,6 +795,7 @@ fn require_mode(
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn require_mode(
     _metadata: &cap_std::fs::Metadata,
     _expected: Option<u32>,
@@ -830,6 +814,7 @@ fn set_file_mode(file: &cap_std::fs::File, mode: Option<u32>) -> Result<(), Life
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn set_file_mode(_file: &cap_std::fs::File, _mode: Option<u32>) -> Result<(), LifecycleError> {
     Ok(())
 }
@@ -844,6 +829,7 @@ fn set_directory_mode(directory: &Dir, mode: Option<u32>) -> Result<(), Lifecycl
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn set_directory_mode(_directory: &Dir, _mode: Option<u32>) -> Result<(), LifecycleError> {
     Ok(())
 }
@@ -855,40 +841,9 @@ fn working_directory_mode() -> Option<u32> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn working_directory_mode() -> Option<u32> {
     None
-}
-
-#[cfg(not(windows))]
-fn symlink_kind(_file_type: cap_std::fs::FileType, target: PathBuf) -> EntryKind {
-    EntryKind::Symlink { target }
-}
-
-#[cfg(windows)]
-fn symlink_kind(file_type: cap_std::fs::FileType, target: PathBuf) -> EntryKind {
-    use cap_std::fs::FileTypeExt as _;
-    if file_type.is_symlink_dir() {
-        EntryKind::SymlinkDirectory { target }
-    } else {
-        EntryKind::Symlink { target }
-    }
-}
-
-#[cfg(not(windows))]
-fn symlink_directory_kind(_file_type: cap_std::fs::FileType) -> Option<bool> {
-    None
-}
-
-#[cfg(windows)]
-fn symlink_directory_kind(file_type: cap_std::fs::FileType) -> Option<bool> {
-    use cap_std::fs::FileTypeExt as _;
-    if file_type.is_symlink_dir() {
-        Some(true)
-    } else if file_type.is_symlink_file() {
-        Some(false)
-    } else {
-        None
-    }
 }
 
 #[cfg(unix)]

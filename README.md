@@ -222,8 +222,10 @@ canonical bytes, Manifest-derived semantics, Bindings, permissions, and both
 identity anchors. The workspace now also freezes and copies external
 `skills/.system` trees without following symlinks, preserves the exact validated
 Activation Lock, and revalidates both the target and staged external state
-around the complete pre-swap gate. Rollback-point assembly, managed-root swaps,
-and production command routing remain later lifecycle slices.
+around the complete pre-swap gate. On Windows, `.system` symlink entries
+currently fail closed because stable `cap-std` cannot recover the file-vs-dir
+link kind without following the link. Rollback-point assembly, managed-root
+swaps, and production command routing remain later lifecycle slices.
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
 holds directory capabilities and opens contract files without following

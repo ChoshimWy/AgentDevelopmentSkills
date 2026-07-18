@@ -122,8 +122,10 @@ contains:
   drift, Binding/permission drift, and plan/Lock identity drift. External
   staging now freezes and copies `skills/.system` without following symlinks,
   preserves exact validated Activation Lock bytes, and revalidates target and
-  staged snapshots around the complete gate. Rollback-point assembly,
-  managed-root swaps, and production command routing are not implemented yet.
+  staged snapshots around the complete gate. Windows `.system` symlink entries
+  fail closed until stable capability APIs can distinguish file and directory
+  links without following them. Rollback-point assembly, managed-root swaps,
+  and production command routing are not implemented yet.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit
