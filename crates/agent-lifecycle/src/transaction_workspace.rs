@@ -973,6 +973,7 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[allow(clippy::permissions_set_readonly_false)]
     #[test]
     fn readonly_cleanup_rejects_external_hard_link_alias() {
         let root = temporary_path("readonly-hard-link");

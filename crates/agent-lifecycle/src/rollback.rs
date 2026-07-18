@@ -339,8 +339,9 @@ fn validate_external_state(root: &Dir) -> Result<ExternalState, LifecycleError> 
     {
         return invalid("rollback point external snapshot contains unknown files");
     }
+    let expected_directory_mode = rollback_external_directory_mode();
     if snapshot.directories.iter().any(|entry| {
-        entry.get("mode").and_then(Value::as_u64) != Some(MANAGED_DIRECTORY_MODE.into())
+        entry.get("mode").and_then(Value::as_u64) != Some(expected_directory_mode.into())
     }) {
         return invalid("rollback point external snapshot directory mode is invalid");
     }
@@ -764,6 +765,16 @@ fn snapshot_mode(metadata: &cap_std::fs::Metadata) -> u32 {
 #[cfg(not(any(unix, windows)))]
 fn snapshot_mode(metadata: &cap_std::fs::Metadata) -> u32 {
     if metadata.is_dir() { 0o777 } else { 0o666 }
+}
+
+#[cfg(unix)]
+const fn rollback_external_directory_mode() -> u32 {
+    MANAGED_DIRECTORY_MODE
+}
+
+#[cfg(not(unix))]
+const fn rollback_external_directory_mode() -> u32 {
+    0o777
 }
 
 fn open_relative_parent(

@@ -1261,13 +1261,11 @@ mod tests {
             workspace
                 .stage_external_state(&fixture.token)
                 .expect("stage empty external state");
-            std::fs::hard_link(
-                workspace.stage_path().join(relative),
-                fixture
-                    .root
-                    .join(format!("alias-{}", relative.replace(['/', '.'], "-"))),
-            )
-            .expect("create post-stage hard-link alias");
+            let alias = fixture
+                .root
+                .join(format!("alias-{}", relative.replace(['/', '.'], "-")));
+            std::fs::hard_link(workspace.stage_path().join(relative), &alias)
+                .expect("create post-stage hard-link alias");
             let error = workspace
                 .verify_staged_install(&fixture.token)
                 .expect_err("managed file alias must fail");
@@ -1275,6 +1273,7 @@ mod tests {
                 error.to_string().contains("has an unsafe hard-link alias"),
                 "{relative}: {error}"
             );
+            std::fs::remove_file(alias).expect("remove post-stage hard-link alias");
             drop(source);
             workspace.cleanup().expect("cleanup workspace");
         }
@@ -1377,11 +1376,9 @@ mod tests {
         workspace
             .stage_external_state(&fixture.token)
             .expect("stage external state");
-        std::fs::hard_link(
-            workspace.stage_path().join("skills/.system/state"),
-            fixture.root.join("external-state-alias"),
-        )
-        .expect("create staged external hard-link alias");
+        let alias = fixture.root.join("external-state-alias");
+        std::fs::hard_link(workspace.stage_path().join("skills/.system/state"), &alias)
+            .expect("create staged external hard-link alias");
         let error = workspace
             .verify_staged_install(&fixture.token)
             .expect_err("staged external alias must fail");
@@ -1389,6 +1386,7 @@ mod tests {
             error.to_string().contains("unsafe hard-link alias"),
             "{error}"
         );
+        std::fs::remove_file(alias).expect("remove staged external hard-link alias");
         drop(source);
         workspace.cleanup().expect("cleanup workspace");
     }
@@ -1690,14 +1688,12 @@ mod tests {
             workspace
                 .stage_rollback_point(&fixture.token, &external_paths)
                 .expect("stage rollback point");
-            std::fs::hard_link(
-                workspace.stage_path().join(relative),
-                fixture.root.join(format!(
-                    "rollback-alias-{}",
-                    relative.replace(['/', '.'], "-")
-                )),
-            )
-            .expect("create rollback hard-link alias");
+            let alias = fixture.root.join(format!(
+                "rollback-alias-{}",
+                relative.replace(['/', '.'], "-")
+            ));
+            std::fs::hard_link(workspace.stage_path().join(relative), &alias)
+                .expect("create rollback hard-link alias");
             let error = workspace
                 .verify_staged_install(&fixture.token)
                 .expect_err("rollback hard-link alias must fail");
@@ -1705,12 +1701,14 @@ mod tests {
                 error.to_string().contains("unsafe hard-link alias"),
                 "{relative}: {error}"
             );
+            std::fs::remove_file(alias).expect("remove rollback hard-link alias");
             drop(source);
             workspace.cleanup().expect("cleanup workspace");
         }
     }
 
     #[cfg(windows)]
+    #[allow(clippy::permissions_set_readonly_false)]
     #[test]
     fn windows_readonly_external_snapshot_is_preserved_and_cleaned() {
         let fixture = Fixture::new();
@@ -1732,32 +1730,34 @@ mod tests {
         workspace
             .stage_rollback_point(&fixture.token, &paths)
             .expect("stage readonly rollback point");
-        let staged = workspace
+        let staged_file = workspace
             .stage_path()
             .join(".agent-skills/rollback-point/external-files/config/state");
         assert!(
-            std::fs::metadata(&staged)
+            std::fs::metadata(&staged_file)
                 .expect("inspect staged external file")
                 .permissions()
                 .readonly()
         );
-        let state = load_json(
+        let external_state = load_json(
             workspace
                 .stage_path()
                 .join(".agent-skills/rollback-point/external-state.json"),
         )
         .expect("load external state");
         assert_eq!(
-            state.pointer("/entries/0/mode").and_then(Value::as_u64),
+            external_state
+                .pointer("/entries/0/mode")
+                .and_then(Value::as_u64),
             Some(0o444)
         );
         workspace
             .verify_staged_install(&fixture.token)
             .expect("verify readonly rollback point");
-        let stage = workspace.stage_path();
+        let stage_path = workspace.stage_path();
         drop(source);
         workspace.cleanup().expect("cleanup readonly workspace");
-        assert!(!stage.exists());
+        assert!(!stage_path.exists());
         let mut permissions = std::fs::metadata(&external)
             .expect("inspect source external file")
             .permissions();
