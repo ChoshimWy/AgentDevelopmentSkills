@@ -264,6 +264,8 @@ def build_release_bundle(
         _write_zip(root, artifact_path, bundle_root=bundle_root, clean_source=not dirty)
         python_artifacts = _load_python_artifact_module().build_python_artifacts(root, stage)
         native_artifacts = []
+        native_index = None
+        native_index_bytes = None
         if native_artifacts_dir is not None:
             native_root = Path(os.path.abspath(native_artifacts_dir.expanduser()))
             native = _load_native_artifact_module()
@@ -288,12 +290,12 @@ def build_release_bundle(
                 raise ReleaseBuildError(
                     "native artifact Cargo.lock differs from the release source"
                 )
-            index_bytes = (native_root / "native-artifacts.json").read_bytes()
-            if index_bytes != native.canonical_json(native_index):
+            native_index_bytes = (native_root / "native-artifacts.json").read_bytes()
+            if native_index_bytes != native.canonical_json(native_index):
                 raise ReleaseBuildError(
                     "native artifact index changed after validation"
                 )
-            (stage / "native-artifacts.json").write_bytes(index_bytes)
+            (stage / "native-artifacts.json").write_bytes(native_index_bytes)
             for record in native_index["artifacts"]:
                 source = native_root / record["filename"]
                 destination = stage / record["filename"]
@@ -416,6 +418,21 @@ def build_release_bundle(
             },
             "version": version,
         }
+        if native_index is not None and native_index_bytes is not None:
+            manifest["default_engine"] = "rust"
+            manifest["native_artifacts"] = [
+                {
+                    "arch": record["arch"],
+                    "filename": record["filename"],
+                    "os": record["os"],
+                    "sha256": record["sha256"],
+                    "size": record["size"],
+                    "target": record["target"],
+                }
+                for record in native_index["artifacts"]
+            ]
+            manifest["native_index_sha256"] = _sha256(native_index_bytes)
+            manifest["schema_version"] = "2.0"
         manifest_bytes = _canonical_json(manifest)
         (stage / "release-manifest.json").write_bytes(manifest_bytes)
         bootstrap = _load_bootstrap_module()

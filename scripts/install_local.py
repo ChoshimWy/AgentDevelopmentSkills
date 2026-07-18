@@ -812,6 +812,13 @@ def _empty_activation_plan() -> dict[str, Any]:
     }
 
 
+def _install_engine() -> str:
+    value = os.environ.get("AGENT_SKILLS_INSTALL_ENGINE_SELECTED", "python-source")
+    if value not in {"python-fallback", "python-source"}:
+        raise ContractError("Python installer engine provenance is invalid")
+    return value
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -868,6 +875,7 @@ def run(args: argparse.Namespace | None = None) -> dict[str, Any]:
             # Managed/fresh targets use the same fail-closed preflight as a real install.
             install_bundle(bundle, target, dry_run=True)
         return {
+            "engine": _install_engine(),
             "schema_version": "1.0",
             "status": "planned",
             "target_root": str(target),
@@ -910,6 +918,7 @@ def run(args: argparse.Namespace | None = None) -> dict[str, Any]:
             raise
 
     return {
+        "engine": _install_engine(),
         "schema_version": "1.0",
         "status": "installed",
         "target_root": str(target),

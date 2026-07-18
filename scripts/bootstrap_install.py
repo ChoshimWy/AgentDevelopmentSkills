@@ -45,6 +45,14 @@ MAX_ARCHIVE_ENTRIES = 10_000
 USER_AGENT = "agent-development-skills-bootstrap/1.0"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _VERSION = re.compile(r"[0-9]+(?:\.[0-9]+){1,2}")
+_NATIVE_TARGETS = {
+    ("darwin", "aarch64"): "aarch64-apple-darwin",
+    ("darwin", "x86_64"): "x86_64-apple-darwin",
+    ("linux", "aarch64"): "aarch64-unknown-linux-gnu",
+    ("linux", "x86_64"): "x86_64-unknown-linux-gnu",
+    ("windows", "aarch64"): "aarch64-pc-windows-msvc",
+    ("windows", "x86_64"): "x86_64-pc-windows-msvc",
+}
 _WINDOWS_RESERVED_NAMES = {
     "aux",
     "con",
@@ -84,24 +92,24 @@ def parse_release_manifest(data: bytes) -> dict[str, Any]:
         value = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise BootstrapError(f"release manifest is not valid UTF-8 JSON: {error}") from error
-    _exact_object(
-        value,
-        {
-            "asset_base_url",
-            "artifacts",
-            "bootstrap_assets",
-            "channel",
-            "minimum_python",
-            "product",
-            "schema_version",
-            "source",
-            "version",
-        },
-        "release manifest",
-    )
+    schema_version = value.get("schema_version") if isinstance(value, dict) else None
+    fields = {
+        "asset_base_url",
+        "artifacts",
+        "bootstrap_assets",
+        "channel",
+        "minimum_python",
+        "product",
+        "schema_version",
+        "source",
+        "version",
+    }
+    if schema_version == "2.0":
+        fields |= {"default_engine", "native_artifacts", "native_index_sha256"}
+    _exact_object(value, fields, "release manifest")
     if _canonical_json(value) != data:
         raise BootstrapError("release manifest must use canonical JSON encoding")
-    if value["schema_version"] != "1.0":
+    if value["schema_version"] not in {"1.0", "2.0"}:
         raise BootstrapError("unsupported release manifest schema_version")
     if value["product"] != "agent-development-skills":
         raise BootstrapError("release manifest product is invalid")
@@ -199,6 +207,52 @@ def parse_release_manifest(data: bytes) -> dict[str, Any]:
         asset_filenames.append(asset["filename"])
     if asset_filenames != sorted(set(asset_filenames)):
         raise BootstrapError("release manifest bootstrap asset filenames must be sorted and unique")
+    if value["schema_version"] == "2.0":
+        if value["default_engine"] != "rust":
+            raise BootstrapError("release manifest default engine is invalid")
+        if (
+            not isinstance(value["native_index_sha256"], str)
+            or _SHA256.fullmatch(value["native_index_sha256"]) is None
+        ):
+            raise BootstrapError("release manifest native index sha256 is invalid")
+        native_artifacts = value["native_artifacts"]
+        if not isinstance(native_artifacts, list) or len(native_artifacts) != len(_NATIVE_TARGETS):
+            raise BootstrapError("release manifest native artifact matrix is incomplete")
+        targets: list[str] = []
+        filenames: list[str] = []
+        for index, raw in enumerate(native_artifacts):
+            native = _exact_object(
+                raw,
+                {"arch", "filename", "os", "sha256", "size", "target"},
+                f"release manifest native_artifacts[{index}]",
+            )
+            target = native["target"]
+            filename = native["filename"]
+            expected_filename = (
+                f"agent-skills-{value['version']}-{target}"
+                + (".exe" if "-windows-" in target else "")
+            )
+            if (
+                not isinstance(target, str)
+                or target not in _NATIVE_TARGETS.values()
+                or not isinstance(native["os"], str)
+                or not isinstance(native["arch"], str)
+                or _NATIVE_TARGETS.get((native["os"], native["arch"])) != target
+                or not isinstance(filename, str)
+                or filename != Path(filename).name
+                or filename != expected_filename
+                or type(native["size"]) is not int
+                or not 0 < native["size"] <= MAX_ARTIFACT_BYTES
+                or not isinstance(native["sha256"], str)
+                or _SHA256.fullmatch(native["sha256"]) is None
+            ):
+                raise BootstrapError("release manifest native artifact identity is invalid")
+            targets.append(target)
+            filenames.append(filename)
+        if targets != sorted(set(_NATIVE_TARGETS.values())):
+            raise BootstrapError("release manifest native artifact targets must be sorted and complete")
+        if filenames != sorted(set(filenames)):
+            raise BootstrapError("release manifest native artifact filenames must be sorted and unique")
     return value
 
 
@@ -238,12 +292,54 @@ def _host_os() -> str:
     return name
 
 
+def _host_arch() -> str:
+    return _normalize_host_arch(platform.machine())
+
+
+def _normalize_host_arch(value: str) -> str:
+    value = value.lower()
+    aliases = {
+        "amd64": "x86_64",
+        "arm64": "aarch64",
+        "x64": "x86_64",
+    }
+    value = aliases.get(value, value)
+    if value not in {"aarch64", "x86_64"}:
+        raise BootstrapError(f"unsupported host architecture: {value or 'unknown'}")
+    return value
+
+
 def select_artifact(manifest: dict[str, Any], *, host_os: Optional[str] = None) -> dict[str, Any]:
     selected_host = host_os or _host_os()
     matches = [item for item in manifest["artifacts"] if selected_host in item["host_os"]]
     if len(matches) != 1:
         raise BootstrapError(
             f"release manifest must provide exactly one artifact for host_os={selected_host}; found {len(matches)}"
+        )
+    return matches[0]
+
+
+def select_native_artifact(
+    manifest: dict[str, Any],
+    *,
+    host_os: Optional[str] = None,
+    host_arch: Optional[str] = None,
+) -> dict[str, Any]:
+    if manifest.get("schema_version") != "2.0":
+        raise BootstrapError("release manifest does not provide a native artifact matrix")
+    selected_os = host_os or _host_os()
+    selected_arch = _normalize_host_arch(host_arch) if host_arch else _host_arch()
+    target = _NATIVE_TARGETS.get((selected_os, selected_arch))
+    if target is None:
+        raise BootstrapError(
+            f"release has no native target for host_os={selected_os}, host_arch={selected_arch}"
+        )
+    matches = [
+        item for item in manifest["native_artifacts"] if item.get("target") == target
+    ]
+    if len(matches) != 1:
+        raise BootstrapError(
+            f"release manifest must provide exactly one native artifact for target={target}"
         )
     return matches[0]
 
@@ -351,6 +447,89 @@ def extract_verified_artifact(data: bytes, artifact: dict[str, Any], destination
     return entrypoint
 
 
+def _requested_install_engine() -> str:
+    value = os.environ.get("AGENT_SKILLS_INSTALL_ENGINE", "auto").strip().lower()
+    if value not in {"auto", "python", "rust"}:
+        raise BootstrapError(
+            "AGENT_SKILLS_INSTALL_ENGINE must be auto, rust, or python"
+        )
+    return value
+
+
+def _native_install_request(
+    installer_arguments: list[str],
+) -> tuple[Path, list[str], bool] | None:
+    target = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+    platforms: list[str] = []
+    json_output = False
+    index = 0
+    while index < len(installer_arguments):
+        argument = installer_arguments[index]
+        if argument == "--json":
+            json_output = True
+            index += 1
+            continue
+        if argument in {"--target-root", "--platform"}:
+            if index + 1 >= len(installer_arguments):
+                return None
+            value = installer_arguments[index + 1]
+            if argument == "--target-root":
+                target = Path(value).expanduser()
+            else:
+                platforms.append(value)
+            index += 2
+            continue
+        if argument.startswith("--target-root="):
+            target = Path(argument.split("=", 1)[1]).expanduser()
+            index += 1
+            continue
+        if argument.startswith("--platform="):
+            platforms.append(argument.split("=", 1)[1])
+            index += 1
+            continue
+        return None
+    if (
+        not platforms
+        or "all" in platforms
+        or len(platforms) != len(set(platforms))
+        or not set(platforms) <= {"apple", "desktop"}
+    ):
+        return None
+    target = Path(os.path.abspath(target))
+    if target.is_symlink() or (target.exists() and not target.is_dir()):
+        raise BootstrapError("native install target must be a regular directory path")
+    if any((target / name).exists() or (target / name).is_symlink() for name in (
+        "AGENTS.md",
+        "skills",
+        ".agent-skills",
+    )):
+        return None
+    return target, platforms, json_output
+
+
+def _native_command(
+    source_root: Path,
+    executable: Path,
+    request: tuple[Path, list[str], bool],
+) -> list[str]:
+    target, platforms, json_output = request
+    command = [
+        str(executable),
+        "install",
+        "--source-root",
+        str(source_root),
+        "--target-root",
+        str(target),
+    ]
+    for platform_id in platforms:
+        command.extend(["--platform", platform_id])
+    if "apple" in platforms:
+        command.extend(["--session-launcher", str(executable)])
+    if json_output:
+        command.append("--json")
+    return command
+
+
 def bootstrap_install(
     manifest_url: Optional[str],
     installer_arguments: list[str],
@@ -378,6 +557,17 @@ def bootstrap_install(
             f"Python {platform.python_version()}"
         )
     artifact = select_artifact(manifest)
+    requested_engine = _requested_install_engine()
+    native_request = _native_install_request(installer_arguments)
+    native_artifact = None
+    if requested_engine != "python":
+        if manifest["schema_version"] == "2.0" and native_request is not None:
+            native_artifact = select_native_artifact(manifest)
+        elif requested_engine == "rust":
+            raise BootstrapError(
+                "forced Rust install requires a v2 native release, an explicit fresh "
+                "--platform apple/desktop selection, and no compatibility-only arguments"
+            )
     selected_base_url = artifact_base_url or manifest["asset_base_url"]
     _validate_asset_base_url(selected_base_url, allow_test_file=True)
     artifact_url = _artifact_url(selected_base_url, artifact["filename"])
@@ -388,8 +578,19 @@ def bootstrap_install(
                 "sha256": artifact["sha256"],
                 "url": artifact_url,
             },
+            "engine": "rust" if native_artifact is not None else "python-fallback",
             "host_os": _host_os(),
             "manifest_url": resolved_manifest_url,
+            "native_artifact": (
+                {
+                    "filename": native_artifact["filename"],
+                    "sha256": native_artifact["sha256"],
+                    "target": native_artifact["target"],
+                    "url": _artifact_url(selected_base_url, native_artifact["filename"]),
+                }
+                if native_artifact is not None
+                else None
+            ),
             "status": "planned",
             "version": manifest["version"],
         }))
@@ -397,14 +598,32 @@ def bootstrap_install(
     artifact_bytes = fetch_bytes(artifact_url, maximum=MAX_ARTIFACT_BYTES)
     _verify_artifact(artifact_bytes, artifact)
     with tempfile.TemporaryDirectory(prefix="agent-skills-bootstrap-") as directory:
-        entrypoint = extract_verified_artifact(artifact_bytes, artifact, Path(directory))
+        temporary = Path(directory)
+        entrypoint = extract_verified_artifact(artifact_bytes, artifact, temporary)
         environment = {
             **os.environ,
+            "AGENT_SKILLS_INSTALL_ENGINE_SELECTED": (
+                "rust" if native_artifact is not None else "python-fallback"
+            ),
             "AGENT_SKILLS_RELEASE_SHA256": artifact["sha256"],
             "AGENT_SKILLS_RELEASE_VERSION": manifest["version"],
         }
+        if native_artifact is not None:
+            native_url = _artifact_url(selected_base_url, native_artifact["filename"])
+            native_bytes = fetch_bytes(native_url, maximum=MAX_ARTIFACT_BYTES)
+            _verify_artifact(native_bytes, native_artifact)
+            native_path = temporary / native_artifact["filename"]
+            with native_path.open("xb") as stream:
+                stream.write(native_bytes)
+            if os.name != "nt":
+                native_path.chmod(0o700)
+            if native_request is None:
+                raise BootstrapError("native install request disappeared after engine selection")
+            command = _native_command(entrypoint.parent.parent, native_path, native_request)
+        else:
+            command = [sys.executable, str(entrypoint), *installer_arguments]
         completed = subprocess.run(
-            [sys.executable, str(entrypoint), *installer_arguments],
+            command,
             env=environment,
             check=False,
         )

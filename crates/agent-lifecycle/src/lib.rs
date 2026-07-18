@@ -46,7 +46,9 @@ use doctor_report::validate_doctor_report_v1;
 pub use managed_swap::{PublishedInstall, PublishedUninstall, inspect_uninstall_plan};
 pub use source_bundle::{SourceInstallBundle, compile_source_install_bundle};
 pub use source_install::{SourceInstallSelection, resolve_source_install_selection};
-pub use source_lifecycle::{inspect_source_install, install_source_bundle};
+pub use source_lifecycle::{
+    inspect_source_install, install_source_bundle, install_source_bundle_with_activation,
+};
 pub use source_packages::{SourcePackageSet, snapshot_source_packages};
 pub use staged_install::ValidatedInstallPlan;
 pub use transaction_lock::LifecycleLock;

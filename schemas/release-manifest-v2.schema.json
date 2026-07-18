@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-development-skills.local/schemas/release-manifest-v2.schema.json",
+  "title": "AgentDevelopmentSkills Release Manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "product",
+    "asset_base_url",
+    "version",
+    "channel",
+    "minimum_python",
+    "source",
+    "bootstrap_assets",
+    "artifacts",
+    "default_engine",
+    "native_artifacts",
+    "native_index_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "product": {"const": "agent-development-skills"},
+    "asset_base_url": {"type": "string", "format": "uri", "pattern": "^https://.+/$"},
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$"},
+    "channel": {"enum": ["stable", "beta", "development"]},
+    "minimum_python": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?$"},
+    "default_engine": {"const": "rust"},
+    "native_index_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision", "dirty"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "revision": {"type": "string", "minLength": 1},
+        "dirty": {"type": "boolean"}
+      }
+    },
+    "bootstrap_assets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/file"}
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "filename", "format", "size", "sha256", "host_os", "root", "entrypoint"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "filename": {"type": "string", "minLength": 1, "pattern": "^[^/\\\\:]+$"},
+          "format": {"const": "zip"},
+          "size": {"type": "integer", "minimum": 1, "maximum": 134217728},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "host_os": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"enum": ["darwin", "linux", "windows"]}
+          },
+          "root": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)(?!.*[\\\\:]).+$"},
+          "entrypoint": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)(?!.*[\\\\:]).+$"}
+        }
+      }
+    },
+    "native_artifacts": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["arch", "filename", "os", "sha256", "size", "target"],
+        "properties": {
+          "arch": {"enum": ["aarch64", "x86_64"]},
+          "filename": {"type": "string", "minLength": 1, "pattern": "^[^/\\\\:]+$"},
+          "os": {"enum": ["darwin", "linux", "windows"]},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "size": {"type": "integer", "minimum": 1, "maximum": 134217728},
+          "target": {
+            "enum": [
+              "aarch64-apple-darwin",
+              "aarch64-pc-windows-msvc",
+              "aarch64-unknown-linux-gnu",
+              "x86_64-apple-darwin",
+              "x86_64-pc-windows-msvc",
+              "x86_64-unknown-linux-gnu"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "size", "sha256"],
+      "properties": {
+        "filename": {"type": "string", "minLength": 1, "pattern": "^[^/\\\\:]+$"},
+        "size": {"type": "integer", "minimum": 1, "maximum": 1048576},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

@@ -115,6 +115,75 @@ class DistributionTests(unittest.TestCase):
         }
         (release / "release-manifest.json").write_bytes(bootstrap._canonical_json(manifest))
 
+    @staticmethod
+    def _write_native_fixture_release(release: Path) -> None:
+        release.mkdir()
+        artifact_name = "agent-development-skills-1.0.0.zip"
+        artifact_path = release / artifact_name
+        fallback = b"import json,sys\nprint(json.dumps({'arguments':sys.argv[1:],'engine':'python'}))\n"
+        with zipfile.ZipFile(artifact_path, "w", compression=zipfile.ZIP_STORED) as archive:
+            info = zipfile.ZipInfo(
+                "agent-development-skills-1.0.0/scripts/install_local.py"
+            )
+            info.create_system = 3
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, fallback)
+        artifact_data = artifact_path.read_bytes()
+        native_script = (
+            b"#!/usr/bin/env python3\n"
+            b"import json,sys\n"
+            b"print(json.dumps({'arguments':sys.argv[1:],'engine':'rust-fixture'}))\n"
+        )
+        native_artifacts = []
+        for (host_os, arch), target in sorted(
+            bootstrap._NATIVE_TARGETS.items(), key=lambda item: item[1]
+        ):
+            suffix = ".exe" if host_os == "windows" else ""
+            filename = f"agent-skills-1.0.0-{target}{suffix}"
+            (release / filename).write_bytes(native_script)
+            native_artifacts.append({
+                "arch": arch,
+                "filename": filename,
+                "os": host_os,
+                "sha256": hashlib.sha256(native_script).hexdigest(),
+                "size": len(native_script),
+                "target": target,
+            })
+        manifest = {
+            "asset_base_url": release.as_uri() + "/",
+            "artifacts": [{
+                "entrypoint": "scripts/install_local.py",
+                "filename": artifact_name,
+                "format": "zip",
+                "host_os": ["darwin", "linux", "windows"],
+                "id": "fixture",
+                "root": "agent-development-skills-1.0.0",
+                "sha256": hashlib.sha256(artifact_data).hexdigest(),
+                "size": len(artifact_data),
+            }],
+            "bootstrap_assets": [{
+                "filename": "bootstrap_install.py",
+                "sha256": "1" * 64,
+                "size": 1,
+            }],
+            "channel": "development",
+            "default_engine": "rust",
+            "minimum_python": "3.11",
+            "native_artifacts": native_artifacts,
+            "native_index_sha256": "2" * 64,
+            "product": "agent-development-skills",
+            "schema_version": "2.0",
+            "source": {
+                "dirty": False,
+                "repository": "fixture://local",
+                "revision": "fixture",
+            },
+            "version": "1.0.0",
+        }
+        (release / "release-manifest.json").write_bytes(
+            bootstrap._canonical_json(manifest)
+        )
+
     def run_bootstrap(
         self,
         release: Path,
@@ -217,6 +286,173 @@ class DistributionTests(unittest.TestCase):
             json.loads(help_completed.stdout)["arguments"],
             ["--target-root", str(target), "--help"],
         )
+
+    @unittest.skipIf(os.name == "nt", "POSIX fixture executable uses a shebang")
+    def test_v2_bootstrap_defaults_to_rust_and_python_fallback_is_explicit(self) -> None:
+        release = self.root / "native-fixture-release"
+        self._write_native_fixture_release(release)
+        target = self.root / "native-fixture-target"
+        completed = self.run_bootstrap(
+            release,
+            target,
+            "--platform",
+            "apple",
+            "--json",
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["engine"], "rust-fixture")
+        self.assertEqual(report["arguments"][0], "install")
+        self.assertIn("--source-root", report["arguments"])
+        self.assertIn("--session-launcher", report["arguments"])
+        self.assertEqual(report["arguments"][-1], "--json")
+        launcher_index = report["arguments"].index("--session-launcher")
+        self.assertTrue(
+            Path(report["arguments"][launcher_index + 1]).name.startswith("agent-skills-")
+        )
+
+        fallback = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/bootstrap_install.py"),
+                "--manifest-url",
+                (release / "release-manifest.json").as_uri(),
+                "--artifact-base-url",
+                release.as_uri() + "/",
+                "--target-root",
+                str(target),
+                "--platform",
+                "apple",
+                "--json",
+            ],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "AGENT_SKILLS_ALLOW_FILE_URL": "1",
+                "AGENT_SKILLS_INSTALL_ENGINE": "python",
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(fallback.returncode, 0, fallback.stderr)
+        self.assertEqual(json.loads(fallback.stdout)["engine"], "python")
+
+    def test_v2_manifest_rejects_incomplete_or_mismatched_native_matrix(self) -> None:
+        release = self.root / "native-contract-release"
+        self._write_native_fixture_release(release)
+        manifest = json.loads(
+            (release / "release-manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            bootstrap.select_native_artifact(
+                manifest,
+                host_os="darwin",
+                host_arch="arm64",
+            )["target"],
+            "aarch64-apple-darwin",
+        )
+        manifest["native_artifacts"].pop()
+        with mock.patch.dict(
+            os.environ, {"AGENT_SKILLS_ALLOW_FILE_URL": "1"}
+        ), self.assertRaisesRegex(bootstrap.BootstrapError, "matrix is incomplete"):
+            bootstrap.parse_release_manifest(bootstrap._canonical_json(manifest))
+
+    def test_forced_rust_fails_closed_when_the_native_route_is_ineligible(self) -> None:
+        target = self.root / "forced-rust-v1-target"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/bootstrap_install.py"),
+                "--manifest-url",
+                (self.fixture_release / "release-manifest.json").as_uri(),
+                "--artifact-base-url",
+                self.fixture_release.as_uri() + "/",
+                "--target-root",
+                str(target),
+                "--platform",
+                "apple",
+            ],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "AGENT_SKILLS_ALLOW_FILE_URL": "1",
+                "AGENT_SKILLS_INSTALL_ENGINE": "rust",
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("forced Rust install requires a v2 native release", completed.stderr)
+        self.assertFalse(target.exists())
+
+        release = self.root / "forced-rust-existing-release"
+        self._write_native_fixture_release(release)
+        existing_target = self.root / "forced-rust-existing-target"
+        existing_target.mkdir()
+        marker = existing_target / "AGENTS.md"
+        marker.write_text("unmanaged\n", encoding="utf-8")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/bootstrap_install.py"),
+                "--manifest-url",
+                (release / "release-manifest.json").as_uri(),
+                "--artifact-base-url",
+                release.as_uri() + "/",
+                "--target-root",
+                str(existing_target),
+                "--platform",
+                "apple",
+            ],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "AGENT_SKILLS_ALLOW_FILE_URL": "1",
+                "AGENT_SKILLS_INSTALL_ENGINE": "rust",
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "unmanaged\n")
+
+    @unittest.skipIf(os.name == "nt", "POSIX fixture executable uses a shebang")
+    def test_native_tamper_is_rejected_before_target_write(self) -> None:
+        release = self.root / "native-tamper-release"
+        self._write_native_fixture_release(release)
+        manifest = json.loads(
+            (release / "release-manifest.json").read_text(encoding="utf-8")
+        )
+        selected = bootstrap.select_native_artifact(manifest)
+        binary_path = release / selected["filename"]
+        binary = binary_path.read_bytes()
+        binary_path.write_bytes(bytes([binary[0] ^ 1]) + binary[1:])
+        target = self.root / "native-tamper-target"
+        completed = self.run_bootstrap(release, target, "--platform", "apple")
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("sha256 does not match manifest", completed.stderr)
+        self.assertFalse(target.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX fixture executable uses a shebang")
+    def test_selected_native_failure_never_downgrades_to_python(self) -> None:
+        release = self.root / "native-no-downgrade-release"
+        self._write_native_fixture_release(release)
+        manifest_path = release / "release-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        selected = bootstrap.select_native_artifact(manifest)
+        failing = b"#!/bin/sh\nexit 37\n"
+        (release / selected["filename"]).write_bytes(failing)
+        selected["sha256"] = hashlib.sha256(failing).hexdigest()
+        selected["size"] = len(failing)
+        manifest_path.write_bytes(bootstrap._canonical_json(manifest))
+        target = self.root / "native-no-downgrade-target"
+        completed = self.run_bootstrap(release, target, "--platform", "apple")
+        self.assertEqual(completed.returncode, 37)
+        self.assertNotIn('"engine": "python"', completed.stdout)
+        self.assertFalse(target.exists())
 
     @unittest.skipIf(os.name == "nt", "production manifest intentionally excludes Windows")
     def test_built_release_bundle_runs_real_installer_dry_run(self) -> None:

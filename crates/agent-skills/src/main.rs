@@ -11,8 +11,8 @@ use agent_engine::{
 use agent_lifecycle::{
     LifecycleError, LifecycleWorkspace, compile_source_install_bundle, inspect_doctor_baseline,
     inspect_doctor_report_v1, inspect_source_install, inspect_uninstall_plan,
-    install_source_bundle, render_codex_config, resolve_source_install_selection,
-    snapshot_source_packages,
+    install_source_bundle, install_source_bundle_with_activation, render_codex_config,
+    resolve_source_install_selection, snapshot_source_packages,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
@@ -46,8 +46,99 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "agent-session",
+    version,
+    about = "Native Worktree Session lifecycle CLI"
+)]
+struct AgentSessionCli {
+    #[command(subcommand)]
+    command: AgentSessionCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentSessionCommand {
+    /// Create an isolated Worktree from a stable Commit.
+    Create {
+        name: String,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long)]
+        project_id: String,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long)]
+        base_source: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        worktree_root: Option<PathBuf>,
+        #[arg(long = "platform")]
+        platforms: Vec<String>,
+        #[arg(long)]
+        platform_manifest_root: Option<PathBuf>,
+    },
+    /// List registered Worktree Sessions.
+    List {
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+    },
+    /// Read or refresh one Worktree Session.
+    Inspect {
+        session_id: String,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Refresh source identity without writing Registry state.
+    Fingerprint {
+        session_id: String,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+    },
+    /// Freeze existing clean HEAD Commits without staging or committing.
+    Checkpoint {
+        session_id: String,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+    },
+    /// Validate Adapter/Ledger evidence against a committed Session.
+    Gate {
+        session_id: String,
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        #[arg(long = "pair", required = true)]
+        pairs: Vec<PathBuf>,
+        #[arg(long)]
+        ledger: PathBuf,
+        #[arg(long)]
+        artifact_root: PathBuf,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Execute the fresh-only production-shaped native source installer.
+    Install {
+        #[arg(long)]
+        source_root: PathBuf,
+        #[arg(long)]
+        target_root: PathBuf,
+        #[arg(long = "platform", required = true)]
+        platforms: Vec<String>,
+        #[arg(long = "discipline")]
+        disciplines: Vec<String>,
+        #[arg(long = "runtime-config")]
+        runtime_configs: Vec<String>,
+        #[arg(long)]
+        session_launcher: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Emit the canonical JSON representation of an existing JSON artifact.
     Canonicalize { artifact: PathBuf },
     /// Emit the canonical SHA-256 identity of an existing JSON artifact.
@@ -470,9 +561,245 @@ enum Command {
     },
 }
 
+fn invoked_as_agent_session() -> bool {
+    std::env::args_os()
+        .next()
+        .as_deref()
+        .and_then(|executable| Path::new(executable).file_stem())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("agent-session"))
+}
+
+fn installed_manifest_root() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let target = executable.parent()?.parent()?;
+    let root = target.join(".agent-skills/packages");
+    let metadata = std::fs::symlink_metadata(&root).ok()?;
+    (!metadata.file_type().is_symlink() && metadata.is_dir()).then_some(root)
+}
+
+fn utc_timestamp() -> Result<String, Box<dyn std::error::Error>> {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let days = i64::try_from(seconds / 86_400)?;
+    let day_seconds = seconds % 86_400;
+    let hour = day_seconds / 3_600;
+    let minute = day_seconds % 3_600 / 60;
+    let second = day_seconds % 60;
+
+    // Proleptic Gregorian conversion adapted from the public-domain
+    // civil_from_days algorithm by Howard Hinnant.
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
+}
+
+fn run_agent_session() -> Result<i32, Box<dyn std::error::Error>> {
+    match run_agent_session_inner(AgentSessionCli::parse()) {
+        Ok(value) => {
+            std::io::stdout().write_all(&canonical_json(&value)?)?;
+            Ok(0)
+        }
+        Err(error) => {
+            std::io::stderr().write_all(&canonical_json(&json!({
+                "error": error.to_string(),
+                "schema_version": "1.0",
+                "status": "blocked",
+            }))?)?;
+            Ok(2)
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_agent_session_inner(cli: AgentSessionCli) -> Result<Value, Box<dyn std::error::Error>> {
+    match cli.command {
+        AgentSessionCommand::Create {
+            name,
+            repository,
+            project_id,
+            session_id,
+            base,
+            base_source,
+            branch,
+            worktree_root,
+            platforms,
+            platform_manifest_root,
+        } => {
+            let manifest_root = platform_manifest_root.or_else(installed_manifest_root);
+            let selection =
+                compile_session_manifest_selection(manifest_root.as_deref(), &platforms)?;
+            let session_id = session_id.unwrap_or_else(|| name.clone());
+            registry_assert_available(&repository, &session_id)?;
+            let (record, notice) = create_session_worktree(
+                &repository,
+                &name,
+                "primary",
+                base.as_deref(),
+                base_source.as_deref(),
+                worktree_root.as_deref(),
+                branch.as_deref(),
+            )?;
+            let registration = (|| -> Result<Value, agent_runtime::RuntimeError> {
+                let input = json!({
+                    "capability_closure": selection["capability_closure"],
+                    "created_at": utc_timestamp().map_err(|error| {
+                        agent_runtime::RuntimeError::Contract(error.to_string())
+                    })?,
+                    "dependencies": [],
+                    "platform_contexts": selection["platform_contexts"],
+                    "project_id": project_id,
+                    "repositories": [record.clone()],
+                    "selected_platforms": selection["selected_platforms"],
+                    "session_id": session_id,
+                });
+                let context = new_session_context(&input)?;
+                registry_create_active(&repository, &context)
+            })();
+            if let Err(error) = registration {
+                if let Err(cleanup_error) = remove_created_session_worktree(&record, &repository) {
+                    return Err(format!(
+                        "session registration failed ({error}); exact Worktree compensation was blocked ({cleanup_error})"
+                    )
+                    .into());
+                }
+                return Err(error.into());
+            }
+            Ok(json!({
+                "notice": notice,
+                "operation": "create",
+                "schema_version": "1.0",
+                "session": registration?,
+            }))
+        }
+        AgentSessionCommand::List { repository } => Ok(json!({
+            "schema_version": "1.0",
+            "sessions": registry_list(&repository)?,
+        })),
+        AgentSessionCommand::Inspect {
+            session_id,
+            repository,
+            refresh,
+        } => {
+            let mut context = registry_load(&repository, &session_id)?;
+            if refresh {
+                refresh_session_source_identity(&mut context)?;
+                validate_worktree_session_context(&context)?;
+            }
+            Ok(context)
+        }
+        AgentSessionCommand::Fingerprint {
+            session_id,
+            repository,
+        } => {
+            let mut context = registry_load(&repository, &session_id)?;
+            refresh_session_source_identity(&mut context)?;
+            validate_worktree_session_context(&context)?;
+            Ok(context)
+        }
+        AgentSessionCommand::Checkpoint {
+            session_id,
+            repository,
+        } => Ok(json!({
+            "notice": {"commits_created": false, "staging_changed": false},
+            "operation": "checkpoint",
+            "schema_version": "1.0",
+            "session": registry_checkpoint(&repository, &session_id)?,
+        })),
+        AgentSessionCommand::Gate {
+            session_id,
+            repository,
+            pairs,
+            ledger,
+            artifact_root,
+        } => {
+            let pairs = pairs
+                .into_iter()
+                .map(load_json)
+                .collect::<Result<Vec<_>, _>>()?;
+            let ledger = load_json(ledger)?;
+            Ok(registry_attach_and_gate(
+                &repository,
+                &session_id,
+                &Value::Array(pairs),
+                &ledger,
+                &artifact_root,
+            )?)
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn run() -> Result<i32, Box<dyn std::error::Error>> {
+    if invoked_as_agent_session() {
+        return run_agent_session();
+    }
     match Cli::parse().command {
+        Command::Install {
+            source_root,
+            target_root,
+            platforms,
+            disciplines,
+            mut runtime_configs,
+            session_launcher,
+            json,
+        } => {
+            if platforms.iter().any(|platform| platform == "apple")
+                && !runtime_configs.iter().any(|runtime| runtime == "codex")
+            {
+                runtime_configs.push("codex".to_owned());
+            }
+            runtime_configs.sort();
+            runtime_configs.dedup();
+            let selection = resolve_source_install_selection(
+                source_root.join("platforms"),
+                &platforms,
+                &disciplines,
+                &runtime_configs,
+                false,
+            )?;
+            let packages = snapshot_source_packages(&selection)?;
+            let bundle = compile_source_install_bundle(
+                &selection,
+                &packages,
+                source_root.join("schemas"),
+                None,
+            )?;
+            let launcher = if platforms.iter().any(|platform| platform == "apple") {
+                let path = session_launcher
+                    .as_deref()
+                    .ok_or("native Apple source install requires --session-launcher")?;
+                Some(read_frozen_executable(path)?)
+            } else {
+                None
+            };
+            let outcome = install_source_bundle_with_activation(
+                &bundle,
+                &packages,
+                &target_root,
+                launcher.as_deref().unwrap_or_default(),
+            )?;
+            let report = native_install_report(&outcome, &target_root)?;
+            if json {
+                std::io::stdout().write_all(&canonical_json(&report)?)?;
+            } else {
+                print!("{}", native_install_human_report(&report)?);
+            }
+        }
         Command::Canonicalize { artifact } => {
             let value = load_json(artifact)?;
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
@@ -1390,6 +1717,160 @@ fn read_bounded_codex_config(
         return Err(format!("{label} has more than {MAX_CONTRACT_JSON_BYTES} bytes").into());
     }
     Ok(bytes)
+}
+
+fn read_frozen_executable(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if path.is_symlink() {
+        return Err("native session launcher must not be a symlink".into());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_CONTRACT_JSON_BYTES as u64
+    {
+        return Err("native session launcher is missing, empty, or exceeds its size limit".into());
+    }
+    let expected = usize::try_from(metadata.len())
+        .map_err(|_| "native session launcher size cannot be represented")?;
+    let mut bytes = Vec::with_capacity(expected);
+    file.take((MAX_CONTRACT_JSON_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() != expected {
+        return Err("native session launcher changed while it was being read".into());
+    }
+    Ok(bytes)
+}
+
+fn native_install_report(
+    outcome: &Value,
+    target_root: &Path,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let plan = outcome
+        .get("install_plan")
+        .and_then(Value::as_object)
+        .ok_or("native install outcome has no Install Plan")?;
+    let selected_platforms = plan
+        .get("selected_platforms")
+        .cloned()
+        .ok_or("native Install Plan has no selected platforms")?;
+    let selected_runtime_configs = plan
+        .get("selected_runtime_configs")
+        .cloned()
+        .ok_or("native Install Plan has no selected runtime configs")?;
+    let selected_packages = plan
+        .get("selected_packages")
+        .and_then(Value::as_array)
+        .ok_or("native Install Plan has no selected packages")?
+        .iter()
+        .map(|record| {
+            record
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or("native Install Plan package id is invalid")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let skill_count = plan
+        .get("skills")
+        .and_then(Value::as_array)
+        .ok_or("native Install Plan skills are invalid")?
+        .len();
+    let activation = native_activation_report(outcome.get("activation").unwrap_or(&Value::Null))?;
+    Ok(json!({
+        "activation": activation,
+        "engine": "rust",
+        "persistent_backup": false,
+        "post_install_validation": {
+            "kind": "native-lifecycle-transaction",
+            "status": "passed",
+        },
+        "preserved_system_skills": target_root.join("skills/.system").is_dir(),
+        "removed_legacy_symlinks": [],
+        "schema_version": "1.0",
+        "selected_packages": selected_packages,
+        "selected_platforms": selected_platforms,
+        "selected_runtime_configs": selected_runtime_configs,
+        "skill_count": skill_count,
+        "status": "installed",
+        "target_root": target_root,
+    }))
+}
+
+fn native_activation_report(activation: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+    let Some(record) = activation.as_object() else {
+        return Ok(json!({
+            "config_changed": false,
+            "managed_file_updates": [],
+            "managed_files_unchanged": [],
+            "profile_creates": [],
+            "profile_preserves": [],
+        }));
+    };
+    let updated = record
+        .get("updated_files")
+        .cloned()
+        .ok_or("native activation report has no updated files")?;
+    let created = record
+        .get("created_profiles")
+        .cloned()
+        .ok_or("native activation report has no created profiles")?;
+    let created_names = created
+        .as_array()
+        .ok_or("native activation created profiles are invalid")?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let preserved = [
+        "budget.config.toml",
+        "daily.config.toml",
+        "deep.config.toml",
+        "extreme.config.toml",
+        "interactive-fast.config.toml",
+        "readonly.config.toml",
+    ]
+    .into_iter()
+    .filter(|name| !created_names.contains(name))
+    .collect::<Vec<_>>();
+    Ok(json!({
+        "config_changed": record.get("config_changed").cloned().unwrap_or(Value::Bool(false)),
+        "managed_file_updates": updated,
+        "managed_files_unchanged": [],
+        "profile_creates": created,
+        "profile_preserves": preserved,
+    }))
+}
+
+fn native_install_human_report(report: &Value) -> Result<String, Box<dyn std::error::Error>> {
+    let platforms = report
+        .get("selected_platforms")
+        .and_then(Value::as_array)
+        .ok_or("native install report platforms are invalid")?
+        .iter()
+        .map(|value| value.as_str().ok_or("native install platform is invalid"))
+        .collect::<Result<Vec<_>, _>>()?
+        .join("、");
+    let target = report
+        .get("target_root")
+        .and_then(Value::as_str)
+        .ok_or("native install target is invalid")?;
+    Ok(format!(
+        "✓ {platforms} 平台安装完成\n\n  Rust 原生事务：passed\n  安装态验证：passed\n  目标目录：{target}\n\n自动化场景：添加 --json 获取 canonical JSON。\n"
+    ))
 }
 
 fn parse_lock_sources(values: &[String]) -> Result<Map<String, Value>, Box<dyn std::error::Error>> {

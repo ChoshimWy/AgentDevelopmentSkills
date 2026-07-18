@@ -132,13 +132,15 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
+          mkdir -p target
+          git show "$GITHUB_SHA:Cargo.lock" > target/release-Cargo.lock
           cargo build --release --locked --target "$TARGET" \
             -p agent-skills-rs -p agent-release
           executable="target/$TARGET/release/agent-skills-rs$EXECUTABLE_SUFFIX"
           release_tool="target/$TARGET/release/agent-release$EXECUTABLE_SUFFIX"
           "$release_tool" record \
             --binary "$executable" \
-            --cargo-lock Cargo.lock \
+            --cargo-lock target/release-Cargo.lock \
             --target "$TARGET" \
             --source-revision "$GITHUB_SHA" \
             --output "target/native-artifact-$TARGET"

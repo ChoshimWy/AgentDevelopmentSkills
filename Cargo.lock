@@ -99,6 +99,7 @@ dependencies = [
  "agent-registry",
  "agent-runtime",
  "clap",
+ "libc",
  "serde_json",
 ]
 

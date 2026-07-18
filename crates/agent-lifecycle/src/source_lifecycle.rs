@@ -52,16 +52,68 @@ pub fn install_source_bundle(
     package_set: &SourcePackageSet,
     target_root: impl AsRef<Path>,
 ) -> Result<Value, LifecycleError> {
-    install_source_bundle_with_hook(bundle, package_set, target_root.as_ref(), |_| Ok(()))
+    Ok(install_source_bundle_with_options(
+        bundle,
+        package_set,
+        target_root.as_ref(),
+        false,
+        None,
+        |_| Ok(()),
+    )?
+    .install_plan)
 }
 
-fn install_source_bundle_with_hook(
+/// Install and activate a fresh source bundle with one frozen native session launcher.
+///
+/// Apple selections stage the launcher and every external activation preimage
+/// under the same rollback contract as the managed roots. Non-Apple selections
+/// complete the managed installation without external activation. This entry
+/// point remains fresh-only; replacement and legacy adoption must use the
+/// approval-bound compatibility path.
+///
+/// # Errors
+/// Returns a fail-closed error for missing Apple launcher bytes, invalid source
+/// or target state, activation conflicts, publication drift, or incomplete
+/// rollback/cleanup.
+pub fn install_source_bundle_with_activation(
+    bundle: &SourceInstallBundle,
+    package_set: &SourcePackageSet,
+    target_root: impl AsRef<Path>,
+    session_launcher: &[u8],
+) -> Result<Value, LifecycleError> {
+    let outcome = install_source_bundle_with_options(
+        bundle,
+        package_set,
+        target_root.as_ref(),
+        true,
+        Some(session_launcher),
+        |_| Ok(()),
+    )?;
+    Ok(serde_json::json!({
+        "activation": outcome.activation,
+        "install_plan": outcome.install_plan,
+    }))
+}
+
+#[derive(Debug)]
+struct SourceInstallOutcome {
+    activation: Option<Value>,
+    install_plan: Value,
+}
+
+fn install_source_bundle_with_options(
     bundle: &SourceInstallBundle,
     package_set: &SourcePackageSet,
     target_root: &Path,
+    activate_source: bool,
+    session_launcher: Option<&[u8]>,
     mut before_lock: impl FnMut(&Path) -> Result<(), LifecycleError>,
-) -> Result<Value, LifecycleError> {
+) -> Result<SourceInstallOutcome, LifecycleError> {
     validate_source_install_inputs(bundle, package_set)?;
+    let activate_apple = activate_source && selected_platforms(bundle.plan())?.contains("apple");
+    if activate_apple && session_launcher.is_none() {
+        return invalid("native Apple source install requires a frozen session launcher");
+    }
     before_lock(target_root)?;
     let lock = LifecycleLock::acquire(target_root)?;
     let locked_target = lock.target_directory()?;
@@ -93,11 +145,51 @@ fn install_source_bundle_with_hook(
         }
     }
     workspace.stage_external_state(&plan)?;
+    if activate_apple {
+        workspace.stage_fresh_source_activation(
+            &plan,
+            session_launcher.ok_or_else(|| {
+                LifecycleError::Invalid(
+                    "native Apple source install requires a frozen session launcher".to_owned(),
+                )
+            })?,
+        )?;
+    }
     workspace.verify_staged_install(&plan)?;
-    let published = workspace.publish_staged_install(&plan)?;
+    let mut published = workspace.publish_staged_install(&plan)?;
+    if !activate_apple {
+        published.verify(&plan)?;
+    }
+    let activation = if activate_apple {
+        Some(
+            published.apply_source_activation(session_launcher.ok_or_else(|| {
+                LifecycleError::Invalid(
+                    "native Apple source install requires a frozen session launcher".to_owned(),
+                )
+            })?)?,
+        )
+    } else {
+        None
+    };
     published.verify(&plan)?;
     published.commit(&plan)?;
-    Ok(installed)
+    Ok(SourceInstallOutcome {
+        activation,
+        install_plan: installed,
+    })
+}
+
+fn selected_platforms(plan: &Value) -> Result<std::collections::BTreeSet<&str>, LifecycleError> {
+    plan.get("selected_platforms")
+        .and_then(Value::as_array)
+        .ok_or_else(|| LifecycleError::Invalid("Install Plan platforms are invalid".to_owned()))?
+        .iter()
+        .map(|value| {
+            value.as_str().ok_or_else(|| {
+                LifecycleError::Invalid("Install Plan platform is invalid".to_owned())
+            })
+        })
+        .collect()
 }
 
 fn validate_source_install_inputs(
@@ -310,11 +402,18 @@ mod tests {
         let (bundle, packages) = core_bundle();
         let residue = format!("{INSTALL_STAGE_PREFIX}interrupted");
 
-        let error = install_source_bundle_with_hook(&bundle, &packages, &target, |target| {
-            std::fs::create_dir(target)?;
-            std::fs::create_dir(target.join(&residue))?;
-            Ok(())
-        })
+        let error = install_source_bundle_with_options(
+            &bundle,
+            &packages,
+            &target,
+            false,
+            None,
+            |target| {
+                std::fs::create_dir(target)?;
+                std::fs::create_dir(target.join(&residue))?;
+                Ok(())
+            },
+        )
         .expect_err("locked preflight rejects recovery residue");
         assert!(
             error
@@ -326,5 +425,38 @@ mod tests {
         for root in MANAGED_ROOTS {
             assert!(!target.join(root).exists());
         }
+    }
+
+    #[test]
+    fn fresh_apple_install_activates_the_same_frozen_native_launcher() {
+        let fixture = Fixture::new();
+        let target = fixture.target();
+        let root = repository_root();
+        let selection = resolve_source_install_selection(
+            root.join("platforms"),
+            &["apple".to_owned()],
+            &[],
+            &["codex".to_owned()],
+            false,
+        )
+        .expect("resolve Apple source selection");
+        let packages = snapshot_source_packages(&selection).expect("snapshot Apple packages");
+        let bundle =
+            compile_source_install_bundle(&selection, &packages, root.join("schemas"), None)
+                .expect("compile Apple bundle");
+        let launcher = b"frozen native session launcher\n";
+
+        let outcome = install_source_bundle_with_activation(&bundle, &packages, &target, launcher)
+            .expect("install activated Apple bundle");
+        assert_eq!(outcome["install_plan"]["status"], "installed");
+        assert_eq!(
+            outcome["activation"]["handler"],
+            "core.source-activation.apple-codex-v1"
+        );
+        assert_eq!(
+            std::fs::read(target.join("bin/agent-session")).expect("read installed launcher"),
+            launcher
+        );
+        assert!(target.join(".agent-skills/activation-lock.json").is_file());
     }
 }

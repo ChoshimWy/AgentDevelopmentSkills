@@ -26,8 +26,9 @@ Every migrated component must preserve:
   and concurrent-update behavior;
 - deterministic release artifacts, SBOM, provenance, and qualification gates.
 
-Python remains the production implementation until the corresponding Rust path
-passes differential tests against it.
+Python remains the compatibility implementation for every route that has not
+passed its Rust differential and release gates. Eligible hosted fresh installs
+have now passed that boundary and default to Rust.
 
 ## Workspace boundaries
 
@@ -61,8 +62,10 @@ file layout:
 
 ## Current state
 
-Phases 1 through 3 are complete. The native Phase 4 compatibility surface and
-the Phase 5 release/package boundary are in progress. The repository contains:
+Phases 1 through 5 are complete. Phase 6 is in controlled rollout: eligible
+hosted fresh installs now select Rust, while upgrade, legacy adoption, the thin
+bootstrap acquisition layer, and other compatibility routes remain pending.
+The repository contains:
 
 - a Rust workspace pinned to Rust 1.97.1;
 - `agent-contracts` canonical JSON, SHA-256, and schema-version primitives;
@@ -179,8 +182,7 @@ the Phase 5 release/package boundary are in progress. The repository contains:
   spelling, ownership, and transaction recovery while the Python source
   installer remains POSIX-mode only. The command now also provides a read-only
   dry-run, Python-compatible human output, and canonical blocked JSON.
-  Production command routing is not implemented yet; `uninstall.sh` still uses
-  the Python production path.
+  `uninstall.sh` still uses the Python compatibility path.
   The crate now also resolves the source package catalog used before native
   installation: explicit platform, discipline, and runtime-config selection;
   required and optional package dependencies; numeric version constraints;
@@ -199,14 +201,18 @@ the Phase 5 release/package boundary are in progress. The repository contains:
   identities, bindings, permissions, side effects, Install Plan v2, and the
   persistent package Lockfile. Core-only, Apple, QA, Codex runtime-config, and
   previous-Lock lineage projections are byte-level differential-tested against
-  Python `build_install_bundle`. The non-default `lifecycle-install` command
+  Python `build_install_bundle`. The `lifecycle-install` compatibility command
   now adds a read-only dry-run and a fresh-only transaction that reopens every
   source through directory capabilities, stages Package/Skill trees, preserves
   external state, verifies complete semantics, publishes all managed roots
   atomically, verifies again, and rolls back on failure. Core-only and Apple
   result/filesystem projections are differential-tested against Python
-  `install_bundle`. Replacement, upgrade, and source activation remain
-  separate approval-bound gates.
+  `install_bundle`. The production `install` command reuses that transaction
+  and, for Apple, freezes the verified native executable as the session
+  launcher and completes source activation before commit. When invoked through
+  the installed `agent-session` path, the same binary preserves the public
+  create/list/inspect/fingerprint/checkpoint/gate interface. Replacement,
+  upgrade, and legacy adoption remain separate approval-bound gates.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit
@@ -231,9 +237,15 @@ the Phase 5 release/package boundary are in progress. The repository contains:
   provenance, exact release allowlisting, external review, and the final Gate
   cover the merged binaries.
 
-The Rust binary is not yet installed or activated by the production bootstrap.
-The native artifacts are qualified release inputs for the next controlled
-cutover phase, while the parallel CLI currently covers canonical JSON,
+Release Manifest v2 freezes the complete native index and defaults eligible
+hosted fresh Apple/Desktop requests to the matching verified Rust executable.
+The thin bootstrap still runs on Python to acquire and verify the manifest,
+source bundle, and binary. Source-checkout, dry-run, interactive,
+compatibility-only, existing-install, upgrade, and legacy-adoption requests
+use the Python compatibility path. Operators may explicitly select that path
+with `AGENT_SKILLS_INSTALL_ENGINE=python`; forced Rust fails closed when the
+request is ineligible, and a selected native execution failure never silently
+downgrades. The parallel CLI currently covers canonical JSON,
 hashing, the shared schema-version boundary, registry snapshots, targeted
 binding resolution, source package-selection, package-snapshot, and complete
 Install Bundle/Plan/Lock compatibility, fresh-only guarded source install, an
@@ -255,7 +267,9 @@ gates, and Final Gate Adapter/Ledger/artifact revalidation with passed-state
 persistence. The parallel CLI also exposes guarded full uninstall through
 `lifecycle-uninstall`; this remains a compatibility route rather than a
 bootstrap-installed default command. Host-specific live Provider execution
-and production CLI parity remain later phase gates.
+and complete production CLI parity remain later phase gates. Although the
+release matrix includes Windows binaries, Windows production source install
+remains blocked until its full filesystem contract is enabled.
 
 The native and Python lanes now also expose the same Provider Invocation v1
 transport. `prepare` freezes the Adapter Request together with the node's
@@ -295,9 +309,10 @@ assembles the complete v1 artifact, recomputes summary/status/fingerprint, and
 validates its cross-field invariants. Its required `--python-version` is
 supplied by the compatibility host rather than inferred or executed by Rust,
 so this closes report-emission parity without claiming the production CLI is
-Python-free. Every mutating lifecycle transaction remains on the Python
-production path until its own differential, tamper, concurrency, rollback, and
-independent-review gates pass.
+Python-free. Mutating lifecycle routes remain on the Python compatibility path
+until their own differential, tamper, concurrency, rollback, and
+independent-review gates pass; the eligible fresh-install transaction is the
+first exception.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

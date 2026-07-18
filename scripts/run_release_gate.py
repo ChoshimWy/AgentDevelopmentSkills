@@ -888,8 +888,33 @@ def _evaluate_release_gate_snapshot(
                 }
                 for item in native_index["artifacts"]
             ]
+            manifest_native_records = [
+                {
+                    "arch": item["arch"],
+                    "filename": item["filename"],
+                    "os": item["os"],
+                    "sha256": item["sha256"],
+                    "size": item["size"],
+                    "target": item["target"],
+                }
+                for item in native_index["artifacts"]
+            ]
+            if (
+                manifest.get("schema_version") != "2.0"
+                or manifest.get("default_engine") != "rust"
+                or manifest.get("native_artifacts") != manifest_native_records
+                or manifest.get("native_index_sha256")
+                != hashlib.sha256(native_index_path.read_bytes()).hexdigest()
+            ):
+                raise ContractError(
+                    "release manifest native execution contract differs from the verified matrix"
+                )
         elif manifest.get("channel") != "development":
             raise ContractError("beta and stable releases require the complete native artifact matrix")
+        elif manifest.get("schema_version") != "1.0":
+            raise ContractError(
+                "development releases without a native matrix must use the fallback manifest"
+            )
         if (
             len(manifest.get("artifacts", [])) != 1
             or manifest["artifacts"][0].get("id") != "universal-source-bundle"

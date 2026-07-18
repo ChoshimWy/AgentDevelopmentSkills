@@ -98,6 +98,11 @@ class ReleaseQualificationTests(unittest.TestCase):
             '--native-artifacts-dir "$RUNNER_TEMP/qualification/native"',
             workflow,
         )
+        self.assertIn(
+            'git show "$GITHUB_SHA:Cargo.lock" > target/release-Cargo.lock',
+            workflow,
+        )
+        self.assertIn("--cargo-lock target/release-Cargo.lock", workflow)
         self.assertIn('--candidate-lock "$RUNNER_TEMP/qualification/agent-skills.lock"', workflow)
         self.assertNotIn('--review-key-id "${{ inputs.review_key_id }}"', workflow)
         self.assertNotIn('--channel "${{ inputs.release_channel }}"', workflow)

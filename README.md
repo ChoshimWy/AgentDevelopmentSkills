@@ -8,20 +8,31 @@ AgentDevelopmentSkills is an offline-first, fail-closed workflow core for coding
 - Deterministic plans, locks, manifests, migrations, and release artifacts
 - Transactional install, upgrade, rollback, doctor, and uninstall workflows
 - Cross-platform packages for Apple and Desktop; Android, Web, and Backend remain explicit bootstrap-only targets
-- Reproducible Python wheels and sdists for Python 3.11–3.14
-- A compatibility-gated, incremental migration from Python to Rust
+- A qualified six-target Rust binary matrix plus reproducible Python compatibility artifacts
+- A compatibility-gated, incremental migration whose first fresh-install route now defaults to Rust
 - Signed release review, provenance, SBOM, and fail-closed release gates
 - GitHub Pages control plane with immutable GitHub Release assets
 - No telemetry, credential collection, or implicit remote execution
 
 ## Status
 
-The current Python implementation and validation suite are complete. An incremental Rust migration is now in progress: Rust components remain parallel and non-default until their behavior is proven byte-for-byte compatible with the existing contracts. The repository carries an MIT `LICENSE`, a `NOTICE`, and verified migration-audit hashes. The GitHub Pages control plane is deployed; public release assets and remote installation remain gated on an external release signature and GitHub environment approval.
+The incremental Rust migration has reached the controlled bootstrap phase.
+Release-manifest v2 binds a complete macOS, Linux, and Windows native binary
+matrix. A hosted, explicit, fresh Apple or Desktop installation selects the
+verified Rust lifecycle transaction by default. Source-checkout installs,
+dry-runs, interactive or compatibility-only requests, existing installations,
+upgrades, and legacy adoption still use the documented Python compatibility
+path. The repository carries an MIT `LICENSE`, a `NOTICE`, and verified
+migration-audit hashes. The GitHub Pages control plane is deployed; public
+release assets and remote installation remain gated on an external release
+signature and GitHub environment approval.
 
 ## Requirements
 
-- Python 3.11 or newer
-- Rust 1.97.1 for native migration development only
+- Python 3.11 or newer for the current thin bootstrap, source-checkout install,
+  and compatibility fallback
+- Rust 1.97.1 for native development; hosted v2 releases download a qualified
+  target binary
 - macOS, Linux, or WSL2 for the production bootstrap path
 - Windows bootstrap is validated in CI but is not yet a production install target
 
@@ -55,6 +66,16 @@ iwr -useb https://choshimwy.github.io/AgentDevelopmentSkills/install.ps1 | iex
 ```
 
 The Pages control plane is online, but the remote installer remains unavailable until a signed release has been published. Use a source checkout before that release gate is satisfied.
+
+After a v2 release is published, an explicit fresh `--platform apple` or
+`--platform desktop` request defaults to the verified Rust binary. Set
+`AGENT_SKILLS_INSTALL_ENGINE=python` to request the transitional compatibility
+path. `AGENT_SKILLS_INSTALL_ENGINE=rust` fails closed if the request is not
+eligible; once Rust has been selected, a native failure never silently
+downgrades to Python. The thin shell and PowerShell bootstraps still require a
+compatible Python interpreter in this phase. Windows binaries are qualified
+release inputs, but Windows remains blocked as a production source-install
+target until its complete install contract is enabled.
 
 ## Development
 
@@ -279,15 +300,15 @@ and unmanaged config, profile, and destination preimages from the target. Both
 paths refuse unmanaged conflicts, create only missing profiles, use private
 no-replace publication, and write the Activation Lock last. A fresh failure
 removes the new managed roots before restoring every frozen external preimage.
-The session launcher remains an explicit caller-supplied payload until the
-production bootstrap selects a verified native executable. Release packaging
-now binds those executables, but does not activate them. A separate
+Compatibility commands still accept an explicit session launcher; the v2
+bootstrap freezes the same verified native executable and activates it inside
+the eligible fresh-install transaction. A separate
 `PublishedUninstall` guard now freezes a complete
 managed and external rollback point, moves all managed roots into a private
 backup, removes only Activation-owned files, preserves local profiles,
 `config.toml` semantics, and `skills/.system`, and supports explicit commit,
-rollback, and drop-time recovery. Production command routing remains a later
-lifecycle slice. The non-default
+rollback, and drop-time recovery. Remaining production command routing is a
+later lifecycle slice. The non-default
 `lifecycle-uninstall` compatibility command now drives this guard, rejects a
 missing target without creating it, and matches the successful Python JSON
 report and resulting filesystem state on the supported POSIX source-installer
@@ -310,13 +331,17 @@ rebuilds Manifest Registry, dependency capability, instruction/rule, Skill,
 asset, binding, permission, side-effect, Install Plan v2, and persistent
 package Lockfile identities. Core-only, Apple, QA, Codex runtime-config, and
 previous-Lock lineage outputs are byte-for-byte differential-tested against
-Python. The non-default `lifecycle-install` command now adds a read-only
-dry-run plus fresh-only staging, semantic verification, atomic publication,
-post-publication verification, rollback-on-failure, and cleanup. Core-only and
-Apple results and managed filesystem trees are differential-tested against
-Python. It deliberately rejects replacement installs, does not run source
-activation, and does not replace the production Python CLI; upgrades and
-activation remain separate approval-bound phases.
+Python. The native lifecycle lane now provides a read-only
+`lifecycle-install` compatibility command plus a production `install` command
+for eligible fresh installs. It performs staging, semantic verification,
+atomic publication, post-publication verification, rollback-on-failure, and
+cleanup. Apple installation also freezes the exact launcher bytes and
+completes source activation in the same guarded transaction. Core-only and
+Apple projections remain differential-tested against Python. Replacement
+installs, upgrades, legacy adoption, and compatibility-only requests remain on
+separately gated paths. The installed native `agent-session` dispatch preserves
+the public `create`, `list`, `inspect`, `fingerprint`, `checkpoint`, and `gate`
+surface.
 
 The `agent-release` crate now freezes a six-target native matrix for macOS,
 Linux, and Windows on `aarch64` and `x86_64`. Every record binds the exact
@@ -326,9 +351,10 @@ binary on a matching GitHub-hosted architecture, then merges only the complete
 sorted matrix into `native-artifacts.json`. Qualification copies those exact
 binaries into the release candidate; provenance, the exact release allowlist,
 the external review signature, and the final Release Gate all cover them.
-This is a packaging milestone, not the production cutover: `install.sh`,
-`install.ps1`, and the default CLI still use the Python path until the
-controlled bootstrap/fallback phase passes.
+Release Manifest v2 now binds that exact matrix and makes the Rust executable
+the default engine for eligible hosted fresh installs. The thin `install.sh`
+and `install.ps1` acquisition layer and all ineligible requests still use the
+explicit Python compatibility path during this controlled phase.
 
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path

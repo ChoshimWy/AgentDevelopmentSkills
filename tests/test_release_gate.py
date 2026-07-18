@@ -364,6 +364,57 @@ class ReleaseGateTests(unittest.TestCase):
                     expected_version="0.2.0",
                 )
 
+    def test_v2_manifest_binds_the_exact_native_index_and_default_engine(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            native = build_native_fixture(root, FIXTURE_SOURCE_REVISION)
+            release = root / "release"
+            with mock.patch.object(
+                builder,
+                "_source_identity",
+                return_value=(FIXTURE_SOURCE_REVISION, False),
+            ), mock.patch.object(
+                builder,
+                "_git_file_modes",
+                return_value={},
+            ), mock.patch.object(
+                builder,
+                "_git_blob",
+                side_effect=lambda source, relative: (source / relative).read_bytes(),
+            ):
+                manifest = builder.build_release_bundle(
+                    ROOT,
+                    release,
+                    channel="beta",
+                    native_artifacts_dir=native,
+                )
+            self.assertEqual(manifest["schema_version"], "2.0")
+            self.assertEqual(manifest["default_engine"], "rust")
+            self.assertEqual(len(manifest["native_artifacts"]), 6)
+            self.assertEqual(
+                manifest["native_index_sha256"],
+                hashlib.sha256(
+                    (release / "native-artifacts.json").read_bytes()
+                ).hexdigest(),
+            )
+
+            manifest["native_artifacts"][0]["sha256"] = "9" * 64
+            (release / "release-manifest.json").write_bytes(
+                gate.bootstrap_install._canonical_json(manifest)
+            )
+            report = gate.evaluate_release_gate(
+                release,
+                conformance_evidence=None,
+                python_compatibility_evidence_path=None,
+                review_evidence=None,
+                review_trust_store=None,
+            )
+            supply = next(
+                item for item in report["checks"] if item["id"] == "release.supply-chain"
+            )
+            self.assertEqual(supply["status"], "blocked")
+            self.assertIn("native execution contract", supply["details"]["error"])
+
     def test_native_matrix_cannot_claim_a_different_cargo_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -398,7 +449,25 @@ class ReleaseGateTests(unittest.TestCase):
             index["fingerprint"] = native_contract.fingerprint({
                 key: item for key, item in index.items() if key != "fingerprint"
             })
-            index_path.write_bytes(native_contract.canonical_json(index))
+            index_bytes = native_contract.canonical_json(index)
+            index_path.write_bytes(index_bytes)
+            manifest_path = release / "release-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["native_artifacts"] = [
+                {
+                    "arch": item["arch"],
+                    "filename": item["filename"],
+                    "os": item["os"],
+                    "sha256": item["sha256"],
+                    "size": item["size"],
+                    "target": item["target"],
+                }
+                for item in index["artifacts"]
+            ]
+            manifest["native_index_sha256"] = hashlib.sha256(index_bytes).hexdigest()
+            manifest_path.write_bytes(
+                gate.bootstrap_install._canonical_json(manifest)
+            )
 
             report = gate.evaluate_release_gate(
                 release,
