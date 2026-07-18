@@ -78,6 +78,20 @@ fn fresh_apple_install_publishes_a_compatible_agent_session_cli() {
     assert!(commit.success(), "git commit failed");
 
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_agent-skills-rs"));
+    let launcher_source = root.0.join("agent-session-launcher");
+    std::fs::copy(&binary, &launcher_source).expect("copy native session launcher");
+    let strip = Command::new("strip")
+        .arg(&launcher_source)
+        .status()
+        .expect("strip native session launcher");
+    assert!(strip.success(), "strip native session launcher failed");
+    assert!(
+        std::fs::metadata(&launcher_source)
+            .expect("inspect stripped native session launcher")
+            .len()
+            <= 64 * 1024 * 1024,
+        "stripped native session launcher exceeds the production contract limit"
+    );
     let install = Command::new(&binary)
         .args([
             "install",
@@ -88,7 +102,7 @@ fn fresh_apple_install_publishes_a_compatible_agent_session_cli() {
             "--platform",
             "apple",
             "--session-launcher",
-            binary.to_str().expect("UTF-8 binary"),
+            launcher_source.to_str().expect("UTF-8 launcher"),
             "--json",
         ])
         .output()
