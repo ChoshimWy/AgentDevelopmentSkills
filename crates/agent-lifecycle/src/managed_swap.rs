@@ -57,6 +57,7 @@ struct RootMove {
 enum ExternalMutationState {
     Preserved,
     InProgress,
+    ActivationApplied,
     ActivationRemoved,
 }
 
@@ -320,6 +321,66 @@ impl PublishedInstall {
         self.apply_source_deactivation_with(|_, _| Ok(()))
     }
 
+    /// Run the trusted source-activation handler inside this transaction.
+    ///
+    /// Static assets and the shared Codex config are read only from the
+    /// validated newly published package snapshot. `session_launcher` is the
+    /// caller-supplied compatibility launcher payload; production routing must
+    /// bind it to a released native executable before using this method.
+    ///
+    /// The handler requires an exact frozen rollback scope, validates all old
+    /// owned and unmanaged preimages before writing, creates profiles only
+    /// when missing, publishes every replacement through private scratch with
+    /// no-replace renames, and writes the new Activation Lock last.
+    ///
+    /// # Errors
+    /// Fails when rollback evidence is missing, source assets or preimages
+    /// drift, an unmanaged destination differs, or publication cannot complete
+    /// safely.
+    pub fn apply_source_activation(
+        &mut self,
+        session_launcher: &[u8],
+    ) -> Result<Value, LifecycleError> {
+        self.apply_source_activation_with(session_launcher, |_, _| Ok(()))
+    }
+
+    fn apply_source_activation_with(
+        &mut self,
+        session_launcher: &[u8],
+        handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<Value, LifecycleError> {
+        if self.external_mutation_state != ExternalMutationState::Preserved {
+            return invalid("external mutation has already started");
+        }
+        let (prepared, target, target_path, scratch, scratch_path) = {
+            let workspace = self.workspace()?;
+            workspace.verify_published_install(&self.plan)?;
+            let target = workspace.target_directory()?;
+            let target_path = workspace.target().to_path_buf();
+            let scratch = workspace.handler_scratch_directory()?;
+            let scratch_path = workspace.handler_scratch_path();
+            let prepared = source_activation::SourceActivation::prepare(
+                &target,
+                workspace.target(),
+                session_launcher,
+            )?;
+            workspace.require_rollback_external_paths(prepared.scope())?;
+            prepared.revalidate(&target)?;
+            (prepared, target, target_path, scratch, scratch_path)
+        };
+        self.external_mutation_started = true;
+        self.external_mutation_state = ExternalMutationState::InProgress;
+        let result = prepared.apply_with_hook(
+            &target,
+            &target_path,
+            &scratch,
+            &scratch_path,
+            handler_hook,
+        )?;
+        self.external_mutation_state = ExternalMutationState::ActivationApplied;
+        Ok(result)
+    }
+
     fn apply_source_deactivation_with(
         &mut self,
         handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
@@ -440,6 +501,8 @@ impl PublishedInstall {
     ) -> Result<(), LifecycleError> {
         match self.external_mutation_state {
             ExternalMutationState::Preserved => workspace.verify_published_install(plan),
+            ExternalMutationState::ActivationApplied => workspace
+                .verify_published_after_handler(plan, external_stage::PublishedActivation::Managed),
             ExternalMutationState::ActivationRemoved => workspace
                 .verify_published_after_handler(plan, external_stage::PublishedActivation::Absent),
             ExternalMutationState::InProgress => {

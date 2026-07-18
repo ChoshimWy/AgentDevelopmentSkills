@@ -105,7 +105,7 @@ def load_toml(path_text: str | None) -> dict[str, Any]:
     if not path.exists():
         return {}
 
-    content = path.read_text()
+    content = path.read_text(encoding="utf-8")
     if not content.strip():
         return {}
 

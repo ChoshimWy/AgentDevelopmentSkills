@@ -48,6 +48,7 @@ struct TreeEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PublishedActivation {
     Preserved,
+    Managed,
     Absent,
 }
 
@@ -137,17 +138,25 @@ pub(super) fn verify_published_after_handler(
         PublishedActivation::Preserved if current_activation != expected.activation => {
             return invalid("published Activation Lock differs from preserved state");
         }
+        PublishedActivation::Managed if current_activation.is_none() => {
+            return invalid("published Activation Lock is missing after activation");
+        }
         PublishedActivation::Absent if current_activation.is_some() => {
             return invalid("published Activation Lock remains after handler execution");
         }
-        PublishedActivation::Preserved | PublishedActivation::Absent => {}
+        PublishedActivation::Preserved
+        | PublishedActivation::Managed
+        | PublishedActivation::Absent => {}
     }
     if inspect_staged_system_skills(target)? != expected.system_skills {
         return invalid("published .system Skills differ from preserved state");
     }
-    if activation == PublishedActivation::Preserved {
+    if matches!(
+        activation,
+        PublishedActivation::Preserved | PublishedActivation::Managed
+    ) {
         let status = check_activation(target)?;
-        if expected.activation.is_some()
+        if (expected.activation.is_some() || activation == PublishedActivation::Managed)
             && status.get("managed").and_then(serde_json::Value::as_bool) != Some(true)
         {
             return invalid("published Activation Lock is missing after handler execution");
@@ -180,7 +189,10 @@ fn verify_during_handler(
         return invalid("published .system Skills differ from preserved state");
     }
     if activation.is_some() && activation != expected.activation {
-        return invalid("published Activation Lock changed during handler execution");
+        let status = check_activation(root)?;
+        if status.get("managed").and_then(serde_json::Value::as_bool) != Some(true) {
+            return invalid("published Activation Lock changed during handler execution");
+        }
     }
     Ok(activation.is_some())
 }

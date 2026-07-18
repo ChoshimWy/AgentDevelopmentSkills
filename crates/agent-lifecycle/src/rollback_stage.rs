@@ -256,6 +256,18 @@ pub(super) fn verify_published(
     verify_staged(target, expected)
 }
 
+pub(super) fn verify_published_external_preimage(
+    target: &Dir,
+    expected: &RollbackStageSnapshot,
+    external_paths: &[String],
+) -> Result<(), LifecycleError> {
+    let normalized = normalize_external_paths(external_paths)?;
+    if inspect_external_state(target, &normalized)? != expected.source.external_state {
+        return invalid("published external state differs from frozen rollback preimage");
+    }
+    verify_staged(target, expected)
+}
+
 pub(super) fn verify_staged(
     target: &Dir,
     expected: &RollbackStageSnapshot,

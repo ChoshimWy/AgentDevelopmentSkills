@@ -265,9 +265,15 @@ the Activation Lock is absent and the remaining installation is revalidated.
 Its config rewrite uses TOML 1.0 parsing while preserving every unrelated byte
 and the original POSIX mode. The source-activation prerequisite that overlays
 the Codex shared config is also available as a native, non-executing TOML
-renderer with differential parity against the installed source script; asset
-publication, uninstall, and production command routing remain later lifecycle
-slices.
+renderer with differential parity against the installed source script. The
+same guard can now run source activation for replacement transactions backed
+by an exact rollback point: it freezes assets from the newly published package
+snapshot, refuses unmanaged conflicts, creates only missing profiles, uses
+private no-replace publication, writes the Activation Lock last, and can
+restore every external preimage. The session launcher remains an explicit
+caller-supplied payload until release packaging binds a verified native
+executable. Fresh-install activation, uninstall, and production command
+routing remain later lifecycle slices.
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
 holds directory capabilities and opens contract files without following

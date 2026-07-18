@@ -1,20 +1,164 @@
 use super::{
     EXTERNAL_ACTIVATION_LOCK, LifecycleError, MANAGED_DIRECTORY_MODE, MANAGED_FILE_MODE,
-    configure_nofollow, open_child_directory, same_content_state_cap, same_object_cap,
+    codex_config::render_codex_config, configure_nofollow, external_stage,
+    managed_swap::rename_no_replace, open_child_directory, same_content_state_cap, same_object_cap,
     validate_activation_lock_contract,
 };
-use agent_contracts::{MAX_CONTRACT_JSON_BYTES, parse_json};
+use agent_contracts::{MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256, parse_json};
 use cap_fs_ext::{FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt as _};
 use cap_std::fs::{Dir, Metadata, OpenOptions};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::io::{Read as _, Write as _};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub(super) const ACTIVATION_HANDLER_ID: &str = "core.source-activation.apple-codex-v1";
 pub(super) const DEACTIVATION_HANDLER_ID: &str = "core.source-deactivation.apple-codex-v1";
 
 static CONFIG_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug)]
+struct ActivationAsset {
+    destination: &'static str,
+    mode: u32,
+    package: &'static str,
+    source: &'static str,
+}
+
+impl ActivationAsset {
+    const fn new(
+        package: &'static str,
+        source: &'static str,
+        destination: &'static str,
+        mode: u32,
+    ) -> Self {
+        Self {
+            destination,
+            mode,
+            package,
+            source,
+        }
+    }
+}
+
+const ACTIVATION_ASSETS: &[ActivationAsset] = &[
+    ActivationAsset::new(
+        "design",
+        "assets/codex/agents/design_researcher.toml",
+        "agents/design_researcher.toml",
+        0o644,
+    ),
+    ActivationAsset::new(
+        "review",
+        "assets/codex/agents/reviewer.toml",
+        "agents/reviewer.toml",
+        0o644,
+    ),
+    ActivationAsset::new(
+        "workflow",
+        "assets/codex/agents/explorer.toml",
+        "agents/explorer.toml",
+        0o644,
+    ),
+    ActivationAsset::new(
+        "workflow",
+        "assets/codex/agents/pm.toml",
+        "agents/pm.toml",
+        0o644,
+    ),
+    ActivationAsset::new(
+        "workflow",
+        "assets/codex/agents/reporter.toml",
+        "agents/reporter.toml",
+        0o644,
+    ),
+    ActivationAsset::new(
+        "apple",
+        "config/codex/templates/agents/builder.toml",
+        "agents/builder.toml",
+        0o644,
+    ),
+    ActivationAsset::new(
+        "apple",
+        "config/codex/templates/agents/docs_researcher.toml",
+        "agents/docs_researcher.toml",
+        0o644,
+    ),
+    ActivationAsset::new(
+        "apple",
+        "config/codex/templates/agents/tester.toml",
+        "agents/tester.toml",
+        0o644,
+    ),
+    ActivationAsset::new(
+        "apple",
+        "config/codex/templates/codex_verify.example.sh",
+        "bin/codex_verify",
+        0o755,
+    ),
+    ActivationAsset::new(
+        "apple",
+        "tools/digest-xcodebuild-log.sh",
+        "bin/digest-xcodebuild-log",
+        0o755,
+    ),
+    ActivationAsset::new(
+        "apple",
+        "config/codex/templates/codex_verify.example.sh",
+        "templates/codex_verify.example.sh",
+        0o755,
+    ),
+    ActivationAsset::new(
+        "apple",
+        "config/codex/templates/ui-smoke.example.yml",
+        "templates/ui-smoke.example.yml",
+        0o644,
+    ),
+];
+
+const PROFILE_NAMES: &[&str] = &[
+    "budget.config.toml",
+    "daily.config.toml",
+    "deep.config.toml",
+    "extreme.config.toml",
+    "interactive-fast.config.toml",
+    "readonly.config.toml",
+];
+const SHARED_CONFIG_SOURCE: &str = "assets/codex/codex.shared.toml";
+const SESSION_DESTINATION: &str = "bin/agent-session";
+
+#[derive(Debug)]
+pub(super) struct SourceActivation {
+    activation_lock: FileSnapshot,
+    candidate_lock: Vec<u8>,
+    candidates: Vec<ActivationCandidate>,
+    config: ActivationCandidate,
+    created_profile_paths: Vec<String>,
+    migration: Option<Value>,
+    profiles: Vec<ActivationCandidate>,
+    retired: Vec<ActivationRecord>,
+    scope: Vec<String>,
+    source_assets: Vec<SourceAssetSnapshot>,
+}
+
+#[derive(Debug)]
+struct ActivationCandidate {
+    bytes: Vec<u8>,
+    mode: u32,
+    path: String,
+    preimage: Option<FileSnapshot>,
+    preimage_must_match_candidate: bool,
+}
+
+#[derive(Debug)]
+struct SourceAssetSnapshot {
+    package: String,
+    snapshot: FileSnapshot,
+    source: String,
+}
 
 #[derive(Debug)]
 pub(super) struct SourceDeactivation {
@@ -41,11 +185,179 @@ enum ConfigDeactivation {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct FileSnapshot {
     bytes: Vec<u8>,
     identity: Metadata,
     mode: u32,
+}
+
+impl SourceActivation {
+    pub(super) fn prepare(
+        target: &Dir,
+        target_path: &Path,
+        session_launcher: &[u8],
+    ) -> Result<Self, LifecycleError> {
+        require_bounded_session_launcher(session_launcher)?;
+        let managed = open_child_directory(
+            target,
+            ".agent-skills",
+            Some(MANAGED_DIRECTORY_MODE),
+            "managed metadata directory",
+        )?;
+        let activation_lock = read_required_file(
+            &managed,
+            EXTERNAL_ACTIVATION_LOCK,
+            Some(MANAGED_FILE_MODE),
+            "source activation Lock",
+        )?;
+        let lock = parse_json(&activation_lock.bytes)?;
+        let (version, values) = validate_activation_lock_contract(&lock)?;
+        let current = load_current_activation_preimages(target, values)?;
+        let mut source_assets = Vec::new();
+        let candidate_values =
+            load_activation_candidate_values(target, session_launcher, &mut source_assets)?;
+        let (mut candidates, mut retired) =
+            reconcile_activation_candidates(target, candidate_values, current)?;
+        let (mut profiles, mut created_profile_paths) =
+            prepare_activation_profiles(target, &mut source_assets)?;
+        let config = prepare_activation_config(target, target_path, &mut source_assets)?;
+        candidates.sort_by(|left, right| left.path.cmp(&right.path));
+        profiles.sort_by(|left, right| left.path.cmp(&right.path));
+        retired.sort_by(|left, right| left.path.cmp(&right.path));
+        created_profile_paths.sort();
+        let candidate_lock = encode_activation_lock(&candidates)?;
+        let migration = if version == "1.0" {
+            Some(activation_migration_report(&lock)?)
+        } else {
+            None
+        };
+        let scope = activation_scope(&candidates, &profiles, &retired, &config);
+        let prepared = Self {
+            activation_lock,
+            candidate_lock,
+            candidates,
+            config,
+            created_profile_paths,
+            migration,
+            profiles,
+            retired,
+            scope,
+            source_assets,
+        };
+        prepared.revalidate(target)?;
+        Ok(prepared)
+    }
+
+    pub(super) fn scope(&self) -> &[String] {
+        &self.scope
+    }
+
+    pub(super) fn revalidate(&self, target: &Dir) -> Result<(), LifecycleError> {
+        for source in &self.source_assets {
+            let current = read_installed_asset(target, &source.package, &source.source)?;
+            verify_snapshot_equality(
+                &current,
+                &source.snapshot,
+                "installed source activation asset",
+            )?;
+        }
+        for candidate in &self.candidates {
+            verify_candidate_preimage(target, candidate)?;
+        }
+        for profile in &self.profiles {
+            verify_candidate_preimage(target, profile)?;
+        }
+        for record in &self.retired {
+            verify_activation_file(target, &record.path, record.mode, &record.sha256)?;
+        }
+        verify_candidate_preimage(target, &self.config)?;
+        let managed = open_child_directory(
+            target,
+            ".agent-skills",
+            Some(MANAGED_DIRECTORY_MODE),
+            "managed metadata directory",
+        )?;
+        let current = read_required_file(
+            &managed,
+            EXTERNAL_ACTIVATION_LOCK,
+            Some(MANAGED_FILE_MODE),
+            "source activation Lock",
+        )?;
+        verify_snapshot_equality(&current, &self.activation_lock, "source activation Lock")
+    }
+
+    pub(super) fn apply_with_hook(
+        self,
+        target: &Dir,
+        target_path: &Path,
+        scratch: &Dir,
+        scratch_path: &Path,
+        mut handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<Value, LifecycleError> {
+        self.revalidate(target)?;
+        let retired_files = self
+            .retired
+            .iter()
+            .map(|record| record.path.clone())
+            .collect::<Vec<_>>();
+        for record in &self.retired {
+            quarantine_activation_record(target, target_path, scratch, scratch_path, record)?;
+            handler_hook(&record.path, "retired-file-removed")?;
+        }
+
+        let mut updated_files = Vec::new();
+        for candidate in &self.candidates {
+            let unchanged = candidate.preimage.as_ref().is_some_and(|preimage| {
+                preimage.bytes == candidate.bytes && preimage.mode == candidate.mode
+            });
+            if !unchanged {
+                publish_activation_candidate(
+                    target,
+                    target_path,
+                    scratch,
+                    scratch_path,
+                    candidate,
+                )?;
+                updated_files.push(candidate.path.clone());
+                handler_hook(&candidate.path, "managed-file-published")?;
+            }
+        }
+
+        for profile in &self.profiles {
+            if profile.preimage.is_none() {
+                publish_activation_candidate(target, target_path, scratch, scratch_path, profile)?;
+                handler_hook(&profile.path, "profile-created")?;
+            }
+        }
+
+        let config_changed = self.config.preimage.as_ref().is_none_or(|preimage| {
+            preimage.bytes != self.config.bytes || preimage.mode != self.config.mode
+        });
+        if config_changed {
+            publish_activation_candidate(target, target_path, scratch, scratch_path, &self.config)?;
+            handler_hook(&self.config.path, "config-published")?;
+        }
+
+        let lock_candidate = ActivationCandidate {
+            bytes: self.candidate_lock.clone(),
+            mode: MANAGED_FILE_MODE,
+            path: format!(".agent-skills/{EXTERNAL_ACTIVATION_LOCK}"),
+            preimage: Some(self.activation_lock.clone()),
+            preimage_must_match_candidate: false,
+        };
+        publish_activation_candidate(target, target_path, scratch, scratch_path, &lock_candidate)?;
+        handler_hook(EXTERNAL_ACTIVATION_LOCK, "activation-lock-published")?;
+        verify_activation_output(target, &self)?;
+        Ok(json!({
+            "config_changed": config_changed,
+            "created_profiles": self.created_profile_paths,
+            "handler": ACTIVATION_HANDLER_ID,
+            "migration": self.migration,
+            "retired_files": retired_files,
+            "updated_files": updated_files,
+        }))
+    }
 }
 
 impl SourceDeactivation {
@@ -191,6 +503,805 @@ impl SourceDeactivation {
         }
         Ok(())
     }
+}
+
+fn require_bounded_session_launcher(session_launcher: &[u8]) -> Result<(), LifecycleError> {
+    if session_launcher.len() > MAX_CONTRACT_JSON_BYTES {
+        return Err(agent_contracts::ContractError::InputTooLarge {
+            maximum: MAX_CONTRACT_JSON_BYTES,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn load_current_activation_preimages(
+    target: &Dir,
+    values: &[Value],
+) -> Result<BTreeMap<String, (ActivationRecord, FileSnapshot)>, LifecycleError> {
+    let mut current = BTreeMap::new();
+    for value in values {
+        let record = activation_record(value)?;
+        let snapshot = read_required_relative_file(
+            target,
+            &record.path,
+            Some(record.mode),
+            "managed activation preimage",
+        )?;
+        if bytes_sha256(&snapshot.bytes) != record.sha256 {
+            return invalid(format!(
+                "managed activation preimage differs from Lock: {}",
+                record.path
+            ));
+        }
+        current.insert(record.path.clone(), (record, snapshot));
+    }
+    Ok(current)
+}
+
+fn load_activation_candidate_values(
+    target: &Dir,
+    session_launcher: &[u8],
+    source_assets: &mut Vec<SourceAssetSnapshot>,
+) -> Result<BTreeMap<String, (Vec<u8>, u32)>, LifecycleError> {
+    let mut values = BTreeMap::new();
+    for asset in ACTIVATION_ASSETS {
+        let snapshot = read_installed_asset(target, asset.package, asset.source)?;
+        source_assets.push(SourceAssetSnapshot {
+            package: asset.package.to_owned(),
+            snapshot: snapshot.clone(),
+            source: asset.source.to_owned(),
+        });
+        if values
+            .insert(asset.destination.to_owned(), (snapshot.bytes, asset.mode))
+            .is_some()
+        {
+            return invalid("native source activation asset destinations must be unique");
+        }
+    }
+    if values
+        .insert(
+            SESSION_DESTINATION.to_owned(),
+            (session_launcher.to_vec(), 0o755),
+        )
+        .is_some()
+    {
+        return invalid("native source activation asset destinations must be unique");
+    }
+    Ok(values)
+}
+
+fn reconcile_activation_candidates(
+    target: &Dir,
+    values: BTreeMap<String, (Vec<u8>, u32)>,
+    mut current: BTreeMap<String, (ActivationRecord, FileSnapshot)>,
+) -> Result<(Vec<ActivationCandidate>, Vec<ActivationRecord>), LifecycleError> {
+    let mut candidates = Vec::with_capacity(values.len());
+    for (path, (bytes, mode)) in values {
+        let (preimage, preimage_must_match_candidate) =
+            if let Some((_, snapshot)) = current.remove(&path) {
+                (Some(snapshot), false)
+            } else {
+                let snapshot =
+                    read_optional_relative_file(target, &path, Some(mode), "activation file")?;
+                if let Some(snapshot) = snapshot.as_ref()
+                    && snapshot.bytes != bytes
+                {
+                    return invalid(format!(
+                        "refusing to overwrite unmanaged activation destination: {path}"
+                    ));
+                }
+                let adopted = snapshot.is_some();
+                (snapshot, adopted)
+            };
+        candidates.push(ActivationCandidate {
+            bytes,
+            mode,
+            path,
+            preimage,
+            preimage_must_match_candidate,
+        });
+    }
+    let retired = current.into_values().map(|(record, _)| record).collect();
+    Ok((candidates, retired))
+}
+
+fn prepare_activation_profiles(
+    target: &Dir,
+    source_assets: &mut Vec<SourceAssetSnapshot>,
+) -> Result<(Vec<ActivationCandidate>, Vec<String>), LifecycleError> {
+    let mut profiles = Vec::with_capacity(PROFILE_NAMES.len());
+    let mut created = Vec::new();
+    for name in PROFILE_NAMES {
+        let source = format!("assets/codex/profiles/{name}");
+        let snapshot = read_installed_asset(target, "codex", &source)?;
+        source_assets.push(SourceAssetSnapshot {
+            package: "codex".to_owned(),
+            snapshot: snapshot.clone(),
+            source,
+        });
+        let preimage = read_optional_relative_file(target, name, None, "Codex profile")?;
+        if preimage.is_none() {
+            created.push((*name).to_owned());
+        }
+        profiles.push(ActivationCandidate {
+            bytes: snapshot.bytes,
+            mode: MANAGED_FILE_MODE,
+            path: (*name).to_owned(),
+            preimage,
+            preimage_must_match_candidate: false,
+        });
+    }
+    Ok((profiles, created))
+}
+
+fn prepare_activation_config(
+    target: &Dir,
+    target_path: &Path,
+    source_assets: &mut Vec<SourceAssetSnapshot>,
+) -> Result<ActivationCandidate, LifecycleError> {
+    let shared = read_installed_asset(target, "codex", SHARED_CONFIG_SOURCE)?;
+    source_assets.push(SourceAssetSnapshot {
+        package: "codex".to_owned(),
+        snapshot: shared.clone(),
+        source: SHARED_CONFIG_SOURCE.to_owned(),
+    });
+    let preimage = read_optional_file(target, "config.toml", None, "config.toml")?;
+    let agents_path = target_path
+        .join("AGENTS.md")
+        .to_str()
+        .ok_or_else(|| invalid_error("source activation target path must be valid UTF-8"))?
+        .to_owned();
+    let bytes = render_codex_config(
+        preimage.as_ref().map(|snapshot| snapshot.bytes.as_slice()),
+        &shared.bytes,
+        &agents_path,
+    )?;
+    Ok(ActivationCandidate {
+        bytes,
+        mode: preimage
+            .as_ref()
+            .map_or(MANAGED_FILE_MODE, |snapshot| snapshot.mode),
+        path: "config.toml".to_owned(),
+        preimage,
+        preimage_must_match_candidate: false,
+    })
+}
+
+fn encode_activation_lock(candidates: &[ActivationCandidate]) -> Result<Vec<u8>, LifecycleError> {
+    Ok(canonical_json(&json!({
+        "files": candidates.iter().map(|candidate| json!({
+            "mode": candidate.mode,
+            "path": candidate.path,
+            "sha256": bytes_sha256(&candidate.bytes),
+        })).collect::<Vec<_>>(),
+        "handler": ACTIVATION_HANDLER_ID,
+        "manager": "agent-development-skills",
+        "schema_version": "2.0",
+    }))?)
+}
+
+fn activation_scope(
+    candidates: &[ActivationCandidate],
+    profiles: &[ActivationCandidate],
+    retired: &[ActivationRecord],
+    config: &ActivationCandidate,
+) -> Vec<String> {
+    let mut scope = BTreeSet::new();
+    scope.extend(candidates.iter().map(|candidate| candidate.path.clone()));
+    scope.extend(profiles.iter().map(|profile| profile.path.clone()));
+    scope.extend(retired.iter().map(|record| record.path.clone()));
+    scope.insert(config.path.clone());
+    scope.into_iter().collect()
+}
+
+fn verify_activation_output(
+    target: &Dir,
+    activation: &SourceActivation,
+) -> Result<(), LifecycleError> {
+    for candidate in &activation.candidates {
+        let current = read_required_relative_file(
+            target,
+            &candidate.path,
+            Some(candidate.mode),
+            "published activation file",
+        )?;
+        if current.bytes != candidate.bytes {
+            return invalid(format!(
+                "published activation file differs: {}",
+                candidate.path
+            ));
+        }
+    }
+    for profile in &activation.profiles {
+        let current = read_required_relative_file(
+            target,
+            &profile.path,
+            if profile.preimage.is_none() {
+                Some(profile.mode)
+            } else {
+                None
+            },
+            "published Codex profile",
+        )?;
+        if let Some(preimage) = profile.preimage.as_ref() {
+            verify_snapshot_equality(&current, preimage, "preserved Codex profile")?;
+        } else if current.bytes != profile.bytes {
+            return invalid(format!("created Codex profile differs: {}", profile.path));
+        }
+    }
+    for record in &activation.retired {
+        if read_optional_relative_file(target, &record.path, None, "retired activation file")?
+            .is_some()
+        {
+            return invalid(format!("retired activation file remains: {}", record.path));
+        }
+    }
+    let config = read_required_file(
+        target,
+        "config.toml",
+        Some(activation.config.mode),
+        "published config.toml",
+    )?;
+    if config.bytes != activation.config.bytes {
+        return invalid("published config.toml differs from activation candidate");
+    }
+    let managed = open_child_directory(
+        target,
+        ".agent-skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "managed metadata directory",
+    )?;
+    let lock = read_required_file(
+        &managed,
+        EXTERNAL_ACTIVATION_LOCK,
+        Some(MANAGED_FILE_MODE),
+        "published source activation Lock",
+    )?;
+    if lock.bytes != activation.candidate_lock {
+        return invalid("published source activation Lock differs from candidate");
+    }
+    let parsed = parse_json(&lock.bytes)?;
+    validate_activation_lock_contract(&parsed)?;
+    Ok(())
+}
+
+fn quarantine_activation_record(
+    target: &Dir,
+    target_path: &Path,
+    scratch: &Dir,
+    scratch_path: &Path,
+    record: &ActivationRecord,
+) -> Result<(), LifecycleError> {
+    verify_activation_file(target, &record.path, record.mode, &record.sha256)?;
+    let (parent, parent_path, name) =
+        open_existing_relative_parent(target, target_path, &record.path, "activation file")?;
+    let quarantine = allocate_quarantine_name();
+    rename_no_replace(
+        &parent,
+        &parent_path,
+        name,
+        scratch,
+        scratch_path,
+        &quarantine,
+    )
+    .map_err(|error| {
+        LifecycleError::Invalid(format!(
+            "could not quarantine retired activation file {}: {error}",
+            record.path
+        ))
+    })?;
+    if parent.symlink_metadata(name).is_ok() {
+        return invalid(format!(
+            "retired activation file remains after quarantine: {}",
+            record.path
+        ));
+    }
+    let quarantined = read_required_file(
+        scratch,
+        &quarantine,
+        Some(record.mode),
+        "quarantined activation file",
+    )?;
+    if bytes_sha256(&quarantined.bytes) != record.sha256 {
+        return invalid(format!(
+            "quarantined activation file differs: {}",
+            record.path
+        ));
+    }
+    Ok(())
+}
+
+fn publish_activation_candidate(
+    target: &Dir,
+    target_path: &Path,
+    scratch: &Dir,
+    scratch_path: &Path,
+    candidate: &ActivationCandidate,
+) -> Result<(), LifecycleError> {
+    verify_candidate_preimage(target, candidate)?;
+    let (parent, parent_path, name) = ensure_relative_parent(
+        target,
+        target_path,
+        &candidate.path,
+        "source activation destination",
+    )?;
+    let (temporary, prepared) =
+        prepare_activation_temporary(scratch, candidate.mode, &candidate.bytes)?;
+    quarantine_candidate_preimage(
+        &parent,
+        &parent_path,
+        name,
+        scratch,
+        scratch_path,
+        &temporary,
+        candidate,
+    )?;
+    verify_publication_temporary(scratch, &temporary, &prepared, candidate)?;
+    publish_prepared_candidate(
+        &parent,
+        &parent_path,
+        name,
+        scratch,
+        scratch_path,
+        &temporary,
+        &prepared,
+        candidate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn quarantine_candidate_preimage(
+    parent: &Dir,
+    parent_path: &Path,
+    name: &str,
+    scratch: &Dir,
+    scratch_path: &Path,
+    temporary: &str,
+    candidate: &ActivationCandidate,
+) -> Result<(), LifecycleError> {
+    if let Some(preimage) = candidate.preimage.as_ref() {
+        let current = read_required_file(
+            parent,
+            name,
+            Some(preimage.mode),
+            "source activation destination",
+        )?;
+        verify_snapshot_equality(&current, preimage, "source activation destination")?;
+        let quarantine = allocate_quarantine_name();
+        if let Err(error) = rename_no_replace(
+            parent,
+            parent_path,
+            name,
+            scratch,
+            scratch_path,
+            &quarantine,
+        ) {
+            return cleanup_temporary_after_error(
+                scratch,
+                temporary,
+                LifecycleError::Invalid(format!(
+                    "could not quarantine source activation destination {}: {error}",
+                    candidate.path
+                )),
+            );
+        }
+        let quarantined = read_required_file(
+            scratch,
+            &quarantine,
+            Some(preimage.mode),
+            "quarantined activation preimage",
+        )?;
+        if !same_object_cap(&quarantined.identity, &preimage.identity)
+            || quarantined.identity.nlink() != 1
+            || quarantined.bytes != preimage.bytes
+            || quarantined.mode != preimage.mode
+        {
+            return invalid("quarantined activation preimage differs after rename");
+        }
+    } else {
+        match parent.symlink_metadata(name) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return cleanup_temporary_after_error(scratch, temporary, error.into());
+            }
+            Ok(_) => {
+                return cleanup_temporary_after_error(
+                    scratch,
+                    temporary,
+                    invalid_error(format!(
+                        "source activation destination appeared before publication: {}",
+                        candidate.path
+                    )),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_publication_temporary(
+    scratch: &Dir,
+    temporary: &str,
+    prepared: &FileSnapshot,
+    candidate: &ActivationCandidate,
+) -> Result<(), LifecycleError> {
+    let current_temporary = read_required_file(
+        scratch,
+        temporary,
+        Some(candidate.mode),
+        "activation publication temporary file",
+    )?;
+    if !same_object_cap(&prepared.identity, &current_temporary.identity)
+        || !same_content_state_cap(&prepared.identity, &current_temporary.identity)
+        || current_temporary.identity.nlink() != 1
+        || current_temporary.bytes != candidate.bytes
+    {
+        return cleanup_temporary_after_error(
+            scratch,
+            temporary,
+            invalid_error("activation publication temporary changed before rename"),
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_prepared_candidate(
+    parent: &Dir,
+    parent_path: &Path,
+    name: &str,
+    scratch: &Dir,
+    scratch_path: &Path,
+    temporary: &str,
+    prepared: &FileSnapshot,
+    candidate: &ActivationCandidate,
+) -> Result<(), LifecycleError> {
+    rename_no_replace(scratch, scratch_path, temporary, parent, parent_path, name).map_err(
+        |error| {
+            LifecycleError::Invalid(format!(
+                "could not publish source activation destination {}: {error}",
+                candidate.path
+            ))
+        },
+    )?;
+    let published = read_required_file(
+        parent,
+        name,
+        Some(candidate.mode),
+        "published source activation destination",
+    )?;
+    if !same_object_cap(&prepared.identity, &published.identity)
+        || published.identity.nlink() != 1
+        || published.bytes != candidate.bytes
+    {
+        return invalid(format!(
+            "published source activation destination differs: {}",
+            candidate.path
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_activation_temporary(
+    scratch: &Dir,
+    mode: u32,
+    bytes: &[u8],
+) -> Result<(String, FileSnapshot), LifecycleError> {
+    for _ in 0..128_u64 {
+        let name = allocate_temporary_name();
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        configure_nofollow(&mut options);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match scratch.open_with(&name, &options) {
+            Ok(mut file) => {
+                let opened = file.metadata()?;
+                let result = (|| {
+                    if opened.nlink() != 1 || !mode_matches(file_mode(&opened), Some(0o600)) {
+                        return invalid(
+                            "activation publication temporary is not private or has an alias",
+                        );
+                    }
+                    file.write_all(bytes)?;
+                    #[cfg(unix)]
+                    {
+                        use cap_std::fs::{Permissions, PermissionsExt as _};
+                        file.set_permissions(Permissions::from_mode(mode))?;
+                    }
+                    file.sync_all()?;
+                    let completed = file.metadata()?;
+                    if !same_object_cap(&opened, &completed)
+                        || completed.nlink() != 1
+                        || !mode_matches(file_mode(&completed), Some(mode))
+                    {
+                        return invalid("activation publication temporary changed while writing");
+                    }
+                    drop(file);
+                    let reopened = read_required_file(
+                        scratch,
+                        &name,
+                        Some(mode),
+                        "activation publication temporary file",
+                    )?;
+                    if !same_object_cap(&completed, &reopened.identity)
+                        || !same_content_state_cap(&completed, &reopened.identity)
+                        || reopened.identity.nlink() != 1
+                        || reopened.bytes != bytes
+                    {
+                        return invalid("activation publication temporary changed after writing");
+                    }
+                    Ok(reopened)
+                })();
+                return match result {
+                    Ok(prepared) => Ok((name, prepared)),
+                    Err(error) => cleanup_temporary_after_error(scratch, &name, error),
+                };
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    invalid("could not allocate activation publication temporary file")
+}
+
+fn ensure_relative_parent<'a>(
+    root: &Dir,
+    root_path: &Path,
+    relative: &'a str,
+    label: &str,
+) -> Result<(Dir, PathBuf, &'a str), LifecycleError> {
+    let (parents, name) = relative_file_parts(relative, label)?;
+    let mut directory = root.try_clone()?;
+    let mut directory_path = root_path.to_path_buf();
+    for parent in parents {
+        directory = match directory.symlink_metadata(parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return invalid(format!("{label} parent is unsafe: {relative}"));
+            }
+            Ok(_) => open_child_directory(&directory, parent, None, label)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                external_stage::create_directory(
+                    &directory,
+                    OsStr::new(parent),
+                    Some(MANAGED_DIRECTORY_MODE),
+                    "source activation directory",
+                )?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        directory_path.push(parent);
+    }
+    Ok((directory, directory_path, name))
+}
+
+fn open_existing_relative_parent<'a>(
+    root: &Dir,
+    root_path: &Path,
+    relative: &'a str,
+    label: &str,
+) -> Result<(Dir, PathBuf, &'a str), LifecycleError> {
+    let (parents, name) = relative_file_parts(relative, label)?;
+    let mut directory = root.try_clone()?;
+    let mut directory_path = root_path.to_path_buf();
+    for parent in parents {
+        directory = open_child_directory(&directory, parent, None, label)?;
+        directory_path.push(parent);
+    }
+    Ok((directory, directory_path, name))
+}
+
+fn allocate_temporary_name() -> String {
+    format!(
+        ".agent-source-activation-temp-{}-{}",
+        std::process::id(),
+        CONFIG_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn allocate_quarantine_name() -> String {
+    format!(
+        ".agent-source-activation-old-{}-{}",
+        std::process::id(),
+        CONFIG_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn activation_record(value: &Value) -> Result<ActivationRecord, LifecycleError> {
+    Ok(ActivationRecord {
+        mode: value
+            .get("mode")
+            .and_then(Value::as_u64)
+            .and_then(|mode| u32::try_from(mode).ok())
+            .ok_or_else(|| invalid_error("source activation Lock mode is invalid"))?,
+        path: value
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid_error("source activation Lock path is invalid"))?
+            .to_owned(),
+        sha256: value
+            .get("sha256")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid_error("source activation Lock hash is invalid"))?
+            .to_owned(),
+    })
+}
+
+fn activation_migration_report(source: &Value) -> Result<Value, LifecycleError> {
+    let mut migrated = source.clone();
+    let object = migrated
+        .as_object_mut()
+        .ok_or_else(|| invalid_error("source activation Lock must be an object"))?;
+    object.insert("schema_version".to_owned(), Value::String("2.0".to_owned()));
+    object.insert(
+        "handler".to_owned(),
+        Value::String(ACTIVATION_HANDLER_ID.to_owned()),
+    );
+    validate_activation_lock_contract(&migrated)?;
+    let mut report = json!({
+        "after_sha256": canonical_sha256(&migrated)?,
+        "artifact": "activation-lock",
+        "before_sha256": canonical_sha256(source)?,
+        "from_version": "1.0",
+        "lossless": true,
+        "schema_version": "1.0",
+        "status": "applied",
+        "steps": [{
+            "changes": ["add:/handler", "replace:/schema_version"],
+            "from_version": "1.0",
+            "lossless": true,
+            "to_version": "2.0",
+        }],
+        "to_version": "2.0",
+    });
+    let fingerprint = canonical_sha256(&report)?;
+    report["fingerprint"] = Value::String(fingerprint);
+    Ok(report)
+}
+
+fn read_installed_asset(
+    target: &Dir,
+    package: &str,
+    source: &str,
+) -> Result<FileSnapshot, LifecycleError> {
+    let managed = open_child_directory(
+        target,
+        ".agent-skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "managed metadata directory",
+    )?;
+    let packages = open_child_directory(
+        &managed,
+        "packages",
+        Some(MANAGED_DIRECTORY_MODE),
+        "installed packages directory",
+    )?;
+    let package = open_child_directory(&packages, package, None, "installed activation package")?;
+    read_required_relative_file(&package, source, None, "installed source activation asset")
+}
+
+fn read_optional_relative_file(
+    root: &Dir,
+    relative: &str,
+    mode: Option<u32>,
+    label: &str,
+) -> Result<Option<FileSnapshot>, LifecycleError> {
+    let (parts, name) = relative_file_parts(relative, label)?;
+    let mut directory = root.try_clone()?;
+    for parent in parts {
+        match directory.symlink_metadata(parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return invalid(format!("{label} parent is unsafe: {relative}"));
+            }
+            Ok(_) => {
+                directory = open_child_directory(&directory, parent, None, label)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    read_optional_file(&directory, name, mode, label)
+}
+
+fn read_required_relative_file(
+    root: &Dir,
+    relative: &str,
+    mode: Option<u32>,
+    label: &str,
+) -> Result<FileSnapshot, LifecycleError> {
+    let (parent, name) = open_relative_parent(root, relative, label)?;
+    read_required_file(&parent, name, mode, label)
+}
+
+fn relative_file_parts<'a>(
+    relative: &'a str,
+    label: &str,
+) -> Result<(Vec<&'a str>, &'a str), LifecycleError> {
+    let path = Path::new(relative);
+    if path.is_absolute() {
+        return invalid(format!("{label} must be a package-relative path"));
+    }
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => parts.push(
+                part.to_str()
+                    .ok_or_else(|| invalid_error(format!("{label} path is invalid")))?,
+            ),
+            Component::CurDir => {}
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
+                return invalid(format!("{label} must be a package-relative path"));
+            }
+        }
+    }
+    let (name, parents) = parts
+        .split_last()
+        .ok_or_else(|| invalid_error(format!("{label} must be a package-relative path")))?;
+    Ok((parents.to_vec(), name))
+}
+
+fn verify_candidate_preimage(
+    target: &Dir,
+    candidate: &ActivationCandidate,
+) -> Result<(), LifecycleError> {
+    if let Some(expected) = candidate.preimage.as_ref() {
+        let current = read_required_relative_file(
+            target,
+            &candidate.path,
+            if candidate.preimage_must_match_candidate {
+                Some(candidate.mode)
+            } else {
+                None
+            },
+            "source activation destination",
+        )?;
+        verify_snapshot_equality(&current, expected, "source activation destination")?;
+        if candidate.preimage_must_match_candidate && current.bytes != candidate.bytes {
+            return invalid(format!(
+                "unmanaged activation destination changed: {}",
+                candidate.path
+            ));
+        }
+    } else if read_optional_relative_file(
+        target,
+        &candidate.path,
+        None,
+        "source activation destination",
+    )?
+    .is_some()
+    {
+        return invalid(format!(
+            "source activation destination appeared after preflight: {}",
+            candidate.path
+        ));
+    }
+    Ok(())
+}
+
+fn verify_snapshot_equality(
+    current: &FileSnapshot,
+    expected: &FileSnapshot,
+    label: &str,
+) -> Result<(), LifecycleError> {
+    if !same_object_cap(&current.identity, &expected.identity)
+        || !same_content_state_cap(&current.identity, &expected.identity)
+        || current.bytes != expected.bytes
+        || current.mode != expected.mode
+    {
+        return invalid(format!("{label} changed after preflight"));
+    }
+    Ok(())
+}
+
+fn bytes_sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn prepare_config_deactivation(
@@ -478,8 +1589,25 @@ fn read_required_file(
     if !mode_matches(mode, expected_mode) {
         return invalid(format!("{label} mode is not canonical"));
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    if identity.len() > MAX_CONTRACT_JSON_BYTES as u64 {
+        return Err(agent_contracts::ContractError::InputTooLarge {
+            maximum: MAX_CONTRACT_JSON_BYTES,
+        }
+        .into());
+    }
+    let capacity = usize::try_from(identity.len())
+        .unwrap_or(MAX_CONTRACT_JSON_BYTES)
+        .min(MAX_CONTRACT_JSON_BYTES);
+    let mut bytes = Vec::with_capacity(capacity);
+    (&mut file)
+        .take((MAX_CONTRACT_JSON_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CONTRACT_JSON_BYTES {
+        return Err(agent_contracts::ContractError::InputTooLarge {
+            maximum: MAX_CONTRACT_JSON_BYTES,
+        }
+        .into());
+    }
     let after = file.metadata()?;
     let reopened = parent
         .open_with(name, &options)
@@ -567,6 +1695,129 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     static TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn set_mode(path: &Path, mode: u32) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                .expect("set fixture mode");
+        }
+        #[cfg(not(unix))]
+        let _ = (path, mode);
+    }
+
+    fn write_fixture_file(root: &Path, relative: &str, bytes: &[u8], mode: u32) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("fixture file parent"))
+            .expect("create fixture parent");
+        std::fs::write(&path, bytes).expect("write fixture file");
+        set_mode(&path, mode);
+        let mut parent = path.parent();
+        while let Some(directory) = parent {
+            if !directory.starts_with(root) {
+                break;
+            }
+            set_mode(directory, MANAGED_DIRECTORY_MODE);
+            if directory == root {
+                break;
+            }
+            parent = directory.parent();
+        }
+    }
+
+    fn activation_fixture() -> (PathBuf, Dir, Dir) {
+        let target_path = std::env::temp_dir().join(format!(
+            "agent-source-activation-{}-{}",
+            std::process::id(),
+            TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&target_path).expect("create activation target");
+        set_mode(&target_path, MANAGED_DIRECTORY_MODE);
+        for asset in ACTIVATION_ASSETS {
+            write_fixture_file(
+                &target_path,
+                &format!(".agent-skills/packages/{}/{}", asset.package, asset.source),
+                format!("# {}/{}\n", asset.package, asset.source).as_bytes(),
+                asset.mode,
+            );
+        }
+        for name in PROFILE_NAMES {
+            write_fixture_file(
+                &target_path,
+                &format!(".agent-skills/packages/codex/assets/codex/profiles/{name}"),
+                format!("# managed profile {name}\n").as_bytes(),
+                MANAGED_FILE_MODE,
+            );
+        }
+        write_fixture_file(
+            &target_path,
+            ".agent-skills/packages/codex/assets/codex/codex.shared.toml",
+            b"model = \"shared\"\n[features]\nmanaged = true\n",
+            MANAGED_FILE_MODE,
+        );
+        write_fixture_file(
+            &target_path,
+            "agents/reviewer.toml",
+            b"# old reviewer\n",
+            MANAGED_FILE_MODE,
+        );
+        write_fixture_file(&target_path, "bin/retired", b"retired\n", 0o755);
+        let design = ACTIVATION_ASSETS
+            .iter()
+            .find(|asset| asset.destination == "agents/design_researcher.toml")
+            .expect("design asset");
+        write_fixture_file(
+            &target_path,
+            design.destination,
+            format!("# {}/{}\n", design.package, design.source).as_bytes(),
+            design.mode,
+        );
+        write_fixture_file(
+            &target_path,
+            "readonly.config.toml",
+            b"# user profile\n",
+            0o600,
+        );
+        write_fixture_file(
+            &target_path,
+            "config.toml",
+            b"model = \"local\"\n[features]\nlocal = true\n",
+            0o640,
+        );
+        let lock = json!({
+            "files": [
+                {
+                    "mode": MANAGED_FILE_MODE,
+                    "path": "agents/reviewer.toml",
+                    "sha256": bytes_sha256(b"# old reviewer\n"),
+                },
+                {
+                    "mode": 0o755,
+                    "path": "bin/retired",
+                    "sha256": bytes_sha256(b"retired\n"),
+                },
+            ],
+            "manager": "agent-development-skills",
+            "schema_version": "1.0",
+        });
+        write_fixture_file(
+            &target_path,
+            ".agent-skills/activation-lock.json",
+            &canonical_json(&lock).expect("encode fixture lock"),
+            MANAGED_FILE_MODE,
+        );
+        std::fs::create_dir(target_path.join(".scratch")).expect("create fixture scratch");
+        set_mode(&target_path.join(".scratch"), 0o700);
+        let target_path = target_path
+            .canonicalize()
+            .expect("canonical fixture target");
+        let target =
+            Dir::open_ambient_dir(&target_path, ambient_authority()).expect("open fixture target");
+        let scratch = Dir::open_ambient_dir(target_path.join(".scratch"), ambient_authority())
+            .expect("open fixture scratch");
+        (target_path, target, scratch)
+    }
 
     #[test]
     fn root_assignment_removal_preserves_every_other_byte() {
@@ -656,5 +1907,122 @@ mod tests {
         assert!(lock_path.exists());
         drop(target);
         std::fs::remove_dir_all(&target_path).expect("remove target");
+    }
+
+    #[test]
+    fn source_activation_publishes_owned_assets_profiles_config_and_lock_last() {
+        let (target_path, target, scratch) = activation_fixture();
+        let prepared =
+            SourceActivation::prepare(&target, &target_path, b"native session launcher\n")
+                .expect("prepare source activation");
+        assert!(prepared.scope().contains(&"bin/retired".to_owned()));
+        assert!(prepared.scope().contains(&"config.toml".to_owned()));
+        let mut phases = Vec::new();
+        let result = prepared
+            .apply_with_hook(
+                &target,
+                &target_path,
+                &scratch,
+                &target_path.join(".scratch"),
+                |path, phase| {
+                    phases.push((path.to_owned(), phase.to_owned()));
+                    Ok(())
+                },
+            )
+            .expect("apply source activation");
+        assert_eq!(
+            phases.last().map(|(_, phase)| phase.as_str()),
+            Some("activation-lock-published")
+        );
+        assert_eq!(
+            result.get("handler").and_then(Value::as_str),
+            Some(ACTIVATION_HANDLER_ID)
+        );
+        assert_eq!(
+            result.get("migration"),
+            Some(&json!({
+                "after_sha256": "55e815d59b610a7d020af1cd26bca7c3688d8eb55431660f1f9079f055d308ee",
+                "artifact": "activation-lock",
+                "before_sha256": "bc1bf4345c71c173e38ce260a5a93495cbaf0e7b46ae17af2e79ca2659fbf407",
+                "fingerprint": "6767c3fe97f75c96902515ba01585083be77ce3ef368a8aa3917e6503713ff6d",
+                "from_version": "1.0",
+                "lossless": true,
+                "schema_version": "1.0",
+                "status": "applied",
+                "steps": [{
+                    "changes": ["add:/handler", "replace:/schema_version"],
+                    "from_version": "1.0",
+                    "lossless": true,
+                    "to_version": "2.0",
+                }],
+                "to_version": "2.0",
+            }))
+        );
+        assert!(!target_path.join("bin/retired").exists());
+        assert_eq!(
+            std::fs::read(target_path.join("bin/agent-session"))
+                .expect("read native session launcher"),
+            b"native session launcher\n"
+        );
+        assert_eq!(
+            std::fs::read(target_path.join("readonly.config.toml"))
+                .expect("read preserved user profile"),
+            b"# user profile\n"
+        );
+        let config = std::fs::read_to_string(target_path.join("config.toml"))
+            .expect("read activated config");
+        assert!(config.contains("model = \"local\""));
+        assert!(config.contains("managed = true"));
+        assert!(config.contains("model_instructions_file"));
+        let lock = parse_json(
+            &std::fs::read(target_path.join(".agent-skills/activation-lock.json"))
+                .expect("read activated Lock"),
+        )
+        .expect("parse activated Lock");
+        assert_eq!(
+            validate_activation_lock_contract(&lock)
+                .expect("validate activated Lock")
+                .0,
+            "2.0"
+        );
+        drop(scratch);
+        drop(target);
+        std::fs::remove_dir_all(&target_path).expect("remove activation fixture");
+    }
+
+    #[test]
+    fn source_activation_revalidates_every_preimage_before_retiring_files() {
+        let (target_path, target, scratch) = activation_fixture();
+        let prepared =
+            SourceActivation::prepare(&target, &target_path, b"native session launcher\n")
+                .expect("prepare source activation");
+        std::fs::write(target_path.join("config.toml"), b"model = \"drift\"\n")
+            .expect("drift config");
+        let error = prepared
+            .apply_with_hook(
+                &target,
+                &target_path,
+                &scratch,
+                &target_path.join(".scratch"),
+                |_, _| Ok(()),
+            )
+            .expect_err("drift must fail before writes");
+        assert!(
+            error.to_string().contains("changed after preflight"),
+            "{error}"
+        );
+        assert!(target_path.join("bin/retired").is_file());
+        let lock = parse_json(
+            &std::fs::read(target_path.join(".agent-skills/activation-lock.json"))
+                .expect("read original Lock"),
+        )
+        .expect("parse original Lock");
+        assert_eq!(
+            lock.get("schema_version").and_then(Value::as_str),
+            Some("1.0")
+        );
+        drop(scratch);
+        drop(target);
+        std::fs::remove_dir_all(&target_path).expect("remove activation fixture");
     }
 }

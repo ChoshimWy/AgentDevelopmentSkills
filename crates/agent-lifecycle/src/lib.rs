@@ -12,9 +12,10 @@
 //! recovery, its internal mutation boundary restores validated external
 //! rollback preimages through a private quarantine. The approved external scope
 //! must remain quiescent without concurrently writable handles. The first
-//! trusted handler performs source deactivation with exact rollback-scope and
-//! Activation ownership checks. Source activation, uninstall, and production
-//! command routing remain outside this slice.
+//! trusted handlers perform source deactivation and replacement-transaction
+//! source activation with exact rollback-scope and Activation ownership
+//! checks. Fresh-install activation, uninstall, and production command routing
+//! remain outside this slice.
 
 mod codex_config;
 mod doctor_report;

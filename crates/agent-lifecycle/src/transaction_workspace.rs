@@ -24,9 +24,9 @@ static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// Activation snapshot plus a persistent rollback point for an intact current
 /// installation. Managed roots can then be published through an identity-bound
 /// [`super::PublishedInstall`] guard. That guard owns external rollback
-/// restoration once its internal mutation boundary starts; trusted handler
-/// execution is currently limited to source deactivation, while production
-/// install/rollback commands are not routed through it.
+/// restoration once its internal mutation boundary starts; trusted handlers
+/// now cover source deactivation and rollback-backed replacement activation,
+/// while production install/rollback commands are not routed through it.
 #[must_use = "the lifecycle workspace must be held for the full transaction"]
 pub struct LifecycleWorkspace {
     backup: WorkspaceEntry,
@@ -427,7 +427,11 @@ impl LifecycleWorkspace {
         let rollback = self.staged_rollback_point.as_ref().ok_or_else(|| {
             LifecycleError::Invalid("lifecycle workspace has no frozen rollback point".to_owned())
         })?;
-        rollback_stage::verify_published(&self.target_directory, rollback)?;
+        rollback_stage::verify_published_external_preimage(
+            &self.target_directory,
+            rollback,
+            expected,
+        )?;
         self.validate()
     }
 
@@ -578,6 +582,9 @@ impl LifecycleWorkspace {
             }
             Err(error) => errors.push(("lock revalidation", error)),
         }
+        if let Err(error) = self.cleanup_handler_scratch() {
+            errors.push(("handler scratch", error));
+        }
         if let Err(error) = self.release_lock() {
             errors.push(("lock release", error));
         }
@@ -598,6 +605,9 @@ impl LifecycleWorkspace {
         let mut errors = Vec::new();
         if let Err(error) = self.stage.cleanup(&self.target_directory) {
             errors.push(("stage", error));
+        }
+        if let Err(error) = self.cleanup_handler_scratch() {
+            errors.push(("handler scratch", error));
         }
         if let Err(error) = self.release_lock() {
             errors.push(("lock release", error));
@@ -624,6 +634,7 @@ impl LifecycleWorkspace {
         self.backup.validate(&self.target_directory)?;
         let stage = self.stage_path();
         let backup = self.backup_path();
+        self.cleanup_handler_scratch()?;
         self.stage.preserve();
         self.backup.preserve();
         self.release_lock()?;
@@ -641,6 +652,37 @@ impl LifecycleWorkspace {
             .take()
             .ok_or_else(|| LifecycleError::Invalid("lifecycle workspace lock is inactive".into()))?
             .release()
+    }
+
+    fn cleanup_handler_scratch(&self) -> Result<(), LifecycleError> {
+        let scratch = self.lock()?.directory()?;
+        let mut names = Vec::new();
+        for entry in scratch.entries()? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or_else(|| {
+                LifecycleError::Invalid(
+                    "lifecycle handler scratch contains a non-UTF-8 entry".to_owned(),
+                )
+            })?;
+            if !name.starts_with(".agent-source-activation-")
+                && !name.starts_with(".config.toml.agent-skills-")
+            {
+                return invalid(format!(
+                    "lifecycle handler scratch contains an unknown entry: {name}"
+                ));
+            }
+            let metadata = scratch.symlink_metadata(name)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return invalid(format!("lifecycle handler scratch entry is unsafe: {name}"));
+            }
+            names.push(name.to_owned());
+        }
+        names.sort();
+        for name in names {
+            scratch.remove_file(&name)?;
+        }
+        Ok(())
     }
 
     fn validate_staged_install_identity(
@@ -673,6 +715,10 @@ impl LifecycleWorkspace {
 
     pub(super) fn handler_scratch_directory(&self) -> Result<Dir, LifecycleError> {
         self.lock()?.directory()
+    }
+
+    pub(super) fn handler_scratch_path(&self) -> PathBuf {
+        self.target.join(super::LIFECYCLE_LOCK_DIRECTORY)
     }
 
     pub(super) fn has_staged_rollback_point(&self) -> bool {
@@ -1102,6 +1148,28 @@ mod tests {
             inspect_doctor_baseline(&root, root.join("schemas")).expect("inspect clean target");
         assert!(recovery_candidates(&report).is_empty());
         std::fs::remove_dir(&root).expect("remove workspace target");
+    }
+
+    #[test]
+    fn handler_scratch_is_removed_before_lifecycle_lock_release() {
+        let root = temporary_path("handler-scratch-cleanup");
+        std::fs::create_dir(&root).expect("create handler scratch target");
+        let workspace = LifecycleWorkspace::begin(&root).expect("begin lifecycle workspace");
+        let scratch = workspace
+            .handler_scratch_directory()
+            .expect("open handler scratch");
+        external_stage::write_independent_file(
+            &scratch,
+            ".agent-source-activation-old-test",
+            b"preimage\n",
+            0o600,
+            "test handler scratch",
+        )
+        .expect("write handler scratch");
+        drop(scratch);
+        workspace.cleanup().expect("cleanup lifecycle workspace");
+        assert!(!root.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        std::fs::remove_dir(&root).expect("remove handler scratch target");
     }
 
     #[test]
