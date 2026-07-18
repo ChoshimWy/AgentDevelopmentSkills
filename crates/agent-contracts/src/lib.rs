@@ -3,6 +3,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
 use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::Path;
@@ -37,6 +38,69 @@ pub enum ContractError {
         actual: Option<String>,
         expected: String,
     },
+}
+
+/// An arbitrary-precision JSON integer normalized for Python-compatible
+/// equality and ordering.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JsonInteger {
+    digits: Box<str>,
+    negative: bool,
+}
+
+impl Ord for JsonInteger {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self.negative, other.negative) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            (false, false) => self
+                .digits
+                .len()
+                .cmp(&other.digits.len())
+                .then_with(|| self.digits.cmp(&other.digits)),
+            (true, true) => other
+                .digits
+                .len()
+                .cmp(&self.digits.len())
+                .then_with(|| other.digits.cmp(&self.digits)),
+        }
+    }
+}
+
+impl PartialOrd for JsonInteger {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Parse a JSON integer without narrowing it to a machine-sized type.
+///
+/// Floats and exponential notation are rejected even when their mathematical
+/// value is integral. Zero is normalized so `-0` compares equal to `0`, as it
+/// does in Python.
+#[must_use]
+pub fn json_integer(value: &Value) -> Option<JsonInteger> {
+    let source = value.as_number()?.to_string();
+    if source.contains(['.', 'e', 'E']) {
+        return None;
+    }
+    let (negative, unsigned) = source
+        .strip_prefix('-')
+        .map_or((false, source.as_str()), |digits| (true, digits));
+    if unsigned.is_empty() || !unsigned.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let digits = unsigned.trim_start_matches('0');
+    if digits.is_empty() {
+        return Some(JsonInteger {
+            digits: "0".into(),
+            negative: false,
+        });
+    }
+    Some(JsonInteger {
+        digits: digits.into(),
+        negative,
+    })
 }
 
 /// Parse JSON using the same last-key-wins object behavior as Python's `json.loads`.
@@ -344,8 +408,8 @@ pub fn require_schema_version(value: &Value, expected: &str) -> Result<(), Contr
 mod tests {
     use super::{
         MAX_CANONICAL_INTEGER_DIGITS, MAX_CANONICAL_JSON_DEPTH, MAX_CONTRACT_JSON_BYTES,
-        canonical_json, canonical_sha256, load_json, parse_json, python_float_from_shortest,
-        require_schema_version,
+        canonical_json, canonical_sha256, json_integer, load_json, parse_json,
+        python_float_from_shortest, require_schema_version,
     };
     use serde_json::json;
 
@@ -391,6 +455,20 @@ mod tests {
             canonical_json(&value).unwrap(),
             b"{\"value\":123456789012345678901234567890}\n"
         );
+    }
+
+    #[test]
+    fn arbitrary_precision_integers_preserve_python_ordering() {
+        let values = parse_json(
+            br#"{"huge":9223372036854775808,"larger":9223372036854775809,"negative":-9223372036854775809,"small":-1,"float":1.0}"#,
+        )
+        .unwrap();
+        let object = values.as_object().unwrap();
+        assert!(
+            json_integer(&object["negative"]).unwrap() < json_integer(&object["small"]).unwrap()
+        );
+        assert!(json_integer(&object["huge"]).unwrap() < json_integer(&object["larger"]).unwrap());
+        assert!(json_integer(&object["float"]).is_none());
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! does not install, upgrade, roll back, or remove managed content.
 
 mod packages;
+mod post_install;
 
 use agent_contracts::{
     ContractError, MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256, parse_json,
@@ -121,9 +122,10 @@ impl BaselineState {
 /// The returned projection contains the existing Doctor check records for the
 /// safe-target, recovery-residue, managed-layout, Install Lock, persistent
 /// Lockfile, Core runtime identity, Schema inventory, and Activation integrity
-/// checks, plus installed package/Manifest integrity and rebuilt package
-/// semantics. It is intentionally a compatibility probe rather than a new
-/// public artifact schema.
+/// checks, plus installed package/Manifest and Skill integrity, global AGENTS
+/// composition, Capability Binding and Provider closure freezing, and
+/// permission freezing against rebuilt package semantics. It is intentionally
+/// a compatibility probe rather than a new public artifact schema.
 ///
 /// Target and managed directories are held as directory capabilities. Contract
 /// files are opened without following symlinks and their identities are checked
@@ -338,7 +340,13 @@ pub fn inspect_doctor_baseline(
         state.install_lock.as_ref(),
         state.package_lock.as_ref(),
     ) {
-        match packages::check_package_integrity(target_directory, install_lock, package_lock) {
+        let mut retained_semantics = None;
+        match packages::check_package_integrity(
+            target_directory,
+            install_lock,
+            package_lock,
+            &mut retained_semantics,
+        ) {
             Ok(inspection) => {
                 state.installed_semantics = Some(inspection.semantics);
                 state.record(
@@ -349,12 +357,15 @@ pub fn inspect_doctor_baseline(
                     inspection.details,
                 );
             }
-            Err(error) => state.failed(
-                "package.integrity",
-                "package",
-                "Installed packages and Manifests match both Lockfiles",
-                error,
-            ),
+            Err(error) => {
+                state.installed_semantics = retained_semantics;
+                state.failed(
+                    "package.integrity",
+                    "package",
+                    "Installed packages and Manifests match both Lockfiles",
+                    error,
+                );
+            }
         }
     } else {
         state.record(
@@ -362,6 +373,137 @@ pub fn inspect_doctor_baseline(
             "package",
             "skipped",
             "Package verification requires both Lockfiles",
+            json!({}),
+        );
+    }
+
+    if let (Some(target_directory), Some(install_lock)) =
+        (target_directory.as_ref(), state.install_lock.as_ref())
+    {
+        match post_install::check_skill_integrity(
+            target_directory,
+            install_lock,
+            state.installed_semantics.as_ref(),
+        ) {
+            Ok(details) => state.record(
+                "skill.integrity",
+                "skill",
+                "passed",
+                "Installed Skills match the Install Lock",
+                details,
+            ),
+            Err(error) => state.failed(
+                "skill.integrity",
+                "skill",
+                "Installed Skills match the Install Lock",
+                error,
+            ),
+        }
+    } else {
+        state.record(
+            "skill.integrity",
+            "skill",
+            "skipped",
+            "Skill verification requires a valid Install Lock",
+            json!({}),
+        );
+    }
+
+    if let (Some(target_directory), Some(install_lock), Some(package_lock)) = (
+        target_directory.as_ref(),
+        state.install_lock.as_ref(),
+        state.package_lock.as_ref(),
+    ) {
+        match post_install::check_global_instructions(
+            target_directory,
+            install_lock,
+            package_lock,
+            state.installed_semantics.as_ref(),
+        ) {
+            Ok(details) => state.record(
+                "instructions.global",
+                "instructions",
+                "passed",
+                "Unique global AGENTS source, fragment order, rule trace and final hash are valid",
+                details,
+            ),
+            Err(error) => state.failed(
+                "instructions.global",
+                "instructions",
+                "Unique global AGENTS source, fragment order, rule trace and final hash are valid",
+                error,
+            ),
+        }
+    } else {
+        state.record(
+            "instructions.global",
+            "instructions",
+            "skipped",
+            "AGENTS verification requires both Lockfiles",
+            json!({}),
+        );
+    }
+
+    if let (Some(install_lock), Some(package_lock)) =
+        (state.install_lock.as_ref(), state.package_lock.as_ref())
+    {
+        match post_install::check_binding_freeze(
+            install_lock,
+            package_lock,
+            state.installed_semantics.as_ref(),
+        ) {
+            Ok(details) => state.record(
+                "binding.freeze",
+                "binding",
+                "passed",
+                "Capability Bindings and Provider closure are frozen",
+                details,
+            ),
+            Err(error) => state.failed(
+                "binding.freeze",
+                "binding",
+                "Capability Bindings and Provider closure are frozen",
+                error,
+            ),
+        }
+    } else {
+        state.record(
+            "binding.freeze",
+            "binding",
+            "skipped",
+            "Binding verification requires both Lockfiles",
+            json!({}),
+        );
+    }
+
+    if let (Some(install_lock), Some(package_lock)) =
+        (state.install_lock.as_ref(), state.package_lock.as_ref())
+    {
+        match post_install::check_permission_freeze(
+            install_lock,
+            package_lock,
+            state.installed_semantics.as_ref(),
+        ) {
+            Ok(details) => state.record(
+                "permission.freeze",
+                "permission",
+                "passed",
+                "Permission profiles and per-Capability grants are frozen",
+                details,
+            ),
+            Err(error) => state.failed(
+                "permission.freeze",
+                "permission",
+                "Permission profiles and per-Capability grants are frozen",
+                error,
+            ),
+        }
+    } else {
+        state.record(
+            "permission.freeze",
+            "permission",
+            "skipped",
+            "Permission verification requires both Lockfiles",
             json!({}),
         );
     }

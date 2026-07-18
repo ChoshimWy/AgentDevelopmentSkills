@@ -1,6 +1,6 @@
 //! Read-only manifest registry used by the native migration path.
 
-use agent_contracts::{ContractError, canonical_sha256, load_json};
+use agent_contracts::{ContractError, canonical_sha256, json_integer, load_json};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -972,7 +972,7 @@ fn validate_manifest(value: &Value) -> Result<(), RegistryError> {
             let identifier = required_string(fragment, "id")?;
             required_string(fragment, "path")?;
             required_string(fragment, "scope")?;
-            if !fragment.get("order").is_some_and(Value::is_i64)
+            if fragment.get("order").and_then(json_integer).is_none()
                 || !matches!(
                     string_field(fragment, "merge_strategy"),
                     Some("append" | "locked")

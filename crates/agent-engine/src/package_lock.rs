@@ -1,7 +1,7 @@
 //! Persistent deterministic package Lockfile compatibility.
 
 use super::{EngineError, invalid};
-use agent_contracts::{MAX_CONTRACT_JSON_BYTES, canonical_sha256, parse_json};
+use agent_contracts::{MAX_CONTRACT_JSON_BYTES, canonical_sha256, json_integer, parse_json};
 use agent_registry::satisfies;
 use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
@@ -1305,7 +1305,7 @@ fn validate_install_instructions(
         let path = required_string(fragment, "path")?;
         let order = fragment
             .get("order")
-            .and_then(Value::as_i64)
+            .and_then(json_integer)
             .ok_or_else(|| EngineError::Invalid("instruction order is invalid".to_owned()))?;
         if id.is_empty()
             || !fragment_ids.insert(id.clone())

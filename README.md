@@ -189,9 +189,12 @@ residue, managed layout, Install/Persistent Lock anchors, Core runtime
 identity, runtime Schema inventory, and managed Activation file integrity. It
 also verifies installed package trees, package and Provider Manifests, the
 ordered package closure, and installed package identity, dependency, and
-side-effect semantics against both Lockfiles. Binding, permission, Skill, and
-instruction semantics are rebuilt for subsequent Doctor checks, whose native
-projections remain to be migrated.
+side-effect semantics against both Lockfiles. The projection now also verifies
+installed Skill identities and trees, the unique global `AGENTS.md` content,
+fragment order and rule trace, frozen Capability Bindings and Provider
+closure, and permission profiles and per-Capability grants against rebuilt
+installed Manifest semantics. Rollback-point validation, full Doctor Report
+v1 emission, and mutating lifecycle transactions remain on the Python path.
 It holds directory capabilities and opens contract files without following
 symlinks; it does not repair, install, upgrade, roll back, uninstall, or
 otherwise write the target. Failed projected checks keep canonical JSON on

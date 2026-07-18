@@ -2,7 +2,7 @@ use super::{
     LifecycleError, MANAGED_DIRECTORY_MODE, open_child_directory, open_child_file,
     same_content_state_cap, same_object_cap,
 };
-use agent_contracts::{canonical_sha256, parse_json};
+use agent_contracts::{canonical_sha256, json_integer, parse_json};
 use agent_registry::{ManifestRegistry, RegisteredManifest, validate_manifest_syntax};
 use cap_std::fs::Dir;
 use serde_json::{Map, Value, json};
@@ -46,6 +46,7 @@ pub(super) fn check_package_integrity(
     target: &Dir,
     install_lock: &Value,
     package_lock: &Value,
+    retained_semantics: &mut Option<Value>,
 ) -> Result<PackageInspection, LifecycleError> {
     let managed = open_child_directory(
         target,
@@ -220,6 +221,7 @@ pub(super) fn check_package_integrity(
     ManifestRegistry::new(registry_entries, CORE_VERSION)?;
 
     let semantics = derive_installed_semantics(&installed, install_packages)?;
+    *retained_semantics = Some(semantics.clone());
     validate_semantics(
         install_lock,
         package_lock,
@@ -359,6 +361,20 @@ fn validate_package_tree(
     record: &Value,
     package_id: &str,
 ) -> Result<(), LifecycleError> {
+    validate_recorded_tree(
+        root,
+        record,
+        "files_sha256",
+        &format!("installed package content differs: {package_id}"),
+    )
+}
+
+pub(super) fn validate_recorded_tree(
+    root: &Dir,
+    record: &Value,
+    digest_field: &str,
+    difference_message: &str,
+) -> Result<(), LifecycleError> {
     let expected_files = array_field(record, "files", "package files")?
         .iter()
         .map(|entry| {
@@ -399,22 +415,22 @@ fn validate_package_tree(
         {
             error
         }
-        _ => LifecycleError::Invalid(format!("installed package content differs: {package_id}")),
+        _ => LifecycleError::Invalid(difference_message.to_owned()),
     })?;
     if seen_files.len() != expected_files.len()
         || seen_directories.len() != expected_directories.len()
     {
-        return invalid(format!("installed package content differs: {package_id}"));
+        return invalid(difference_message);
     }
     let actual_files = expected_files
         .iter()
         .map(|(path, entry)| json!({"mode": entry.mode, "path": path, "sha256": entry.sha256}))
         .collect::<Vec<_>>();
     if record.get("file_count").and_then(Value::as_u64) != u64::try_from(actual_files.len()).ok()
-        || record.get("files_sha256").and_then(Value::as_str)
+        || record.get(digest_field).and_then(Value::as_str)
             != Some(canonical_sha256(&Value::Array(actual_files))?.as_str())
     {
-        return invalid(format!("installed package content differs: {package_id}"));
+        return invalid(difference_message);
     }
     Ok(())
 }
@@ -477,7 +493,7 @@ fn walk_package_tree(
             let expected = expected_files.get(&relative).ok_or_else(|| {
                 LifecycleError::Invalid(format!("unknown package file: {relative}"))
             })?;
-            let actual = hash_child_file(&parent, &name, expected.mode)?;
+            let actual = hash_child_file(&parent, &name, expected.mode, "installed package file")?;
             if actual != expected.sha256 {
                 return invalid(format!("package file hash differs: {relative}"));
             }
@@ -520,8 +536,13 @@ fn package_entry_names(directory: &Dir) -> Result<Vec<std::ffi::OsString>, Lifec
     Ok(names)
 }
 
-fn hash_child_file(parent: &Dir, name: &str, mode: u32) -> Result<String, LifecycleError> {
-    let mut file = open_child_file(parent, name, mode, "installed package file")?;
+pub(super) fn hash_child_file(
+    parent: &Dir,
+    name: &str,
+    mode: u32,
+    label: &str,
+) -> Result<String, LifecycleError> {
+    let mut file = open_child_file(parent, name, mode, label)?;
     let opened = file.metadata()?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024].into_boxed_slice();
@@ -533,7 +554,7 @@ fn hash_child_file(parent: &Dir, name: &str, mode: u32) -> Result<String, Lifecy
         digest.update(&buffer[..count]);
     }
     let after = file.metadata()?;
-    let current = open_child_file(parent, name, mode, "installed package file")?.metadata()?;
+    let current = open_child_file(parent, name, mode, label)?.metadata()?;
     if !same_object_cap(&opened, &after)
         || !same_object_cap(&opened, &current)
         || !same_content_state_cap(&opened, &after)
@@ -555,7 +576,7 @@ fn load_recorded_json(
     )?)?)
 }
 
-fn read_recorded_bytes(
+pub(super) fn read_recorded_bytes(
     root: &Dir,
     record: &Value,
     relative: &str,
@@ -1090,7 +1111,7 @@ fn compose_instructions(packages: &[InstalledPackage]) -> Result<Value, Lifecycl
                 .get(left.get("package").and_then(Value::as_str).unwrap_or(""))
                 .copied()
                 .unwrap_or(usize::MAX),
-            left.get("order").and_then(Value::as_i64),
+            left.get("order").and_then(json_integer),
             left.get("id").and_then(Value::as_str),
         )
             .cmp(&(
@@ -1098,7 +1119,7 @@ fn compose_instructions(packages: &[InstalledPackage]) -> Result<Value, Lifecycl
                     .get(right.get("package").and_then(Value::as_str).unwrap_or(""))
                     .copied()
                     .unwrap_or(usize::MAX),
-                right.get("order").and_then(Value::as_i64),
+                right.get("order").and_then(json_integer),
                 right.get("id").and_then(Value::as_str),
             ))
     });
@@ -1291,7 +1312,7 @@ fn python_is_whitespace(character: char) -> bool {
     character.is_whitespace() || matches!(character, '\u{001c}'..='\u{001f}')
 }
 
-fn python_trim(value: &str) -> &str {
+pub(super) fn python_trim(value: &str) -> &str {
     value.trim_matches(python_is_whitespace)
 }
 

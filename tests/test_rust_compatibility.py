@@ -1387,6 +1387,10 @@ class RustCompatibilityTests(unittest.TestCase):
             "environment.core",
             "schema.inventory",
             "package.integrity",
+            "skill.integrity",
+            "instructions.global",
+            "binding.freeze",
+            "permission.freeze",
             "activation.integrity",
         }
 
@@ -1543,6 +1547,73 @@ class RustCompatibilityTests(unittest.TestCase):
             dump(package_lock, package_lock_path)
             dump(install_lock, install_lock_path)
 
+        def refingerprint_locks(
+            target: Path,
+            install_lock: dict,
+            package_lock: dict,
+        ) -> None:
+            managed = target / ".agent-skills"
+            package_lock["install_plan_identity_hash"] = sha256({
+                key: value
+                for key, value in install_lock.items()
+                if key
+                not in {
+                    "fingerprint",
+                    "package_lock_hash",
+                    "status",
+                }
+            })
+            package_lock["fingerprint"] = sha256({
+                key: value
+                for key, value in package_lock.items()
+                if key != "fingerprint"
+            })
+            install_lock["package_lock_hash"] = (
+                package_lock["fingerprint"]
+            )
+            install_lock["fingerprint"] = sha256({
+                key: value
+                for key, value in install_lock.items()
+                if key not in {"fingerprint", "status"}
+            })
+            dump(package_lock, managed / "agent-skills.lock")
+            dump(install_lock, managed / "install-lock.json")
+
+        def assert_doctor_failure(
+            target: Path,
+            check_id: str,
+            message: str,
+        ) -> None:
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            actual = json.loads(result.stdout)
+            self.assertEqual(
+                normalize_failures(actual),
+                normalize_failures(expected),
+            )
+            actual_check = next(
+                check
+                for check in actual["checks"]
+                if check["id"] == check_id
+            )
+            expected_check = next(
+                check
+                for check in expected["checks"]
+                if check["id"] == check_id
+            )
+            self.assertEqual(actual_check, expected_check)
+            self.assertEqual(actual_check["details"], {
+                "errors": [message],
+            })
+            self.assertEqual(filesystem_identity(target), before)
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = root / "codex"
@@ -1606,6 +1677,200 @@ class RustCompatibilityTests(unittest.TestCase):
                 normalize_failures(expected),
             )
             self.assertEqual(filesystem_identity(target), tampered_before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(ROOT / "platforms", root / "platforms")
+            shutil.copytree(ROOT / "disciplines", root / "disciplines")
+            shutil.copytree(
+                ROOT / "runtime-configs",
+                root / "runtime-configs",
+            )
+            core_manifest_path = root / "platforms/core/manifest.json"
+            core_manifest = json.loads(
+                core_manifest_path.read_text(encoding="utf-8")
+            )
+            core_manifest[
+                "installation"
+            ]["instruction_fragments"][0]["order"] = (
+                9_223_372_036_854_775_808
+            )
+            dump(core_manifest, core_manifest_path)
+            target = root / "codex"
+            install_bundle(
+                build_install_bundle(
+                    root / "platforms",
+                    platforms=["apple", "desktop"],
+                ),
+                target,
+            )
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            actual = json.loads(result.stdout)
+            actual.pop("fingerprint")
+            self.assertEqual(actual, expected)
+            self.assertEqual(filesystem_identity(target), before)
+
+        for mutation in (
+            "skill-content",
+            "agents-content",
+            "binding-cross-lock",
+            "permission-cross-lock",
+            "binding-semantic-forgery",
+            "permission-semantic-forgery",
+        ):
+            with self.subTest(
+                post_install_mutation=mutation
+            ), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory) / "codex"
+                install_bundle(
+                    build_install_bundle(
+                        ROOT / "platforms",
+                        platforms=["apple", "desktop"],
+                    ),
+                    target,
+                )
+                managed = target / ".agent-skills"
+                install_lock = json.loads(
+                    (managed / "install-lock.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                package_lock = json.loads(
+                    (managed / "agent-skills.lock").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                if mutation == "skill-content":
+                    skill = install_lock["skills"][0]
+                    skill_file = target / "skills" / skill["name"]
+                    skill_file /= skill["files"][0]["path"]
+                    skill_file.write_bytes(
+                        skill_file.read_bytes() + b"\n# tampered\n"
+                    )
+                    check_id = "skill.integrity"
+                    message = (
+                        "installed Skill content differs: "
+                        f"{skill['name']}"
+                    )
+                elif mutation == "agents-content":
+                    agents = target / "AGENTS.md"
+                    agents.write_bytes(
+                        agents.read_bytes() + b"\n# tampered\n"
+                    )
+                    check_id = "instructions.global"
+                    message = (
+                        "global AGENTS.md content differs from Install Lock"
+                    )
+                elif mutation == "binding-cross-lock":
+                    capability = next(iter(
+                        package_lock["capability_providers"]
+                    ))
+                    provider = package_lock[
+                        "capability_providers"
+                    ][capability]
+                    replacement = next(
+                        candidate["binding"]
+                        for candidate in package_lock[
+                            "capability_providers"
+                        ].values()
+                        if candidate["package"] == provider["package"]
+                        and candidate["binding"] != provider["binding"]
+                    )
+                    provider["binding"] = deepcopy(replacement)
+                    package_lock["bindings_sha256"] = sha256({
+                        name: {
+                            "binding": candidate["binding"],
+                            "package": candidate["package"],
+                        }
+                        for name, candidate in sorted(
+                            package_lock[
+                                "capability_providers"
+                            ].items()
+                        )
+                    })
+                    refingerprint_locks(
+                        target,
+                        install_lock,
+                        package_lock,
+                    )
+                    check_id = "binding.freeze"
+                    message = (
+                        "Capability Binding digest differs from Install Lock"
+                    )
+                elif mutation == "permission-cross-lock":
+                    package_lock["permission_profiles"].append(
+                        "zz-fixture-unused"
+                    )
+                    refingerprint_locks(
+                        target,
+                        install_lock,
+                        package_lock,
+                    )
+                    check_id = "permission.freeze"
+                    message = (
+                        "permission profile set differs between Lockfiles"
+                    )
+                elif mutation == "binding-semantic-forgery":
+                    capability = next(iter(
+                        install_lock["capability_providers"]
+                    ))
+                    provider = install_lock[
+                        "capability_providers"
+                    ][capability]
+                    replacement = next(
+                        candidate["binding"]
+                        for candidate in install_lock[
+                            "capability_providers"
+                        ].values()
+                        if candidate["package"] == provider["package"]
+                        and candidate["binding"] != provider["binding"]
+                    )
+                    provider["binding"] = deepcopy(replacement)
+                    install_lock["bindings"][capability]["binding"] = (
+                        deepcopy(replacement)
+                    )
+                    package_lock[
+                        "capability_providers"
+                    ][capability]["binding"] = deepcopy(replacement)
+                    package_lock["bindings_sha256"] = sha256(
+                        install_lock["bindings"]
+                    )
+                    refingerprint_locks(
+                        target,
+                        install_lock,
+                        package_lock,
+                    )
+                    check_id = "binding.freeze"
+                    message = (
+                        "Capability Binding semantics differ from installed "
+                        "Manifests"
+                    )
+                else:
+                    install_lock["permission_profiles"].append(
+                        "zz-fixture-unused"
+                    )
+                    package_lock["permission_profiles"].append(
+                        "zz-fixture-unused"
+                    )
+                    refingerprint_locks(
+                        target,
+                        install_lock,
+                        package_lock,
+                    )
+                    check_id = "permission.freeze"
+                    message = (
+                        "Capability permission semantics differ from installed "
+                        "Manifests"
+                    )
+                assert_doctor_failure(target, check_id, message)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1705,7 +1970,14 @@ class RustCompatibilityTests(unittest.TestCase):
                     for check in actual["checks"]
                     if check["status"] == "failed"
                 ],
-                ["environment.core", "package.integrity"],
+                [
+                    "environment.core",
+                    "package.integrity",
+                    "skill.integrity",
+                    "instructions.global",
+                    "binding.freeze",
+                    "permission.freeze",
+                ],
             )
             self.assertEqual(filesystem_identity(target), before)
 
