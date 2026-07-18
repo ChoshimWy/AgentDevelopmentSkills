@@ -18,6 +18,7 @@ const PACKAGE_LOCK: &str = "agent-skills.lock";
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct ExternalLayout {
     pub(super) activation: bool,
+    pub(super) rollback_point: bool,
     pub(super) system_skills: bool,
 }
 
@@ -563,6 +564,9 @@ fn managed_names(external: ExternalLayout) -> BTreeSet<String> {
     if external.activation {
         names.insert("activation-lock.json".to_owned());
     }
+    if external.rollback_point {
+        names.insert("rollback-point".to_owned());
+    }
     names
 }
 
@@ -964,6 +968,43 @@ mod tests {
             .stage_plan_package(&fixture.token, "core", &source)
             .expect("stage plan package");
         (source, workspace)
+    }
+
+    fn materialize_current_install(fixture: &Fixture) {
+        let target = fixture.target();
+        let managed = target.join(".agent-skills");
+        let package = managed.join("packages/core");
+        std::fs::create_dir_all(&package).expect("create installed package");
+        std::fs::create_dir_all(target.join("skills")).expect("create installed Skills root");
+        std::fs::copy(
+            fixture.source.join("manifest.json"),
+            package.join("manifest.json"),
+        )
+        .expect("copy installed Manifest");
+        std::fs::write(target.join("AGENTS.md"), INSTRUCTIONS.as_bytes())
+            .expect("write installed AGENTS");
+        std::fs::write(
+            managed.join(INSTALL_LOCK),
+            canonical_json(&fixture.token.install_plan).expect("encode installed Install Lock"),
+        )
+        .expect("write installed Install Lock");
+        std::fs::write(
+            managed.join(PACKAGE_LOCK),
+            canonical_json(&fixture.token.package_lock).expect("encode installed package Lockfile"),
+        )
+        .expect("write installed package Lockfile");
+        for directory in [&target, &managed, &managed.join("packages"), &package] {
+            set_mode(directory, MANAGED_DIRECTORY_MODE);
+        }
+        set_mode(&target.join("skills"), MANAGED_DIRECTORY_MODE);
+        for file in [
+            target.join("AGENTS.md"),
+            managed.join(INSTALL_LOCK),
+            managed.join(PACKAGE_LOCK),
+            package.join("manifest.json"),
+        ] {
+            set_mode(&file, MANAGED_FILE_MODE);
+        }
     }
 
     fn write_activation_fixture(fixture: &Fixture, expected_hash: &str) -> Vec<u8> {
@@ -1416,6 +1457,334 @@ mod tests {
                 .expect_err("plan trees must freeze before external state")
                 .to_string(),
             "lifecycle workspace external state is already staged"
+        );
+        drop(source);
+        workspace.cleanup().expect("cleanup workspace");
+    }
+
+    #[test]
+    fn intact_install_is_frozen_as_a_verified_rollback_point() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        let fingerprint = workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        assert_eq!(fingerprint.len(), 64);
+        workspace
+            .verify_staged_install(&fixture.token)
+            .expect("verify rollback-bearing stage");
+        let point = load_json(
+            workspace
+                .stage_path()
+                .join(".agent-skills/rollback-point/rollback-point.json"),
+        )
+        .expect("load rollback point");
+        assert_eq!(
+            point.get("fingerprint").and_then(Value::as_str),
+            Some(fingerprint.as_str())
+        );
+        assert_eq!(
+            std::fs::read(
+                workspace
+                    .stage_path()
+                    .join(".agent-skills/rollback-point/packages/core/manifest.json")
+            )
+            .expect("read rollback package"),
+            std::fs::read(fixture.source.join("manifest.json")).expect("read source Manifest")
+        );
+        drop(source);
+        workspace.cleanup().expect("cleanup workspace");
+    }
+
+    #[test]
+    fn rollback_point_freezes_external_files_and_absent_state() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        std::fs::create_dir_all(fixture.target().join("config")).expect("create external parent");
+        std::fs::write(fixture.target().join("config/state"), b"before\n")
+            .expect("write external state");
+        set_mode(&fixture.target().join("config"), 0o750);
+        set_mode(&fixture.target().join("config/state"), 0o640);
+        let paths = vec!["config/missing".to_owned(), "config/state".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage external rollback state");
+        let rollback = workspace.stage_path().join(".agent-skills/rollback-point");
+        assert_eq!(
+            std::fs::read(rollback.join("external-files/config/state"))
+                .expect("read rollback external file"),
+            b"before\n"
+        );
+        let state =
+            load_json(rollback.join("external-state.json")).expect("load rollback external state");
+        assert_eq!(
+            state.pointer("/entries/0/state").and_then(Value::as_str),
+            Some("absent")
+        );
+        assert_eq!(
+            state.pointer("/entries/1/state").and_then(Value::as_str),
+            Some("file")
+        );
+        std::fs::write(fixture.target().join("config/state"), b"after\n")
+            .expect("drift external source");
+        assert!(
+            workspace
+                .verify_staged_install(&fixture.token)
+                .expect_err("external rollback source drift must fail")
+                .to_string()
+                .contains("rollback point source installation changed")
+        );
+        drop(source);
+        workspace.cleanup().expect("cleanup workspace");
+    }
+
+    #[test]
+    fn rollback_point_binds_activation_to_external_snapshot() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let expected_hash = bytes_sha256(b"external tool\n");
+        let activation = write_activation_fixture(&fixture, &expected_hash);
+        let paths = vec!["bin/tool".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage Activation state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage activation rollback point");
+        let rollback = workspace.stage_path().join(".agent-skills/rollback-point");
+        assert_eq!(
+            std::fs::read(rollback.join("activation-lock.json"))
+                .expect("read rollback Activation Lock"),
+            activation
+        );
+        assert_eq!(
+            std::fs::read(rollback.join("external-files/bin/tool"))
+                .expect("read rollback activated file"),
+            b"external tool\n"
+        );
+        workspace
+            .verify_staged_install(&fixture.token)
+            .expect("verify activation rollback point");
+        drop(source);
+        workspace.cleanup().expect("cleanup workspace");
+    }
+
+    #[test]
+    fn rollback_point_rejects_managed_source_drift_after_staging() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        std::fs::write(fixture.target().join("AGENTS.md"), b"changed\n")
+            .expect("drift current AGENTS");
+        let error = workspace
+            .verify_staged_install(&fixture.token)
+            .expect_err("managed rollback source drift must fail");
+        assert!(error.to_string().contains("AGENTS"), "{error}");
+        drop(source);
+        workspace.cleanup().expect("cleanup workspace");
+    }
+
+    #[test]
+    fn rollback_point_rejects_unsorted_or_managed_external_paths() {
+        for paths in [
+            vec!["z/state".to_owned(), "a/state".to_owned()],
+            vec!["AGENTS.md".to_owned()],
+            vec![".agent-skills/state".to_owned()],
+        ] {
+            let fixture = Fixture::new();
+            materialize_current_install(&fixture);
+            let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+            workspace
+                .stage_external_state(&fixture.token)
+                .expect("stage empty external state");
+            assert!(
+                workspace
+                    .stage_rollback_point(&fixture.token, &paths)
+                    .is_err(),
+                "{paths:?}"
+            );
+            drop(source);
+            workspace.cleanup().expect("cleanup workspace");
+        }
+    }
+
+    #[test]
+    fn rollback_point_is_single_use_and_tamper_evident() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &[])
+            .expect("stage rollback point");
+        assert_eq!(
+            workspace
+                .stage_rollback_point(&fixture.token, &[])
+                .expect_err("second rollback point must fail")
+                .to_string(),
+            "lifecycle workspace rollback point is already staged"
+        );
+        std::fs::write(
+            workspace
+                .stage_path()
+                .join(".agent-skills/rollback-point/external-state.json"),
+            b"{}\n",
+        )
+        .expect("tamper rollback contract");
+        assert!(
+            workspace
+                .verify_staged_install(&fixture.token)
+                .expect_err("rollback tamper must fail")
+                .to_string()
+                .contains("rollback point external state")
+        );
+        drop(source);
+        workspace.cleanup().expect("cleanup workspace");
+    }
+
+    #[test]
+    fn rollback_point_rejects_post_stage_hard_link_aliases() {
+        for (relative, external_paths) in [
+            (
+                ".agent-skills/rollback-point/AGENTS.md",
+                Vec::<String>::new(),
+            ),
+            (
+                ".agent-skills/rollback-point/packages/core/manifest.json",
+                Vec::<String>::new(),
+            ),
+            (
+                ".agent-skills/rollback-point/external-files/config/state",
+                vec!["config/state".to_owned()],
+            ),
+        ] {
+            let fixture = Fixture::new();
+            materialize_current_install(&fixture);
+            if !external_paths.is_empty() {
+                std::fs::create_dir_all(fixture.target().join("config"))
+                    .expect("create external parent");
+                std::fs::write(fixture.target().join("config/state"), b"state\n")
+                    .expect("write external state");
+            }
+            let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+            workspace
+                .stage_external_state(&fixture.token)
+                .expect("stage empty external state");
+            workspace
+                .stage_rollback_point(&fixture.token, &external_paths)
+                .expect("stage rollback point");
+            std::fs::hard_link(
+                workspace.stage_path().join(relative),
+                fixture.root.join(format!(
+                    "rollback-alias-{}",
+                    relative.replace(['/', '.'], "-")
+                )),
+            )
+            .expect("create rollback hard-link alias");
+            let error = workspace
+                .verify_staged_install(&fixture.token)
+                .expect_err("rollback hard-link alias must fail");
+            assert!(
+                error.to_string().contains("unsafe hard-link alias"),
+                "{relative}: {error}"
+            );
+            drop(source);
+            workspace.cleanup().expect("cleanup workspace");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_readonly_external_snapshot_is_preserved_and_cleaned() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let external = fixture.target().join("config/state");
+        std::fs::create_dir_all(external.parent().expect("external parent"))
+            .expect("create external parent");
+        std::fs::write(&external, b"readonly\n").expect("write external file");
+        let mut permissions = std::fs::metadata(&external)
+            .expect("inspect external file")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&external, permissions).expect("make external file readonly");
+        let paths = vec!["config/state".to_owned()];
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        workspace
+            .stage_rollback_point(&fixture.token, &paths)
+            .expect("stage readonly rollback point");
+        let staged = workspace
+            .stage_path()
+            .join(".agent-skills/rollback-point/external-files/config/state");
+        assert!(
+            std::fs::metadata(&staged)
+                .expect("inspect staged external file")
+                .permissions()
+                .readonly()
+        );
+        let state = load_json(
+            workspace
+                .stage_path()
+                .join(".agent-skills/rollback-point/external-state.json"),
+        )
+        .expect("load external state");
+        assert_eq!(
+            state.pointer("/entries/0/mode").and_then(Value::as_u64),
+            Some(0o444)
+        );
+        workspace
+            .verify_staged_install(&fixture.token)
+            .expect("verify readonly rollback point");
+        let stage = workspace.stage_path();
+        drop(source);
+        workspace.cleanup().expect("cleanup readonly workspace");
+        assert!(!stage.exists());
+        let mut permissions = std::fs::metadata(&external)
+            .expect("inspect source external file")
+            .permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&external, permissions).expect("restore source permissions");
+    }
+
+    #[test]
+    fn corrupt_existing_rollback_point_rejects_new_snapshot() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        std::fs::create_dir(fixture.target().join(".agent-skills/rollback-point"))
+            .expect("create corrupt rollback point");
+        set_mode(
+            &fixture.target().join(".agent-skills/rollback-point"),
+            MANAGED_DIRECTORY_MODE,
+        );
+        let (source, mut workspace) = stage_complete_managed_layout(&fixture);
+        workspace
+            .stage_external_state(&fixture.token)
+            .expect("stage empty external state");
+        assert!(
+            workspace
+                .stage_rollback_point(&fixture.token, &[])
+                .expect_err("corrupt source rollback point must fail")
+                .to_string()
+                .contains("rollback point")
         );
         drop(source);
         workspace.cleanup().expect("cleanup workspace");

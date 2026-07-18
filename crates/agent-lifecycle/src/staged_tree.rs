@@ -55,15 +55,40 @@ pub(super) fn verify_skill(stage: &Dir, record: &Value) -> Result<(), LifecycleE
     verify_tree(stage, record, TreeKind::Skill)
 }
 
+pub(super) fn stage_package_at(
+    destination_parent: &Dir,
+    source: &Dir,
+    record: &Value,
+) -> Result<(), LifecycleError> {
+    stage_tree_at(destination_parent, source, record, TreeKind::Package)
+}
+
+pub(super) fn stage_skill_at(
+    destination_parent: &Dir,
+    source: &Dir,
+    record: &Value,
+) -> Result<(), LifecycleError> {
+    stage_tree_at(destination_parent, source, record, TreeKind::Skill)
+}
+
 fn stage_tree(
     stage: &Dir,
     source: &Dir,
     value: &Value,
     kind: TreeKind,
 ) -> Result<(), LifecycleError> {
-    let record = parse_recorded_tree(value, kind)?;
     let parent = destination_parent(stage, kind)?;
-    let root = create_directory(&parent, &record.name, record.root_mode, "staged tree root")?;
+    stage_tree_at(&parent, source, value, kind)
+}
+
+fn stage_tree_at(
+    parent: &Dir,
+    source: &Dir,
+    value: &Value,
+    kind: TreeKind,
+) -> Result<(), LifecycleError> {
+    let record = parse_recorded_tree(value, kind)?;
+    let root = create_directory(parent, &record.name, record.root_mode, "staged tree root")?;
     for directory in &record.directories {
         let components = portable_components(&directory.path, "staged directory")?;
         let (name, parents) = components
@@ -76,23 +101,26 @@ fn stage_tree(
         copy_recorded_file(source, &root, file)?;
     }
     validate_destination(&root, value, kind, &record.name)?;
-    verify_tree(stage, value, kind)
+    verify_tree_at(parent, value, kind)
 }
 
 fn verify_tree(stage: &Dir, value: &Value, kind: TreeKind) -> Result<(), LifecycleError> {
-    let record = parse_recorded_tree(value, kind)?;
     let parent = open_destination_parent(stage, kind)?;
+    verify_tree_at(&parent, value, kind)
+}
+
+fn verify_tree_at(parent: &Dir, value: &Value, kind: TreeKind) -> Result<(), LifecycleError> {
+    let record = parse_recorded_tree(value, kind)?;
     let root = open_child_directory(
-        &parent,
+        parent,
         &record.name,
         Some(record.root_mode),
         "staged tree root",
     )?;
     let identity = root.dir_metadata()?;
     validate_destination(&root, value, kind, &record.name)?;
-    let current_parent = open_destination_parent(stage, kind)?;
     let current = open_child_directory(
-        &current_parent,
+        parent,
         &record.name,
         Some(record.root_mode),
         "staged tree root",
@@ -104,9 +132,8 @@ fn verify_tree(stage: &Dir, value: &Value, kind: TreeKind) -> Result<(), Lifecyc
         return invalid("staged tree changed while verifying");
     }
     validate_destination(&current, value, kind, &record.name)?;
-    let final_parent = open_destination_parent(stage, kind)?;
     let final_root = open_child_directory(
-        &final_parent,
+        parent,
         &record.name,
         Some(record.root_mode),
         "staged tree root",

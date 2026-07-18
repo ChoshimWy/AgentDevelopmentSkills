@@ -5,6 +5,7 @@ use super::{
 };
 use agent_contracts::canonical_sha256;
 use agent_engine::{install_plan_identity_hash, validate_install_plan, validate_package_lock};
+use cap_fs_ext::MetadataExt as _;
 use cap_std::fs::Dir;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,8 +55,12 @@ pub(super) fn check_rollback_point(target: &Dir) -> Result<Value, LifecycleError
         "rollback point directory",
     )
     .map_err(|_| invalid_error("rollback point directory is missing or unsafe"))?;
+    validate_rollback_point_root(&root)
+}
+
+pub(super) fn validate_rollback_point_root(root: &Dir) -> Result<Value, LifecycleError> {
     let root_identity = root.dir_metadata()?;
-    validate_root_entries(&root)?;
+    validate_root_entries(root)?;
 
     for name in [
         "AGENTS.md",
@@ -63,19 +68,19 @@ pub(super) fn check_rollback_point(target: &Dir) -> Result<Value, LifecycleError
         "install-lock.json",
         "rollback-point.json",
     ] {
-        open_child_file(&root, name, MANAGED_FILE_MODE, "rollback point file").map_err(|_| {
+        open_child_file(root, name, MANAGED_FILE_MODE, "rollback point file").map_err(|_| {
             invalid_error(format!("rollback point file is missing or unsafe: {name}"))
         })?;
     }
     let packages_root = open_child_directory(
-        &root,
+        root,
         "packages",
         Some(MANAGED_DIRECTORY_MODE),
         "rollback point packages directory",
     )
     .map_err(|_| invalid_error("rollback point directory is missing or unsafe: packages"))?;
     let skills_root = open_child_directory(
-        &root,
+        root,
         "skills",
         Some(MANAGED_DIRECTORY_MODE),
         "rollback point skills directory",
@@ -83,25 +88,25 @@ pub(super) fn check_rollback_point(target: &Dir) -> Result<Value, LifecycleError
     .map_err(|_| invalid_error("rollback point directory is missing or unsafe: skills"))?;
 
     let install_lock = load_json_file(
-        &root,
+        root,
         "install-lock.json",
         MANAGED_FILE_MODE,
         "rollback point Install Lock",
     )?;
     let package_lock = load_json_file(
-        &root,
+        root,
         PERSISTENT_PACKAGE_LOCK,
         MANAGED_FILE_MODE,
         "rollback point package Lockfile",
     )?;
     let point = load_json_file(
-        &root,
+        root,
         "rollback-point.json",
         MANAGED_FILE_MODE,
         "rollback point contract",
     )?;
-    let external = validate_external_state(&root)?;
-    validate_activation_snapshot(&root, &external.entries)?;
+    let external = validate_external_state(root)?;
+    validate_activation_snapshot(root, &external.entries)?;
 
     validate_install_plan(&install_lock)?;
     validate_package_lock(&package_lock)?;
@@ -126,7 +131,7 @@ pub(super) fn check_rollback_point(target: &Dir) -> Result<Value, LifecycleError
     }
 
     let agents_hash = packages::hash_child_file(
-        &root,
+        root,
         "AGENTS.md",
         MANAGED_FILE_MODE,
         "rollback point AGENTS",
@@ -141,9 +146,9 @@ pub(super) fn check_rollback_point(target: &Dir) -> Result<Value, LifecycleError
 
     let semantics = packages::derive_rollback_package_semantics(&packages_root, &install_lock)?;
     validate_skills(&skills_root, &install_lock)?;
-    validate_semantics(&root, &install_lock, &package_lock, &semantics)?;
+    validate_semantics(root, &install_lock, &package_lock, &semantics)?;
 
-    let snapshot = snapshot_identity(&root)?;
+    let snapshot = snapshot_identity(root)?;
     if point_object.get("snapshot_sha256").and_then(Value::as_str) != Some(snapshot.as_str()) {
         return invalid("rollback point snapshot digest is invalid");
     }
@@ -153,7 +158,7 @@ pub(super) fn check_rollback_point(target: &Dir) -> Result<Value, LifecycleError
     {
         return invalid("rollback point directory changed while inspecting");
     }
-    validate_root_entries(&root)?;
+    validate_root_entries(root)?;
 
     Ok(json!({
         "available": true,
@@ -641,7 +646,7 @@ impl SnapshotFrame {
     }
 }
 
-fn snapshot_identity(root: &Dir) -> Result<String, LifecycleError> {
+pub(super) fn snapshot_identity(root: &Dir) -> Result<String, LifecycleError> {
     let mut snapshot = snapshot_tree(root)?;
     snapshot
         .files
@@ -693,12 +698,28 @@ fn snapshot_tree(root: &Dir) -> Result<TreeSnapshot, LifecycleError> {
             )?;
             frames.push(SnapshotFrame::open(child, relative)?);
         } else if metadata.is_file() {
+            if metadata.nlink() != 1 {
+                return invalid(format!(
+                    "rollback point file has an unsafe hard-link alias: {relative}"
+                ));
+            }
             let sha256 = packages::hash_child_file(
                 &frame.directory,
                 text,
                 mode,
                 "rollback point snapshot file",
             )?;
+            let current = frame.directory.symlink_metadata(&name)?;
+            if current.file_type().is_symlink()
+                || !current.is_file()
+                || current.nlink() != 1
+                || !same_object_cap(&metadata, &current)
+                || !same_content_state_cap(&metadata, &current)
+            {
+                return invalid(format!(
+                    "rollback point file changed while snapshotting: {relative}"
+                ));
+            }
             snapshot
                 .files
                 .push(json!({"mode": mode, "path": relative, "sha256": sha256}));
@@ -787,7 +808,7 @@ fn relative_exists(root: &Dir, relative: &str) -> Result<bool, LifecycleError> {
     }
 }
 
-fn validate_external_path(relative: &str) -> Result<(), LifecycleError> {
+pub(super) fn validate_external_path(relative: &str) -> Result<(), LifecycleError> {
     let parts = relative_components(relative)?;
     if parts
         .first()

@@ -26,6 +26,7 @@ impl ExternalStageSnapshot {
     pub(super) fn layout(&self) -> staged_install::ExternalLayout {
         staged_install::ExternalLayout {
             activation: self.activation.is_some(),
+            rollback_point: false,
             system_skills: self.system_skills.is_some(),
         }
     }
@@ -487,7 +488,7 @@ fn inspect_file(
     Ok((bytes, opened))
 }
 
-fn read_single_link_file(
+pub(super) fn read_single_link_file(
     parent: &Dir,
     name: &OsStr,
     mode: Option<u32>,
@@ -538,7 +539,7 @@ fn hash_regular_file(
     Ok((length, format!("{:x}", digest.finalize())))
 }
 
-fn open_regular_file(
+pub(super) fn open_regular_file(
     parent: &Dir,
     name: &OsStr,
     mode: Option<u32>,
@@ -589,7 +590,7 @@ fn open_optional_directory(
     }
 }
 
-fn open_directory(
+pub(super) fn open_directory(
     parent: &Dir,
     name: &OsStr,
     mode: Option<u32>,
@@ -642,7 +643,7 @@ fn open_relative_directory(
     Ok(directory)
 }
 
-fn create_directory(
+pub(super) fn create_directory(
     parent: &Dir,
     name: &OsStr,
     mode: Option<u32>,
@@ -679,7 +680,7 @@ fn create_directory(
     Ok(directory)
 }
 
-fn write_independent_file(
+pub(super) fn write_independent_file(
     parent: &Dir,
     name: &str,
     bytes: &[u8],

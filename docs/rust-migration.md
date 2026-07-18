@@ -124,8 +124,14 @@ contains:
   preserves exact validated Activation Lock bytes, and revalidates target and
   staged snapshots around the complete gate. Windows `.system` symlink entries
   fail closed until stable capability APIs can distinguish file and directory
-  links without following them. Rollback-point assembly, managed-root swaps,
-  and production command routing are not implemented yet.
+  links without following them. For an intact current installation, the
+  workspace can now assemble a persistent rollback point inside the new stage.
+  It freezes and validates the current Lock pair, packages, Skills, AGENTS,
+  optional Activation ownership, package-owned external files, absent-file
+  records, and parent-directory state. Source and staged identities are
+  revalidated around the complete gate; external paths must be sorted, unique,
+  relative, and disjoint from managed roots. Managed-root swaps and production
+  command routing are not implemented yet.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit

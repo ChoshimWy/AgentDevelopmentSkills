@@ -1,7 +1,7 @@
 use super::{
     INSTALL_BACKUP_PREFIX, INSTALL_STAGE_PREFIX, LifecycleError, LifecycleLock,
-    ValidatedInstallPlan, external_stage, open_child_directory, same_object_cap, staged_install,
-    staged_tree,
+    ValidatedInstallPlan, external_stage, open_child_directory, rollback_stage, same_object_cap,
+    staged_install, staged_tree,
 };
 use cap_std::fs::Dir;
 use serde_json::Value;
@@ -21,8 +21,9 @@ static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// creates two recovery-visible workspace directories, keeps their identities
 /// bound to the locked target, and can assemble a complete managed stage from
 /// one [`ValidatedInstallPlan`], including a frozen external `.system` and
-/// Activation snapshot. Managed-root swaps are not yet implemented, and
-/// production install/rollback commands are not routed through it.
+/// Activation snapshot plus a persistent rollback point for an intact current
+/// installation. Managed-root swaps are not yet implemented, and production
+/// install/rollback commands are not routed through it.
 #[must_use = "the lifecycle workspace must be held for the full transaction"]
 pub struct LifecycleWorkspace {
     backup: WorkspaceEntry,
@@ -30,8 +31,10 @@ pub struct LifecycleWorkspace {
     stage: WorkspaceEntry,
     staged_external_state: Option<external_stage::ExternalStageSnapshot>,
     staged_install_identity: Option<StagedInstallIdentity>,
+    staged_rollback_point: Option<rollback_stage::RollbackStageSnapshot>,
     target: PathBuf,
     target_directory: Dir,
+    rollback_external_paths: Vec<String>,
 }
 
 struct StagedInstallIdentity {
@@ -86,8 +89,10 @@ impl LifecycleWorkspace {
                 stage,
                 staged_external_state: None,
                 staged_install_identity: None,
+                staged_rollback_point: None,
                 target,
                 target_directory,
+                rollback_external_paths: Vec::new(),
             };
             workspace.validate()?;
             return Ok(workspace);
@@ -140,7 +145,7 @@ impl LifecycleWorkspace {
     /// accepted.
     ///
     /// External `.system` Skills, Activation state, rollback points, and root
-    /// swaps are deliberately outside this API.
+    /// swaps are staged by later transaction steps.
     ///
     /// # Errors
     /// Fails closed if the workspace is not empty, the instructions differ from
@@ -232,6 +237,54 @@ impl LifecycleWorkspace {
         self.validate()
     }
 
+    /// Snapshot the currently installed managed state as a staged rollback point.
+    ///
+    /// The new managed stage and external `.system`/Activation state must
+    /// already be complete. `external_paths` is the sorted, unique set of
+    /// package-owned lifecycle files outside the managed roots. Existing files,
+    /// absent files, and their parent-directory states are frozen into the
+    /// rollback contract without following symlinks.
+    ///
+    /// # Errors
+    /// Fails closed when the current target is not an intact managed install,
+    /// the staged replacement is incomplete, external paths are unsafe or
+    /// unsorted, source state changes while copying, or rollback staging was
+    /// already attempted successfully.
+    pub fn stage_rollback_point(
+        &mut self,
+        plan: &ValidatedInstallPlan,
+        external_paths: &[String],
+    ) -> Result<String, LifecycleError> {
+        self.validate()?;
+        self.validate_staged_install_identity(plan)?;
+        if self.staged_rollback_point.is_some() {
+            return invalid("lifecycle workspace rollback point is already staged");
+        }
+        let external = self.staged_external_state.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid(
+                "lifecycle workspace external state has not been staged".to_owned(),
+            )
+        })?;
+        external_stage::verify(&self.target_directory, self.stage.directory()?, external)?;
+        staged_install::verify(self.stage.directory()?, plan, external.layout())?;
+        let snapshot = rollback_stage::stage(
+            &self.target_directory,
+            self.stage.directory()?,
+            external_paths,
+        )?;
+        let fingerprint = snapshot.fingerprint()?.to_owned();
+        rollback_stage::verify(
+            &self.target_directory,
+            self.stage.directory()?,
+            &snapshot,
+            external_paths,
+        )?;
+        self.rollback_external_paths = external_paths.to_vec();
+        self.staged_rollback_point = Some(snapshot);
+        self.verify_staged_install(plan)?;
+        Ok(fingerprint)
+    }
+
     /// Verify the complete staged install against one validated plan token.
     ///
     /// This native pre-swap gate checks exact root topology, canonical Lockfile
@@ -251,7 +304,25 @@ impl LifecycleWorkspace {
             )
         })?;
         external_stage::verify(&self.target_directory, self.stage.directory()?, external)?;
-        staged_install::verify(self.stage.directory()?, plan, external.layout())?;
+        let mut layout = external.layout();
+        if let Some(rollback) = self.staged_rollback_point.as_ref() {
+            rollback_stage::verify(
+                &self.target_directory,
+                self.stage.directory()?,
+                rollback,
+                &self.rollback_external_paths,
+            )?;
+            layout.rollback_point = true;
+        }
+        staged_install::verify(self.stage.directory()?, plan, layout)?;
+        if let Some(rollback) = self.staged_rollback_point.as_ref() {
+            rollback_stage::verify(
+                &self.target_directory,
+                self.stage.directory()?,
+                rollback,
+                &self.rollback_external_paths,
+            )?;
+        }
         external_stage::verify(&self.target_directory, self.stage.directory()?, external)?;
         self.validate()
     }
@@ -273,6 +344,7 @@ impl LifecycleWorkspace {
         record: &Value,
     ) -> Result<(), LifecycleError> {
         self.validate()?;
+        self.require_external_state_not_staged()?;
         staged_tree::stage_package(self.stage.directory()?, source, record)?;
         self.validate()
     }
@@ -289,6 +361,7 @@ impl LifecycleWorkspace {
     /// from the recorded tree identity.
     pub fn stage_skill_tree(&mut self, source: &Dir, record: &Value) -> Result<(), LifecycleError> {
         self.validate()?;
+        self.require_external_state_not_staged()?;
         staged_tree::stage_skill(self.stage.directory()?, source, record)?;
         self.validate()
     }
@@ -546,7 +619,92 @@ fn make_owned_tree_removable(directory: &Dir) -> Result<(), LifecycleError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn make_owned_tree_removable(directory: &Dir) -> Result<(), LifecycleError> {
+    let mut root_permissions = directory.dir_metadata()?.permissions();
+    root_permissions.set_readonly(false);
+    directory.set_permissions(".", root_permissions)?;
+    let names = directory
+        .entries()?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    for name in names {
+        let before = directory.symlink_metadata(&name)?;
+        if before.file_type().is_symlink() {
+            continue;
+        }
+        if before.is_dir() {
+            let child = external_stage::open_directory(
+                directory,
+                &name,
+                None,
+                "lifecycle workspace directory",
+            )?;
+            let opened = child.dir_metadata()?;
+            if !same_object_cap(&before, &opened) {
+                return invalid("lifecycle workspace tree changed while preparing cleanup");
+            }
+            make_owned_tree_removable(&child)?;
+            let current = external_stage::open_directory(
+                directory,
+                &name,
+                None,
+                "lifecycle workspace directory",
+            )?
+            .dir_metadata()?;
+            if !same_object_cap(&opened, &current) {
+                return invalid("lifecycle workspace tree changed while preparing cleanup");
+            }
+        } else if before.is_file() {
+            clear_windows_file_readonly(directory, &name, &before)?;
+        } else {
+            return invalid("lifecycle workspace contains an unsupported filesystem object");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn clear_windows_file_readonly(
+    directory: &Dir,
+    name: &std::ffi::OsStr,
+    before: &cap_std::fs::Metadata,
+) -> Result<(), LifecycleError> {
+    use cap_fs_ext::MetadataExt as _;
+    use cap_std::fs::OpenOptionsExt as _;
+
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES);
+    super::configure_nofollow(&mut options);
+    let file = directory.open_with(name, &options)?;
+    let opened = file.metadata()?;
+    if before.nlink() != 1
+        || opened.file_type().is_symlink()
+        || !opened.is_file()
+        || opened.nlink() != 1
+        || !same_object_cap(before, &opened)
+    {
+        return invalid("lifecycle workspace tree changed while preparing cleanup");
+    }
+    let mut permissions = opened.permissions();
+    permissions.set_readonly(false);
+    file.set_permissions(permissions)?;
+    let current = directory.symlink_metadata(name)?;
+    if current.file_type().is_symlink()
+        || !current.is_file()
+        || current.nlink() != 1
+        || !same_object_cap(&opened, &current)
+    {
+        return invalid("lifecycle workspace tree changed while preparing cleanup");
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 #[allow(clippy::unnecessary_wraps)]
 fn make_owned_tree_removable(_directory: &Dir) -> Result<(), LifecycleError> {
     Ok(())
@@ -812,6 +970,42 @@ mod tests {
         );
         std::fs::remove_dir_all(&outside).expect("remove outside target");
         std::fs::remove_dir(&root).expect("remove workspace target");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn readonly_cleanup_rejects_external_hard_link_alias() {
+        let root = temporary_path("readonly-hard-link");
+        std::fs::create_dir(&root).expect("create workspace target");
+        let victim = root.join("victim");
+        std::fs::write(&victim, b"outside\n").expect("write outside victim");
+        let mut permissions = std::fs::metadata(&victim)
+            .expect("inspect outside victim")
+            .permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&victim, permissions).expect("make outside victim readonly");
+        let workspace = LifecycleWorkspace::begin(&root).expect("begin lifecycle workspace");
+        let stage = workspace.stage_path();
+        std::fs::hard_link(&victim, stage.join("alias")).expect("create workspace hard-link alias");
+
+        let error = workspace
+            .cleanup()
+            .expect_err("cleanup must reject shared readonly file");
+        assert!(error.to_string().contains("preparing cleanup"), "{error}");
+        assert!(
+            std::fs::metadata(&victim)
+                .expect("inspect outside victim after cleanup")
+                .permissions()
+                .readonly()
+        );
+        let mut permissions = std::fs::metadata(&victim)
+            .expect("inspect outside victim for cleanup")
+            .permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&victim, permissions).expect("restore victim permissions");
+        std::fs::remove_dir_all(stage).expect("remove rejected stage");
+        std::fs::remove_file(victim).expect("remove outside victim");
+        std::fs::remove_dir(root).expect("remove workspace target");
     }
 
     #[cfg(unix)]

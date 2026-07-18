@@ -224,8 +224,14 @@ identity anchors. The workspace now also freezes and copies external
 Activation Lock, and revalidates both the target and staged external state
 around the complete pre-swap gate. On Windows, `.system` symlink entries
 currently fail closed because stable `cap-std` cannot recover the file-vs-dir
-link kind without following the link. Rollback-point assembly, managed-root
-swaps, and production command routing remain later lifecycle slices.
+link kind without following the link. For an intact current installation, the
+workspace can now assemble and validate a persistent rollback point inside the
+new stage. It freezes the current Lock pair, packages, Skills, `AGENTS.md`,
+optional Activation Lock, package-owned external files, absent-file records,
+and parent-directory state, then revalidates both source and staged identities
+around the complete gate. External paths must be sorted, unique, relative, and
+disjoint from managed roots. Managed-root swaps and production command routing
+remain later lifecycle slices.
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
 holds directory capabilities and opens contract files without following
