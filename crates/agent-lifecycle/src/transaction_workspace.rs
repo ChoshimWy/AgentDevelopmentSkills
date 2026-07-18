@@ -6,6 +6,7 @@ use super::{
 use cap_std::fs::Dir;
 use serde_json::Value;
 use std::collections::hash_map::RandomState;
+use std::ffi::OsStr;
 use std::hash::BuildHasher as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,8 +26,9 @@ static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// installation. Managed roots can then be published through an identity-bound
 /// [`super::PublishedInstall`] guard. That guard owns external rollback
 /// restoration once its internal mutation boundary starts; trusted handlers
-/// now cover source deactivation and rollback-backed replacement activation,
-/// while production install/rollback commands are not routed through it.
+/// now cover source deactivation, rollback-backed replacement activation, and
+/// rollback-backed full uninstall, while production commands are not routed
+/// through these guards yet.
 #[must_use = "the lifecycle workspace must be held for the full transaction"]
 pub struct LifecycleWorkspace {
     backup: WorkspaceEntry,
@@ -288,6 +290,46 @@ impl LifecycleWorkspace {
         Ok(fingerprint)
     }
 
+    /// Freeze a complete rollback point for a full managed uninstall.
+    ///
+    /// Unlike replacement staging, uninstall has no candidate managed roots.
+    /// The private stage therefore contains only the rollback snapshot used to
+    /// recover the current managed installation and its exact external scope.
+    pub(super) fn stage_uninstall_rollback(
+        &mut self,
+        external_paths: &[String],
+    ) -> Result<String, LifecycleError> {
+        self.validate()?;
+        if self.staged_install_identity.is_some()
+            || self.staged_external_state.is_some()
+            || self.staged_rollback_point.is_some()
+        {
+            return invalid("uninstall rollback staging requires an empty lifecycle workspace");
+        }
+        external_stage::create_directory(
+            self.stage.directory()?,
+            OsStr::new(".agent-skills"),
+            Some(super::MANAGED_DIRECTORY_MODE),
+            "uninstall rollback metadata",
+        )?;
+        let snapshot = rollback_stage::stage(
+            &self.target_directory,
+            self.stage.directory()?,
+            external_paths,
+        )?;
+        let fingerprint = snapshot.fingerprint()?.to_owned();
+        rollback_stage::verify(
+            &self.target_directory,
+            self.stage.directory()?,
+            &snapshot,
+            external_paths,
+        )?;
+        self.rollback_external_paths = external_paths.to_vec();
+        self.staged_rollback_point = Some(snapshot);
+        self.validate()?;
+        Ok(fingerprint)
+    }
+
     /// Verify the complete staged install against one validated plan token.
     ///
     /// This native pre-swap gate checks exact root topology, canonical Lockfile
@@ -489,6 +531,35 @@ impl LifecycleWorkspace {
         })?;
         rollback_stage::verify_staged(self.stage.directory()?, rollback)?;
         self.validate()
+    }
+
+    pub(super) fn restore_uninstall_external_state(&self) -> Result<(), LifecycleError> {
+        self.verify_staged_rollback_point()?;
+        let managed = open_child_directory(
+            self.stage.directory()?,
+            ".agent-skills",
+            Some(super::MANAGED_DIRECTORY_MODE),
+            "uninstall rollback metadata",
+        )?;
+        let rollback = open_child_directory(
+            &managed,
+            super::ROLLBACK_POINT_DIRECTORY,
+            Some(super::MANAGED_DIRECTORY_MODE),
+            "uninstall rollback point",
+        )?;
+        let quarantine = external_stage::create_directory(
+            self.stage.directory()?,
+            OsStr::new("external-recovery"),
+            Some(0o700),
+            "uninstall external recovery quarantine",
+        )?;
+        super::rollback::restore_external_state(
+            &rollback,
+            &self.target_directory,
+            self.target(),
+            &quarantine,
+            &self.stage_path().join("external-recovery"),
+        )
     }
 
     /// Copy and verify one caller-supplied package tree record.

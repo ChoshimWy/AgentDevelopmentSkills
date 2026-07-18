@@ -942,8 +942,16 @@ mod tests {
             Self::with_version("0.1.0")
         }
 
-        #[allow(clippy::too_many_lines)]
         fn with_version(version: &str) -> Self {
+            Self::with_options(version, false)
+        }
+
+        fn with_codex_runtime() -> Self {
+            Self::with_options("0.1.0", true)
+        }
+
+        #[allow(clippy::too_many_lines)]
+        fn with_options(version: &str, codex_runtime: bool) -> Self {
             let root = temporary_path("fixture");
             let source = root.join("source");
             std::fs::create_dir_all(&source).expect("create source");
@@ -972,17 +980,95 @@ mod tests {
             let files = json!([file]);
             let files_sha256 = canonical_sha256(&files).expect("hash package files");
             let manifest_sha256 = canonical_sha256(&manifest).expect("hash manifest");
-            let assets = json!([{
+            let mut assets = vec![json!({
                 "mode": 0o644,
                 "package": "core",
                 "path": "manifest.json",
                 "sha256": bytes_sha256(&manifest_bytes),
-            }]);
+            })];
+            let mut packages = vec![json!({
+                "directories": [],
+                "file_count": 1,
+                "files": files,
+                "files_sha256": files_sha256,
+                "id": "core",
+                "manifest_sha256": manifest_sha256,
+                "provider_manifest_sha256": Value::Null,
+                "root_mode": 0o755,
+            })];
+            let mut selected_packages = vec![json!({
+                "core_compatibility": format!("=={}", env!("CARGO_PKG_VERSION")),
+                "id": "core",
+                "kind": "core",
+                "provider_compatibility": Value::Null,
+                "provider_version": Value::Null,
+                "selection_reasons": ["core"],
+                "source_sha256": files_sha256,
+                "version": version,
+            })];
+            if codex_runtime {
+                let codex_source = root.join("codex");
+                std::fs::create_dir_all(&codex_source).expect("create codex source");
+                let codex_manifest = json!({
+                    "bindings": {},
+                    "capabilities": [],
+                    "detection": {"medium": [], "strong": [], "weak": []},
+                    "id": "codex",
+                    "installation": {
+                        "asset_roots": [],
+                        "instruction_fragments": [],
+                        "skill_roots": [],
+                    },
+                    "kind": "runtime-config",
+                    "package_requires": [],
+                    "schema_version": "1.0",
+                    "version": version,
+                });
+                let codex_bytes = canonical_json(&codex_manifest).expect("encode codex manifest");
+                std::fs::write(codex_source.join("manifest.json"), &codex_bytes)
+                    .expect("write codex manifest");
+                let codex_files = json!([{
+                    "mode": 0o644,
+                    "path": "manifest.json",
+                    "sha256": bytes_sha256(&codex_bytes),
+                }]);
+                let codex_files_sha256 = canonical_sha256(&codex_files).expect("hash codex files");
+                assets.push(json!({
+                    "mode": 0o644,
+                    "package": "codex",
+                    "path": "manifest.json",
+                    "sha256": bytes_sha256(&codex_bytes),
+                }));
+                packages.push(json!({
+                    "directories": [],
+                    "file_count": 1,
+                    "files": codex_files,
+                    "files_sha256": codex_files_sha256,
+                    "id": "codex",
+                    "manifest_sha256": canonical_sha256(&codex_manifest)
+                        .expect("hash codex manifest"),
+                    "provider_manifest_sha256": Value::Null,
+                    "root_mode": 0o755,
+                }));
+                selected_packages.push(json!({
+                    "core_compatibility": format!("=={}", env!("CARGO_PKG_VERSION")),
+                    "id": "codex",
+                    "kind": "runtime-config",
+                    "provider_compatibility": Value::Null,
+                    "provider_version": Value::Null,
+                    "selection_reasons": ["runtime-config:codex"],
+                    "source_sha256": codex_files_sha256,
+                    "version": version,
+                }));
+            }
+            let assets = Value::Array(assets);
+            let package_count = packages.len();
+            let file_count = package_count;
             let mut plan = json!({
                 "asset_summary": {
                     "content_sha256": canonical_sha256(&assets).expect("hash assets"),
-                    "file_count": 1,
-                    "package_count": 1,
+                    "file_count": file_count,
+                    "package_count": package_count,
                     "skill_count": 0,
                 },
                 "assets": assets,
@@ -1000,32 +1086,14 @@ mod tests {
                 "managed_roots": ["AGENTS.md", "skills", ".agent-skills"],
                 "manager": "agent-development-skills",
                 "package_lock_hash": Value::Null,
-                "packages": [{
-                    "directories": [],
-                    "file_count": 1,
-                    "files": files,
-                    "files_sha256": files_sha256,
-                    "id": "core",
-                    "manifest_sha256": manifest_sha256,
-                    "provider_manifest_sha256": Value::Null,
-                    "root_mode": 0o755,
-                }],
+                "packages": packages,
                 "permission_profiles": [],
                 "resolved_dependencies": [],
                 "schema_version": "1.0",
                 "selected_disciplines": [],
-                "selected_packages": [{
-                    "core_compatibility": format!("=={}", env!("CARGO_PKG_VERSION")),
-                    "id": "core",
-                    "kind": "core",
-                    "provider_compatibility": Value::Null,
-                    "provider_version": Value::Null,
-                    "selection_reasons": ["core"],
-                    "source_sha256": files_sha256,
-                    "version": version,
-                }],
+                "selected_packages": selected_packages,
                 "selected_platforms": [],
-                "selected_runtime_configs": [],
+                "selected_runtime_configs": if codex_runtime { json!(["codex"]) } else { json!([]) },
                 "side_effects": [],
                 "skills": [],
                 "status": "planned",
@@ -1088,6 +1156,21 @@ mod tests {
             package.join("manifest.json"),
         )
         .expect("copy installed Manifest");
+        let codex_selected = fixture
+            .token
+            .install_plan
+            .get("selected_runtime_configs")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("codex")));
+        let codex_package = managed.join("packages/codex");
+        if codex_selected {
+            std::fs::create_dir_all(&codex_package).expect("create installed codex package");
+            std::fs::copy(
+                fixture.root.join("codex/manifest.json"),
+                codex_package.join("manifest.json"),
+            )
+            .expect("copy installed codex Manifest");
+        }
         std::fs::write(target.join("AGENTS.md"), INSTRUCTIONS.as_bytes())
             .expect("write installed AGENTS");
         std::fs::write(
@@ -1100,18 +1183,120 @@ mod tests {
             canonical_json(&fixture.token.package_lock).expect("encode installed package Lockfile"),
         )
         .expect("write installed package Lockfile");
-        for directory in [&target, &managed, &managed.join("packages"), &package] {
-            set_mode(directory, MANAGED_DIRECTORY_MODE);
+        let mut directories = vec![
+            target.clone(),
+            managed.clone(),
+            managed.join("packages"),
+            package.clone(),
+        ];
+        if codex_selected {
+            directories.push(codex_package.clone());
+        }
+        for directory in directories {
+            set_mode(&directory, MANAGED_DIRECTORY_MODE);
         }
         set_mode(&target.join("skills"), MANAGED_DIRECTORY_MODE);
-        for file in [
+        let mut files = vec![
             target.join("AGENTS.md"),
             managed.join(INSTALL_LOCK),
             managed.join(PACKAGE_LOCK),
             package.join("manifest.json"),
-        ] {
+        ];
+        if codex_selected {
+            files.push(codex_package.join("manifest.json"));
+        }
+        for file in files {
             set_mode(&file, MANAGED_FILE_MODE);
         }
+    }
+
+    fn add_system_skill_and_local_config(fixture: &Fixture) {
+        let target = fixture.target();
+        let system = target.join("skills/.system/builtin");
+        std::fs::create_dir_all(&system).expect("create system Skill");
+        std::fs::write(system.join("SKILL.md"), b"# Builtin\n").expect("write system Skill");
+        std::fs::write(target.join("config.toml"), b"model = \"local\"\n")
+            .expect("write local config");
+        std::fs::write(target.join("readonly.config.toml"), b"# local profile\n")
+            .expect("write local profile");
+        for directory in [target.join("skills/.system"), system] {
+            set_mode(&directory, MANAGED_DIRECTORY_MODE);
+        }
+        set_mode(
+            &target.join("skills/.system/builtin/SKILL.md"),
+            MANAGED_FILE_MODE,
+        );
+        set_mode(&target.join("config.toml"), 0o600);
+        set_mode(&target.join("readonly.config.toml"), 0o600);
+    }
+
+    fn add_source_activation_baseline(fixture: &Fixture) -> Vec<String> {
+        let target = fixture.target();
+        let paths = [
+            ("agents/design_researcher.toml", 0o644),
+            ("agents/reviewer.toml", 0o644),
+            ("agents/explorer.toml", 0o644),
+            ("agents/pm.toml", 0o644),
+            ("agents/reporter.toml", 0o644),
+            ("agents/builder.toml", 0o644),
+            ("agents/docs_researcher.toml", 0o644),
+            ("agents/tester.toml", 0o644),
+            ("bin/codex_verify", 0o755),
+            ("bin/digest-xcodebuild-log", 0o755),
+            ("templates/codex_verify.example.sh", 0o755),
+            ("templates/ui-smoke.example.yml", 0o644),
+        ];
+        let mut records = Vec::new();
+        for (path, mode) in paths {
+            let destination = target.join(path);
+            std::fs::create_dir_all(destination.parent().expect("activation parent"))
+                .expect("create activation parent");
+            let bytes = format!("# managed {path}\n").into_bytes();
+            std::fs::write(&destination, &bytes).expect("write activation file");
+            set_mode(&destination, mode);
+            set_mode(
+                destination.parent().expect("activation parent"),
+                MANAGED_DIRECTORY_MODE,
+            );
+            records.push(json!({
+                "mode": mode,
+                "path": path,
+                "sha256": bytes_sha256(&bytes),
+            }));
+        }
+        let lock = json!({
+            "files": records,
+            "handler": "core.source-activation.apple-codex-v1",
+            "manager": "agent-development-skills",
+            "schema_version": "2.0",
+        });
+        std::fs::write(
+            target.join(".agent-skills/activation-lock.json"),
+            canonical_json(&lock).expect("encode activation Lock"),
+        )
+        .expect("write activation Lock");
+        set_mode(
+            &target.join(".agent-skills/activation-lock.json"),
+            MANAGED_FILE_MODE,
+        );
+        let agents_path = serde_json::to_string(
+            target
+                .canonicalize()
+                .expect("canonical fixture target")
+                .join("AGENTS.md")
+                .to_str()
+                .expect("UTF-8 fixture target"),
+        )
+        .expect("encode TOML path");
+        std::fs::write(
+            target.join("config.toml"),
+            format!(
+                "model_instructions_file = {agents_path}\nmodel = \"local\"\n[features]\nlocal = true\n"
+            ),
+        )
+        .expect("write activated config");
+        set_mode(&target.join("config.toml"), 0o600);
+        paths.iter().map(|(path, _)| (*path).to_owned()).collect()
     }
 
     fn write_activation_fixture(fixture: &Fixture, expected_hash: &str) -> Vec<u8> {
@@ -1148,6 +1333,377 @@ mod tests {
 
     #[cfg(not(unix))]
     fn set_mode(_path: &Path, _mode: u32) {}
+
+    #[test]
+    fn full_uninstall_preserves_system_skills_profiles_and_config() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        add_system_skill_and_local_config(&fixture);
+
+        let workspace =
+            LifecycleWorkspace::begin(fixture.target()).expect("begin uninstall workspace");
+        let published = workspace.publish_uninstall().expect("publish uninstall");
+        published.verify().expect("verify published uninstall");
+        assert_eq!(
+            published.report().get("status").and_then(Value::as_str),
+            Some("published")
+        );
+        assert_eq!(
+            published
+                .report()
+                .get("config_action")
+                .and_then(Value::as_str),
+            Some("preserved")
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("skills/.system/builtin/SKILL.md"))
+                .expect("read preserved system Skill"),
+            b"# Builtin\n"
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("config.toml")).expect("read preserved config"),
+            b"model = \"local\"\n"
+        );
+        assert!(fixture.target().join("readonly.config.toml").is_file());
+        assert!(!fixture.target().join("AGENTS.md").exists());
+        assert!(!fixture.target().join(".agent-skills").exists());
+
+        let report = published.commit().expect("commit uninstall");
+        assert_eq!(
+            report.get("status").and_then(Value::as_str),
+            Some("uninstalled")
+        );
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        assert!(
+            !std::fs::read_dir(fixture.target())
+                .expect("read target")
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".agent-skills-backup-")
+                })
+        );
+    }
+
+    #[test]
+    fn full_uninstall_rollback_restores_complete_managed_install() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        add_system_skill_and_local_config(&fixture);
+        let agents = std::fs::read(fixture.target().join("AGENTS.md")).expect("read AGENTS");
+
+        let workspace =
+            LifecycleWorkspace::begin(fixture.target()).expect("begin uninstall workspace");
+        let published = workspace.publish_uninstall().expect("publish uninstall");
+        published.rollback().expect("rollback uninstall");
+
+        assert_eq!(
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read restored AGENTS"),
+            agents
+        );
+        assert!(
+            fixture
+                .target()
+                .join(".agent-skills/install-lock.json")
+                .is_file()
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("skills/.system/builtin/SKILL.md"))
+                .expect("read restored system Skill"),
+            b"# Builtin\n"
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("config.toml")).expect("read restored config"),
+            b"model = \"local\"\n"
+        );
+    }
+
+    #[test]
+    fn full_uninstall_deactivates_supported_source_assets_and_rewrites_config() {
+        let fixture = Fixture::with_codex_runtime();
+        materialize_current_install(&fixture);
+        let activated = add_source_activation_baseline(&fixture);
+
+        let workspace =
+            LifecycleWorkspace::begin(fixture.target()).expect("begin uninstall workspace");
+        let published = workspace.publish_uninstall().expect("publish uninstall");
+        published.verify().expect("verify published uninstall");
+        assert_eq!(
+            published
+                .report()
+                .get("config_action")
+                .and_then(Value::as_str),
+            Some("removed-managed-instructions-path")
+        );
+        for path in &activated {
+            assert!(
+                !fixture.target().join(path).exists(),
+                "activated file remains: {path}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(fixture.target().join("config.toml"))
+                .expect("read rewritten config"),
+            "model = \"local\"\n[features]\nlocal = true\n"
+        );
+        published.commit().expect("commit uninstall");
+    }
+
+    #[test]
+    fn activated_full_uninstall_rollback_restores_external_and_managed_state() {
+        let fixture = Fixture::with_codex_runtime();
+        materialize_current_install(&fixture);
+        let activated = add_source_activation_baseline(&fixture);
+        let config = std::fs::read(fixture.target().join("config.toml")).expect("read config");
+        let activation_bytes = activated
+            .iter()
+            .map(|path| {
+                (
+                    path.clone(),
+                    std::fs::read(fixture.target().join(path)).expect("read activation file"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let workspace =
+            LifecycleWorkspace::begin(fixture.target()).expect("begin uninstall workspace");
+        let published = workspace.publish_uninstall().expect("publish uninstall");
+        published.rollback().expect("rollback uninstall");
+
+        assert_eq!(
+            std::fs::read(fixture.target().join("config.toml")).expect("read restored config"),
+            config
+        );
+        assert!(
+            fixture
+                .target()
+                .join(".agent-skills/activation-lock.json")
+                .is_file()
+        );
+        for (path, bytes) in activation_bytes {
+            assert_eq!(
+                std::fs::read(fixture.target().join(&path)).expect("read restored activation file"),
+                bytes,
+                "restored activation file differs: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_partial_uninstall_root_backup_restores_the_intact_install() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        let agents = std::fs::read(fixture.target().join("AGENTS.md")).expect("read AGENTS");
+        let workspace =
+            LifecycleWorkspace::begin(fixture.target()).expect("begin uninstall workspace");
+        let error = workspace
+            .publish_uninstall_with_test_hooks(
+                |name, phase| {
+                    if name == "skills" && phase == "backup-after-rename" {
+                        return Err(LifecycleError::Invalid(
+                            "injected uninstall root failure".to_owned(),
+                        ));
+                    }
+                    Ok(())
+                },
+                |_, _| Ok(()),
+                |_, _| Ok(()),
+            )
+            .expect_err("partial root backup must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("injected uninstall root failure"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read restored AGENTS"),
+            agents
+        );
+        assert!(
+            fixture
+                .target()
+                .join(".agent-skills/install-lock.json")
+                .is_file()
+        );
+        assert!(fixture.target().join("skills").is_dir());
+    }
+
+    #[test]
+    fn failed_uninstall_after_system_root_creation_restores_the_intact_install() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        add_system_skill_and_local_config(&fixture);
+        let agents = std::fs::read(fixture.target().join("AGENTS.md")).expect("read AGENTS");
+
+        let workspace =
+            LifecycleWorkspace::begin(fixture.target()).expect("begin uninstall workspace");
+        let error = workspace
+            .publish_uninstall_with_test_hooks(
+                |_, _| Ok(()),
+                |_, _| Ok(()),
+                |_, phase| {
+                    if phase == "target-root-created" {
+                        return Err(LifecycleError::Invalid(
+                            "injected system root failure".to_owned(),
+                        ));
+                    }
+                    Ok(())
+                },
+            )
+            .expect_err("system root publication must fail");
+
+        assert!(
+            error.to_string().contains("injected system root failure"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read restored AGENTS"),
+            agents
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("skills/.system/builtin/SKILL.md"))
+                .expect("read restored system Skill"),
+            b"# Builtin\n"
+        );
+        assert!(
+            fixture
+                .target()
+                .join(".agent-skills/install-lock.json")
+                .is_file()
+        );
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        assert!(
+            !std::fs::read_dir(fixture.target())
+                .expect("read target")
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".agent-skills-backup-")
+                })
+        );
+    }
+
+    #[test]
+    fn failed_uninstall_after_system_rename_restores_the_intact_install() {
+        let fixture = Fixture::new();
+        materialize_current_install(&fixture);
+        add_system_skill_and_local_config(&fixture);
+        let agents = std::fs::read(fixture.target().join("AGENTS.md")).expect("read AGENTS");
+
+        let workspace =
+            LifecycleWorkspace::begin(fixture.target()).expect("begin uninstall workspace");
+        let error = workspace
+            .publish_uninstall_with_test_hooks(
+                |_, _| Ok(()),
+                |_, _| Ok(()),
+                |_, phase| {
+                    if phase == "published-after-rename" {
+                        return Err(LifecycleError::Invalid(
+                            "injected system rename failure".to_owned(),
+                        ));
+                    }
+                    Ok(())
+                },
+            )
+            .expect_err("system Skill publication must fail");
+
+        assert!(
+            error.to_string().contains("injected system rename failure"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("AGENTS.md")).expect("read restored AGENTS"),
+            agents
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("skills/.system/builtin/SKILL.md"))
+                .expect("read restored system Skill"),
+            b"# Builtin\n"
+        );
+        assert!(
+            fixture
+                .target()
+                .join(".agent-skills/install-lock.json")
+                .is_file()
+        );
+        assert!(!fixture.target().join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        assert!(
+            !std::fs::read_dir(fixture.target())
+                .expect("read target")
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".agent-skills-backup-")
+                })
+        );
+    }
+
+    #[test]
+    fn failed_mid_uninstall_deactivation_restores_every_preimage() {
+        let fixture = Fixture::with_codex_runtime();
+        materialize_current_install(&fixture);
+        let activated = add_source_activation_baseline(&fixture);
+        let config = std::fs::read(fixture.target().join("config.toml")).expect("read config");
+        let activation_bytes = activated
+            .iter()
+            .map(|path| {
+                (
+                    path.clone(),
+                    std::fs::read(fixture.target().join(path)).expect("read activation file"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut removed = 0_u8;
+        let workspace =
+            LifecycleWorkspace::begin(fixture.target()).expect("begin uninstall workspace");
+        let error = workspace
+            .publish_uninstall_with_test_hooks(
+                |_, _| Ok(()),
+                |_, phase| {
+                    if phase == "owned-file-removed" {
+                        removed += 1;
+                        if removed == 1 {
+                            return Err(LifecycleError::Invalid(
+                                "injected uninstall handler failure".to_owned(),
+                            ));
+                        }
+                    }
+                    Ok(())
+                },
+                |_, _| Ok(()),
+            )
+            .expect_err("partial deactivation must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("injected uninstall handler failure"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(fixture.target().join("config.toml")).expect("read restored config"),
+            config
+        );
+        assert!(
+            fixture
+                .target()
+                .join(".agent-skills/activation-lock.json")
+                .is_file()
+        );
+        for (path, bytes) in activation_bytes {
+            assert_eq!(
+                std::fs::read(fixture.target().join(&path)).expect("read restored activation file"),
+                bytes,
+                "restored activation file differs: {path}"
+            );
+        }
+    }
 
     #[test]
     fn validated_plan_stages_and_verifies_complete_managed_layout() {

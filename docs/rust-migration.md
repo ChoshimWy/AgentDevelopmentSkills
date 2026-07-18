@@ -164,8 +164,13 @@ contains:
   existing profiles, publishes through private no-replace quarantine, renders
   Codex config natively, and writes the Activation Lock last. The session
   launcher is still explicit caller input until release packaging binds a
-  verified native executable. Fresh-install activation, uninstall, and
-  production command routing are not implemented yet.
+  verified native executable. Full managed uninstall now runs behind a
+  `PublishedUninstall` RAII guard: it freezes a complete managed/external
+  rollback point, moves all managed roots into a private backup, validates the
+  supported Activation ownership set, preserves profiles, Codex config
+  semantics, and `skills/.system`, and can commit or restore every preimage.
+  Fresh-install activation and production command routing are not implemented
+  yet; `uninstall.sh` still uses the Python production path.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit

@@ -272,8 +272,13 @@ snapshot, refuses unmanaged conflicts, creates only missing profiles, uses
 private no-replace publication, writes the Activation Lock last, and can
 restore every external preimage. The session launcher remains an explicit
 caller-supplied payload until release packaging binds a verified native
-executable. Fresh-install activation, uninstall, and production command
-routing remain later lifecycle slices.
+executable. A separate `PublishedUninstall` guard now freezes a complete
+managed and external rollback point, moves all managed roots into a private
+backup, removes only Activation-owned files, preserves local profiles,
+`config.toml` semantics, and `skills/.system`, and supports explicit commit,
+rollback, and drop-time recovery. Fresh-install activation and production
+command routing remain later lifecycle slices; the source `uninstall.sh` has
+not switched to the native guard yet.
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path
 holds directory capabilities and opens contract files without following

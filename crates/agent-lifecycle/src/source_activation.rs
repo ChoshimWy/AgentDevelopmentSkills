@@ -1,10 +1,11 @@
 use super::{
     EXTERNAL_ACTIVATION_LOCK, LifecycleError, MANAGED_DIRECTORY_MODE, MANAGED_FILE_MODE,
-    codex_config::render_codex_config, configure_nofollow, external_stage,
+    codex_config::render_codex_config, configure_nofollow, external_stage, load_json_file,
     managed_swap::rename_no_replace, open_child_directory, same_content_state_cap, same_object_cap,
     validate_activation_lock_contract,
 };
 use agent_contracts::{MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256, parse_json};
+use agent_engine::validate_install_plan;
 use cap_fs_ext::{FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt as _};
 use cap_std::fs::{Dir, Metadata, OpenOptions};
 use serde_json::{Value, json};
@@ -119,7 +120,7 @@ const ACTIVATION_ASSETS: &[ActivationAsset] = &[
     ),
 ];
 
-const PROFILE_NAMES: &[&str] = &[
+pub(super) const PROFILE_NAMES: &[&str] = &[
     "budget.config.toml",
     "daily.config.toml",
     "deep.config.toml",
@@ -361,6 +362,58 @@ impl SourceActivation {
 }
 
 impl SourceDeactivation {
+    pub(super) fn prepare_for_uninstall(
+        target: &Dir,
+        target_path: &Path,
+    ) -> Result<Option<Self>, LifecycleError> {
+        let managed = open_child_directory(
+            target,
+            ".agent-skills",
+            Some(MANAGED_DIRECTORY_MODE),
+            "managed metadata directory",
+        )?;
+        let install_lock = load_json_file(
+            &managed,
+            "install-lock.json",
+            MANAGED_FILE_MODE,
+            "source Install Lock",
+        )?;
+        validate_install_plan(&install_lock)?;
+        if install_lock.get("status").and_then(Value::as_str) != Some("installed") {
+            return invalid("source uninstall requires an installed Install Lock");
+        }
+        let activation_owned = install_lock
+            .get("selected_runtime_configs")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("codex")))
+            || install_lock
+                .get("selected_packages")
+                .and_then(Value::as_array)
+                .is_some_and(|values| {
+                    values
+                        .iter()
+                        .any(|value| value.get("id").and_then(Value::as_str) == Some("codex"))
+                });
+        let activation_present = match managed.symlink_metadata(EXTERNAL_ACTIVATION_LOCK) {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        match (activation_owned, activation_present) {
+            (true, false) => {
+                return invalid("managed source install is missing its activation Lock");
+            }
+            (false, true) => {
+                return invalid("non-activated install must not contain an activation Lock");
+            }
+            (false, false) => return Ok(None),
+            (true, true) => {}
+        }
+        let prepared = Self::prepare(target, target_path)?;
+        prepared.require_supported_uninstall_paths()?;
+        Ok(Some(prepared))
+    }
+
     pub(super) fn prepare(target: &Dir, target_path: &Path) -> Result<Self, LifecycleError> {
         let managed = open_child_directory(
             target,
@@ -431,21 +484,8 @@ impl SourceDeactivation {
         mut handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
     ) -> Result<Value, LifecycleError> {
         self.revalidate(target)?;
-        for record in &self.records {
-            remove_activation_file(target, record)?;
-            handler_hook(&record.path, "owned-file-removed")?;
-        }
-        let config_action = match &self.config {
-            ConfigDeactivation::Missing => "missing",
-            ConfigDeactivation::Preserved(_) => "preserved",
-            ConfigDeactivation::Replace {
-                candidate,
-                original,
-            } => {
-                replace_config(target, scratch, original, candidate, &mut handler_hook)?;
-                "removed-managed-instructions-path"
-            }
-        };
+        let result = self.apply_external_mutation(target, scratch, &mut handler_hook)?;
+        self.verify_uninstall_output(target)?;
         let managed = open_child_directory(
             target,
             ".agent-skills",
@@ -462,14 +502,42 @@ impl SourceDeactivation {
             return invalid("source activation Lock changed during deactivation");
         }
         managed.remove_file(EXTERNAL_ACTIVATION_LOCK)?;
-        Ok(json!({
-            "config_action": config_action,
-            "handler": DEACTIVATION_HANDLER_ID,
-            "removed_files": self.records.into_iter().map(|record| record.path).collect::<Vec<_>>(),
-        }))
+        Ok(result)
+    }
+
+    pub(super) fn apply_after_managed_backup(
+        &self,
+        target: &Dir,
+        backup: &Dir,
+        scratch: &Dir,
+        mut handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<Value, LifecycleError> {
+        self.revalidate_external(target)?;
+        let managed = open_child_directory(
+            backup,
+            ".agent-skills",
+            Some(MANAGED_DIRECTORY_MODE),
+            "uninstall recovery metadata",
+        )?;
+        self.verify_activation_lock_in(&managed, "uninstall recovery Activation Lock")?;
+        let result = self.apply_external_mutation(target, scratch, &mut handler_hook)?;
+        self.verify_uninstall_output(target)?;
+        self.verify_activation_lock_in(&managed, "uninstall recovery Activation Lock")?;
+        Ok(result)
     }
 
     pub(super) fn revalidate(&self, target: &Dir) -> Result<(), LifecycleError> {
+        self.revalidate_external(target)?;
+        let managed = open_child_directory(
+            target,
+            ".agent-skills",
+            Some(MANAGED_DIRECTORY_MODE),
+            "managed metadata directory",
+        )?;
+        self.verify_activation_lock_in(&managed, "source activation Lock")
+    }
+
+    fn revalidate_external(&self, target: &Dir) -> Result<(), LifecycleError> {
         for record in &self.records {
             verify_activation_file(target, &record.path, record.mode, &record.sha256)?;
         }
@@ -484,22 +552,104 @@ impl SourceDeactivation {
                 original: snapshot, ..
             } => verify_file_snapshot(target, "config.toml", snapshot, "config.toml")?,
         }
-        let managed = open_child_directory(
-            target,
-            ".agent-skills",
-            Some(MANAGED_DIRECTORY_MODE),
-            "managed metadata directory",
-        )?;
+        Ok(())
+    }
+
+    fn verify_activation_lock_in(&self, managed: &Dir, label: &str) -> Result<(), LifecycleError> {
         if read_required_file(
-            &managed,
+            managed,
             EXTERNAL_ACTIVATION_LOCK,
             Some(MANAGED_FILE_MODE),
-            "source activation Lock",
+            label,
         )?
         .bytes
             != self.activation_lock
         {
             return invalid("source activation Lock changed before deactivation");
+        }
+        Ok(())
+    }
+
+    fn require_supported_uninstall_paths(&self) -> Result<(), LifecycleError> {
+        let actual = self
+            .records
+            .iter()
+            .map(|record| record.path.as_str())
+            .collect::<BTreeSet<_>>();
+        let baseline = ACTIVATION_ASSETS
+            .iter()
+            .map(|asset| asset.destination)
+            .collect::<BTreeSet<_>>();
+        let mut current = baseline.clone();
+        current.insert(SESSION_DESTINATION);
+        if actual != baseline && actual != current {
+            return invalid("activation Lock does not cover the supported managed file set");
+        }
+        Ok(())
+    }
+
+    fn apply_external_mutation(
+        &self,
+        target: &Dir,
+        scratch: &Dir,
+        handler_hook: &mut impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<Value, LifecycleError> {
+        for record in &self.records {
+            remove_activation_file(target, record)?;
+            handler_hook(&record.path, "owned-file-removed")?;
+        }
+        let config_action = match &self.config {
+            ConfigDeactivation::Missing => "missing",
+            ConfigDeactivation::Preserved(_) => "preserved",
+            ConfigDeactivation::Replace {
+                candidate,
+                original,
+            } => {
+                replace_config(target, scratch, original, candidate, handler_hook)?;
+                "removed-managed-instructions-path"
+            }
+        };
+        Ok(json!({
+            "config_action": config_action,
+            "handler": DEACTIVATION_HANDLER_ID,
+            "removed_files": self.records.iter().map(|record| record.path.clone()).collect::<Vec<_>>(),
+        }))
+    }
+
+    pub(super) fn verify_uninstall_output(&self, target: &Dir) -> Result<(), LifecycleError> {
+        for record in &self.records {
+            if read_optional_relative_file(target, &record.path, None, "removed activation file")?
+                .is_some()
+            {
+                return invalid(format!(
+                    "activated file remains after uninstall: {}",
+                    record.path
+                ));
+            }
+        }
+        match &self.config {
+            ConfigDeactivation::Missing => match target.symlink_metadata("config.toml") {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+                Ok(_) => return invalid("config.toml appeared during uninstall"),
+            },
+            ConfigDeactivation::Preserved(snapshot) => {
+                verify_file_snapshot(target, "config.toml", snapshot, "preserved config.toml")?;
+            }
+            ConfigDeactivation::Replace {
+                candidate,
+                original,
+            } => {
+                let current = read_required_file(
+                    target,
+                    "config.toml",
+                    Some(original.mode),
+                    "uninstall config.toml",
+                )?;
+                if current.bytes != *candidate {
+                    return invalid("config.toml differs from the uninstall candidate");
+                }
+            }
         }
         Ok(())
     }

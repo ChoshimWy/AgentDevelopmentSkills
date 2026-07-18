@@ -14,8 +14,10 @@
 //! must remain quiescent without concurrently writable handles. The first
 //! trusted handlers perform source deactivation and replacement-transaction
 //! source activation with exact rollback-scope and Activation ownership
-//! checks. Fresh-install activation, uninstall, and production command routing
-//! remain outside this slice.
+//! checks. [`PublishedUninstall`] adds rollback-backed full managed removal
+//! while preserving local profiles, config semantics, and `skills/.system`.
+//! Fresh-install activation and production command routing remain outside this
+//! slice.
 
 mod codex_config;
 mod doctor_report;
@@ -35,7 +37,7 @@ pub use codex_config::render_codex_config;
 pub use doctor_report::inspect_doctor_report_v1;
 #[cfg(test)]
 use doctor_report::validate_doctor_report_v1;
-pub use managed_swap::PublishedInstall;
+pub use managed_swap::{PublishedInstall, PublishedUninstall};
 pub use staged_install::ValidatedInstallPlan;
 pub use transaction_lock::LifecycleLock;
 pub use transaction_workspace::LifecycleWorkspace;

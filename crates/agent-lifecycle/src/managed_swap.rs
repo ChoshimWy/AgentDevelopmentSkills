@@ -5,6 +5,8 @@ use super::{
 };
 use cap_std::fs::{Dir, Metadata};
 use serde_json::Value;
+use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -75,6 +77,49 @@ pub struct PublishedInstall {
     plan: ValidatedInstallPlan,
     roots: Vec<RootMove>,
     workspace: Option<LifecycleWorkspace>,
+}
+
+struct RemovalRootMove {
+    backed_up: bool,
+    identity: Metadata,
+    root: ManagedRoot,
+}
+
+struct PreservedSystemSkills {
+    identity: Metadata,
+    phase: SystemSkillsPhase,
+}
+
+enum SystemSkillsPhase {
+    BackupOnly,
+    TargetRootCreated { identity: Metadata },
+    Published { target_root_identity: Metadata },
+}
+
+/// A fully published managed uninstall whose complete source installation
+/// remains recoverable until explicit commit.
+#[must_use = "a published uninstall must be committed or rolled back"]
+pub struct PublishedUninstall {
+    deactivation: Option<source_activation::SourceDeactivation>,
+    external_mutation_started: bool,
+    report: Value,
+    roots: Vec<RemovalRootMove>,
+    system_skills: Option<PreservedSystemSkills>,
+    workspace: Option<LifecycleWorkspace>,
+}
+
+impl fmt::Debug for PublishedUninstall {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PublishedUninstall")
+            .field(
+                "target",
+                &self.workspace.as_ref().map(LifecycleWorkspace::target),
+            )
+            .field("managed_root_count", &self.roots.len())
+            .field("external_mutation_started", &self.external_mutation_started)
+            .finish_non_exhaustive()
+    }
 }
 
 impl fmt::Debug for PublishedInstall {
@@ -162,6 +207,529 @@ impl LifecycleWorkspace {
             }),
             Err(error) => Err(abort_workspace(self, &mut roots, plan, false, error)),
         }
+    }
+
+    /// Publish a full managed uninstall under the held lifecycle lock.
+    ///
+    /// The complete managed installation and exact external deactivation scope
+    /// are frozen into a private rollback point before any rename. All three
+    /// managed roots then move into the private backup, activation-owned files
+    /// are removed through the trusted source-deactivation handler, and an
+    /// existing `skills/.system` tree is returned to the target unchanged.
+    ///
+    /// # Errors
+    /// Fails closed for an incomplete or modified installation, unsafe
+    /// Activation ownership, unsupported activation paths, external drift,
+    /// namespace collisions, or incomplete recovery.
+    pub fn publish_uninstall(self) -> Result<PublishedUninstall, LifecycleError> {
+        self.publish_uninstall_with(|_, _| Ok(()), |_, _| Ok(()), |_, _| Ok(()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_uninstall_with_test_hooks(
+        self,
+        root_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+        handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+        system_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<PublishedUninstall, LifecycleError> {
+        self.publish_uninstall_with(root_hook, handler_hook, system_hook)
+    }
+
+    fn publish_uninstall_with(
+        mut self,
+        mut root_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+        mut handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+        mut system_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<PublishedUninstall, LifecycleError> {
+        let target = self.target_directory()?;
+        let deactivation =
+            source_activation::SourceDeactivation::prepare_for_uninstall(&target, self.target())?;
+        let external_paths = deactivation
+            .as_ref()
+            .map_or(&[][..], |prepared| prepared.scope());
+        let rollback_fingerprint = self.stage_uninstall_rollback(external_paths)?;
+        if let Some(prepared) = deactivation.as_ref() {
+            prepared.revalidate(&target)?;
+        }
+        require_empty(self.backup_directory()?, "uninstall recovery backup")?;
+        let preserved_profiles = inspect_preserved_profiles(&target)?;
+        let config_action = if deactivation.is_some() {
+            None
+        } else {
+            Some(inspect_unmanaged_config_action(&target)?)
+        };
+        let mut roots = capture_removal_roots(&self)?;
+        let mut system_skills = None;
+        let mut external_mutation_started = false;
+        let mut deactivation_result = None;
+        let result = (|| {
+            backup_removal_roots(&self, &mut roots, &mut root_hook)?;
+            self.verify_recovery_backup()?;
+            if let Some(prepared) = deactivation.as_ref() {
+                external_mutation_started = true;
+                deactivation_result = Some(prepared.apply_after_managed_backup(
+                    &target,
+                    self.backup_directory()?,
+                    &self.handler_scratch_directory()?,
+                    &mut handler_hook,
+                )?);
+            }
+            preserve_system_skills(&self, &mut system_skills, &mut system_hook)?;
+            verify_published_uninstall(&self, &roots, system_skills.as_ref(), deactivation.as_ref())
+        })();
+        if let Err(error) = result {
+            return Err(abort_uninstall(
+                self,
+                &mut roots,
+                &mut system_skills,
+                external_mutation_started,
+                error,
+            ));
+        }
+        let deactivation_result = deactivation_result.unwrap_or_else(|| {
+            serde_json::json!({
+                "config_action": config_action.unwrap_or("missing"),
+                "handler": Value::Null,
+                "removed_files": [],
+            })
+        });
+        let report = serde_json::json!({
+            "activated_files": deactivation_result
+                .get("removed_files")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+            "config_action": deactivation_result
+                .get("config_action")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!("missing")),
+            "handler": deactivation_result.get("handler").cloned().unwrap_or(Value::Null),
+            "legacy_links_restored": false,
+            "managed_roots": MANAGED_ROOTS.iter().map(|root| root.name).collect::<Vec<_>>(),
+            "preserved_profiles": preserved_profiles,
+            "preserved_system_skills": system_skills.is_some(),
+            "rollback_point": rollback_fingerprint,
+            "status": "published",
+        });
+        Ok(PublishedUninstall {
+            deactivation,
+            external_mutation_started,
+            report,
+            roots,
+            system_skills,
+            workspace: Some(self),
+        })
+    }
+}
+
+fn capture_removal_roots(
+    workspace: &LifecycleWorkspace,
+) -> Result<Vec<RemovalRootMove>, LifecycleError> {
+    let mut roots = Vec::with_capacity(MANAGED_ROOTS.len());
+    for root in MANAGED_ROOTS {
+        let identity = capture_required(
+            workspace.target_directory_cap(),
+            root,
+            "uninstall managed root",
+        )?;
+        verify_cleanup_ready(workspace.target_directory_cap(), root)?;
+        roots.push(RemovalRootMove {
+            backed_up: false,
+            identity,
+            root,
+        });
+    }
+    Ok(roots)
+}
+
+fn backup_removal_roots(
+    workspace: &LifecycleWorkspace,
+    roots: &mut [RemovalRootMove],
+    hook: &mut impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+) -> Result<(), LifecycleError> {
+    for moved in roots {
+        hook(moved.root.name, "backup")?;
+        prepare_bound_move(
+            workspace.target_directory_cap(),
+            moved.root,
+            &moved.identity,
+            workspace.backup_directory()?,
+            "uninstall managed root",
+            "uninstall recovery root",
+        )?;
+        hook(moved.root.name, "backup-before-rename")?;
+        rename_bound_root(
+            workspace.target_directory_cap(),
+            workspace.target(),
+            moved.root,
+            workspace.backup_directory()?,
+            &workspace.backup_path(),
+            "uninstall managed root",
+            "uninstall recovery root",
+        )?;
+        moved.backed_up = true;
+        hook(moved.root.name, "backup-after-rename")?;
+        verify_bound_move(
+            workspace.target_directory_cap(),
+            moved.root,
+            &moved.identity,
+            workspace.backup_directory()?,
+            "uninstall managed root",
+            "uninstall recovery root",
+        )?;
+    }
+    Ok(())
+}
+
+fn restore_removal_roots(
+    workspace: &LifecycleWorkspace,
+    roots: &mut [RemovalRootMove],
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for moved in roots.iter_mut().rev() {
+        if !moved.backed_up {
+            continue;
+        }
+        let backup = match workspace.backup_directory() {
+            Ok(backup) => backup,
+            Err(error) => {
+                errors.push(format!("restore {}: {error}", moved.root.name));
+                continue;
+            }
+        };
+        let restored = prepare_bound_move(
+            backup,
+            moved.root,
+            &moved.identity,
+            workspace.target_directory_cap(),
+            "uninstall recovery root",
+            "restored uninstall root",
+        )
+        .and_then(|()| {
+            rename_bound_root(
+                backup,
+                &workspace.backup_path(),
+                moved.root,
+                workspace.target_directory_cap(),
+                workspace.target(),
+                "uninstall recovery root",
+                "restored uninstall root",
+            )
+        })
+        .and_then(|()| {
+            verify_bound_move(
+                backup,
+                moved.root,
+                &moved.identity,
+                workspace.target_directory_cap(),
+                "uninstall recovery root",
+                "restored uninstall root",
+            )
+        });
+        match restored {
+            Ok(()) => moved.backed_up = false,
+            Err(error) => errors.push(format!("restore {}: {error}", moved.root.name)),
+        }
+    }
+    errors
+}
+
+fn preserve_system_skills(
+    workspace: &LifecycleWorkspace,
+    state: &mut Option<PreservedSystemSkills>,
+    hook: &mut impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+) -> Result<(), LifecycleError> {
+    let backup_skills = open_child_directory(
+        workspace.backup_directory()?,
+        "skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "uninstall recovery Skills",
+    )?;
+    let identity = match backup_skills.symlink_metadata(".system") {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return invalid("uninstall recovery skills/.system is unsafe");
+        }
+        Ok(_) => open_child_directory(
+            &backup_skills,
+            ".system",
+            Some(MANAGED_DIRECTORY_MODE),
+            "uninstall recovery skills/.system",
+        )?
+        .dir_metadata()?,
+    };
+    *state = Some(PreservedSystemSkills {
+        identity: identity.clone(),
+        phase: SystemSkillsPhase::BackupOnly,
+    });
+    require_absent(
+        workspace.target_directory_cap(),
+        "skills",
+        "uninstall preserved system Skills root",
+    )?;
+    let target_skills = external_stage::create_directory(
+        workspace.target_directory_cap(),
+        OsStr::new("skills"),
+        Some(MANAGED_DIRECTORY_MODE),
+        "uninstall preserved system Skills root",
+    )?;
+    let target_skills_identity = target_skills.dir_metadata()?;
+    state
+        .as_mut()
+        .ok_or_else(|| LifecycleError::Invalid("system Skills state is missing".to_owned()))?
+        .phase = SystemSkillsPhase::TargetRootCreated {
+        identity: target_skills_identity.clone(),
+    };
+    hook("skills/.system", "target-root-created")?;
+    rename_no_replace(
+        &backup_skills,
+        &workspace.backup_path().join("skills"),
+        ".system",
+        &target_skills,
+        &workspace.target().join("skills"),
+        ".system",
+    )?;
+    state
+        .as_mut()
+        .ok_or_else(|| LifecycleError::Invalid("system Skills state is missing".to_owned()))?
+        .phase = SystemSkillsPhase::Published {
+        target_root_identity: target_skills_identity,
+    };
+    hook("skills/.system", "published-after-rename")?;
+    require_absent(
+        &backup_skills,
+        ".system",
+        "uninstall recovery system Skills source",
+    )?;
+    let published = open_child_directory(
+        &target_skills,
+        ".system",
+        Some(MANAGED_DIRECTORY_MODE),
+        "preserved system Skills",
+    )?
+    .dir_metadata()?;
+    if !same_object_cap(&identity, &published) {
+        return invalid("preserved system Skills identity changed after rename");
+    }
+    require_only_system_skills(&target_skills)?;
+    Ok(())
+}
+
+fn recover_system_skills(
+    workspace: &LifecycleWorkspace,
+    system: &mut PreservedSystemSkills,
+) -> Result<(), LifecycleError> {
+    match &system.phase {
+        SystemSkillsPhase::BackupOnly => return Ok(()),
+        SystemSkillsPhase::TargetRootCreated { identity } => {
+            let target_skills = open_child_directory(
+                workspace.target_directory_cap(),
+                "skills",
+                Some(MANAGED_DIRECTORY_MODE),
+                "empty preserved system Skills root",
+            )?;
+            if !same_object_cap(identity, &target_skills.dir_metadata()?) {
+                return invalid("empty preserved system Skills root identity changed");
+            }
+            if target_skills.entries()?.next().transpose()?.is_some() {
+                return invalid("empty preserved system Skills root is not empty");
+            }
+            workspace.target_directory_cap().remove_dir("skills")?;
+            require_absent(
+                workspace.target_directory_cap(),
+                "skills",
+                "restored system Skills root",
+            )?;
+            system.phase = SystemSkillsPhase::BackupOnly;
+            return Ok(());
+        }
+        SystemSkillsPhase::Published { .. } => {}
+    }
+    let target_skills = open_child_directory(
+        workspace.target_directory_cap(),
+        "skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "preserved system Skills root",
+    )?;
+    let current_root = target_skills.dir_metadata()?;
+    let target_root_identity = match &system.phase {
+        SystemSkillsPhase::Published {
+            target_root_identity,
+        } => target_root_identity,
+        SystemSkillsPhase::BackupOnly | SystemSkillsPhase::TargetRootCreated { .. } => {
+            return invalid("preserved system Skills recovery phase is invalid");
+        }
+    };
+    if !same_object_cap(target_root_identity, &current_root) {
+        return invalid("preserved system Skills root identity changed");
+    }
+    require_only_system_skills(&target_skills)?;
+    let current = open_child_directory(
+        &target_skills,
+        ".system",
+        Some(MANAGED_DIRECTORY_MODE),
+        "preserved system Skills",
+    )?
+    .dir_metadata()?;
+    if !same_object_cap(&system.identity, &current) {
+        return invalid("preserved system Skills identity changed before recovery");
+    }
+    let backup_skills = open_child_directory(
+        workspace.backup_directory()?,
+        "skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "uninstall recovery Skills",
+    )?;
+    require_absent(
+        &backup_skills,
+        ".system",
+        "uninstall recovery system Skills destination",
+    )?;
+    rename_no_replace(
+        &target_skills,
+        &workspace.target().join("skills"),
+        ".system",
+        &backup_skills,
+        &workspace.backup_path().join("skills"),
+        ".system",
+    )?;
+    system.phase = SystemSkillsPhase::TargetRootCreated {
+        identity: current_root,
+    };
+    let restored = open_child_directory(
+        &backup_skills,
+        ".system",
+        Some(MANAGED_DIRECTORY_MODE),
+        "restored recovery system Skills",
+    )?
+    .dir_metadata()?;
+    if !same_object_cap(&system.identity, &restored) {
+        return invalid("restored recovery system Skills identity changed");
+    }
+    workspace.target_directory_cap().remove_dir("skills")?;
+    require_absent(
+        workspace.target_directory_cap(),
+        "skills",
+        "restored system Skills root",
+    )?;
+    system.phase = SystemSkillsPhase::BackupOnly;
+    Ok(())
+}
+
+fn require_only_system_skills(skills: &Dir) -> Result<(), LifecycleError> {
+    let mut entries = BTreeSet::new();
+    for entry in skills.entries()? {
+        let entry = entry?;
+        entries.insert(
+            entry
+                .file_name()
+                .to_str()
+                .ok_or_else(|| {
+                    LifecycleError::Invalid(
+                        "preserved system Skills root contains a non-UTF-8 entry".to_owned(),
+                    )
+                })?
+                .to_owned(),
+        );
+    }
+    if entries != BTreeSet::from([".system".to_owned()]) {
+        return invalid("preserved system Skills root contains unmanaged entries");
+    }
+    Ok(())
+}
+
+fn verify_published_uninstall(
+    workspace: &LifecycleWorkspace,
+    roots: &[RemovalRootMove],
+    system_skills: Option<&PreservedSystemSkills>,
+    deactivation: Option<&source_activation::SourceDeactivation>,
+) -> Result<(), LifecycleError> {
+    workspace.validate()?;
+    workspace.verify_staged_rollback_point()?;
+    for moved in roots {
+        if !moved.backed_up {
+            return invalid("uninstall recovery roots are incomplete");
+        }
+        require_identity(
+            workspace.backup_directory()?,
+            moved.root,
+            &moved.identity,
+            "uninstall recovery root",
+        )?;
+    }
+    workspace.verify_recovery_backup()?;
+    require_absent(
+        workspace.target_directory_cap(),
+        "AGENTS.md",
+        "published uninstall",
+    )?;
+    require_absent(
+        workspace.target_directory_cap(),
+        ".agent-skills",
+        "published uninstall",
+    )?;
+    if let Some(system) = system_skills {
+        let target_skills_identity = match &system.phase {
+            SystemSkillsPhase::Published {
+                target_root_identity,
+            } => target_root_identity,
+            SystemSkillsPhase::BackupOnly | SystemSkillsPhase::TargetRootCreated { .. } => {
+                return invalid("preserved system Skills were not published");
+            }
+        };
+        let skills = open_child_directory(
+            workspace.target_directory_cap(),
+            "skills",
+            Some(MANAGED_DIRECTORY_MODE),
+            "preserved system Skills root",
+        )?;
+        if !same_object_cap(target_skills_identity, &skills.dir_metadata()?) {
+            return invalid("preserved system Skills root identity changed");
+        }
+        require_only_system_skills(&skills)?;
+        let current = open_child_directory(
+            &skills,
+            ".system",
+            Some(MANAGED_DIRECTORY_MODE),
+            "preserved system Skills",
+        )?
+        .dir_metadata()?;
+        if !same_object_cap(&system.identity, &current) {
+            return invalid("preserved system Skills identity changed");
+        }
+    } else {
+        require_absent(
+            workspace.target_directory_cap(),
+            "skills",
+            "published uninstall",
+        )?;
+    }
+    if let Some(prepared) = deactivation {
+        prepared.verify_uninstall_output(workspace.target_directory_cap())?;
+    }
+    workspace.validate()
+}
+
+fn inspect_preserved_profiles(target: &Dir) -> Result<Vec<String>, LifecycleError> {
+    let mut profiles = Vec::new();
+    for name in source_activation::PROFILE_NAMES {
+        match target.symlink_metadata(name) {
+            Ok(_) => profiles.push((*name).to_owned()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(profiles)
+}
+
+fn inspect_unmanaged_config_action(target: &Dir) -> Result<&'static str, LifecycleError> {
+    match target.symlink_metadata("config.toml") {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("missing"),
+        Err(error) => Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            invalid("config.toml must be a regular file")
+        }
+        Ok(_) => Ok("preserved"),
     }
 }
 
@@ -560,6 +1128,166 @@ impl Drop for PublishedInstall {
     }
 }
 
+impl PublishedUninstall {
+    /// Return the immutable publication report.
+    #[must_use]
+    pub fn report(&self) -> &Value {
+        &self.report
+    }
+
+    /// Revalidate the published uninstall and its complete recovery evidence.
+    ///
+    /// # Errors
+    /// Fails when any final namespace, external result, preserved system Skill,
+    /// managed backup, or rollback point differs from the frozen transaction.
+    pub fn verify(&self) -> Result<(), LifecycleError> {
+        verify_published_uninstall(
+            self.workspace()?,
+            &self.roots,
+            self.system_skills.as_ref(),
+            self.deactivation.as_ref(),
+        )
+    }
+
+    /// Commit the uninstall and discard the private managed/rollback backups.
+    ///
+    /// # Errors
+    /// A final verification failure triggers the same identity-bound rollback.
+    /// Incomplete recovery preserves the workspace and returns its path.
+    pub fn commit(mut self) -> Result<Value, LifecycleError> {
+        let workspace = self.take_workspace()?;
+        if let Err(error) = verify_published_uninstall(
+            &workspace,
+            &self.roots,
+            self.system_skills.as_ref(),
+            self.deactivation.as_ref(),
+        ) {
+            return Err(abort_uninstall(
+                workspace,
+                &mut self.roots,
+                &mut self.system_skills,
+                self.external_mutation_started,
+                error,
+            ));
+        }
+        let mut report = self.report.clone();
+        report["status"] = Value::String("uninstalled".to_owned());
+        workspace.cleanup()?;
+        Ok(report)
+    }
+
+    /// Restore the complete pre-uninstall managed and external state.
+    ///
+    /// # Errors
+    /// Fails closed when a namespace or object identity changed. Incomplete
+    /// recovery preserves the private workspace for manual recovery.
+    pub fn rollback(mut self) -> Result<(), LifecycleError> {
+        let workspace = self.take_workspace()?;
+        let errors = recover_uninstall(
+            &workspace,
+            &mut self.roots,
+            &mut self.system_skills,
+            self.external_mutation_started,
+        );
+        if errors.is_empty() {
+            workspace.cleanup()
+        } else {
+            Err(preserve_incomplete_recovery(
+                workspace,
+                "published uninstall rollback",
+                &errors,
+            ))
+        }
+    }
+
+    fn workspace(&self) -> Result<&LifecycleWorkspace, LifecycleError> {
+        self.workspace
+            .as_ref()
+            .ok_or_else(|| LifecycleError::Invalid("published uninstall is inactive".to_owned()))
+    }
+
+    fn take_workspace(&mut self) -> Result<LifecycleWorkspace, LifecycleError> {
+        self.workspace
+            .take()
+            .ok_or_else(|| LifecycleError::Invalid("published uninstall is inactive".to_owned()))
+    }
+}
+
+impl Drop for PublishedUninstall {
+    fn drop(&mut self) {
+        let Some(workspace) = self.workspace.take() else {
+            return;
+        };
+        let errors = recover_uninstall(
+            &workspace,
+            &mut self.roots,
+            &mut self.system_skills,
+            self.external_mutation_started,
+        );
+        if errors.is_empty() {
+            let _ = workspace.cleanup();
+        } else {
+            let _ = workspace.preserve_recovery_workspace();
+        }
+    }
+}
+
+fn abort_uninstall(
+    workspace: LifecycleWorkspace,
+    roots: &mut [RemovalRootMove],
+    system_skills: &mut Option<PreservedSystemSkills>,
+    external_mutation_started: bool,
+    primary: LifecycleError,
+) -> LifecycleError {
+    let errors = recover_uninstall(&workspace, roots, system_skills, external_mutation_started);
+    if errors.is_empty() {
+        return match workspace.cleanup() {
+            Ok(()) => primary,
+            Err(cleanup) => LifecycleError::Invalid(format!(
+                "managed uninstall failed ({primary}); workspace cleanup is incomplete: {cleanup}"
+            )),
+        };
+    }
+    preserve_incomplete_recovery(
+        workspace,
+        &format!("managed uninstall failed ({primary})"),
+        &errors,
+    )
+}
+
+fn recover_uninstall(
+    workspace: &LifecycleWorkspace,
+    roots: &mut [RemovalRootMove],
+    system_skills: &mut Option<PreservedSystemSkills>,
+    restore_external: bool,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Some(system) = system_skills.as_mut()
+        && let Err(error) = recover_system_skills(workspace, system)
+    {
+        errors.push(format!("restore skills/.system to managed backup: {error}"));
+        return errors;
+    }
+    if roots.iter().all(|root| root.backed_up)
+        && let Err(error) = workspace.verify_recovery_backup()
+    {
+        errors.push(format!("verify uninstall recovery backup: {error}"));
+        return errors;
+    }
+    errors.extend(restore_removal_roots(workspace, roots));
+    if !errors.is_empty() {
+        return errors;
+    }
+    if restore_external && let Err(error) = workspace.restore_uninstall_external_state() {
+        errors.push(format!("restore uninstall external state: {error}"));
+        return errors;
+    }
+    if let Err(error) = workspace.verify_restored_install() {
+        errors.push(format!("verify restored uninstall source: {error}"));
+    }
+    errors
+}
+
 fn abort_workspace(
     workspace: LifecycleWorkspace,
     roots: &mut [RootMove],
@@ -638,34 +1366,7 @@ fn recover_transaction_with_hook(
 }
 
 fn restore_staged_external_state(workspace: &LifecycleWorkspace) -> Result<(), LifecycleError> {
-    use std::ffi::OsStr;
-
-    workspace.verify_staged_rollback_point()?;
-    let managed = open_child_directory(
-        workspace.stage_directory()?,
-        ".agent-skills",
-        Some(MANAGED_DIRECTORY_MODE),
-        "restored staged managed metadata",
-    )?;
-    let rollback = open_child_directory(
-        &managed,
-        super::ROLLBACK_POINT_DIRECTORY,
-        Some(MANAGED_DIRECTORY_MODE),
-        "restored staged rollback point",
-    )?;
-    let quarantine = super::external_stage::create_directory(
-        workspace.stage_directory()?,
-        OsStr::new("external-recovery"),
-        Some(0o700),
-        "external recovery quarantine",
-    )?;
-    super::rollback::restore_external_state(
-        &rollback,
-        workspace.target_directory_cap(),
-        workspace.target(),
-        &quarantine,
-        &workspace.stage_path().join("external-recovery"),
-    )
+    workspace.restore_uninstall_external_state()
 }
 
 fn recover_roots_with_hook(
