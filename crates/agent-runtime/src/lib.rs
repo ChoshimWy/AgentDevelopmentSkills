@@ -9,6 +9,7 @@
 mod adapters;
 mod gate;
 mod git_workspace;
+mod invocations;
 mod session_manifests;
 mod session_registry;
 mod sessions;
@@ -18,6 +19,12 @@ pub use gate::{attach_adapter_result, evaluate_session_gate, validate_worktree_s
 pub use git_workspace::{
     create_session_worktree, inspect_repository, remove_created_session_worktree, repository_patch,
     resolve_commit, resolve_worktree, session_source_identity, worktree_status,
+};
+pub use invocations::{
+    claim_provider_invocation, collect_submitted_results, inspect_provider_invocation,
+    load_claim_token_file, prepare_provider_invocation, provider_invocation_state,
+    submit_provider_invocation, validate_provider_invocation,
+    validate_provider_invocation_selection,
 };
 pub use session_manifests::compile_session_manifest_selection;
 pub use session_registry::{

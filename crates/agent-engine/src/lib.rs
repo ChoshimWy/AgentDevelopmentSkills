@@ -1637,7 +1637,12 @@ fn validate_plan_graph_limits(nodes: &[Value], edges: &[Value]) -> Result<(), En
     Ok(())
 }
 
-fn validate_compiled_plan(value: &Value) -> Result<(), EngineError> {
+/// Validate one compiled Workflow Plan identity and dependency graph.
+///
+/// # Errors
+/// Returns an error for malformed graph data, limit violations, cycles, or a
+/// plan identity that does not match its canonical content.
+pub fn validate_compiled_plan(value: &Value) -> Result<(), EngineError> {
     let plan = object(value, "workflow-plan")?;
     let nodes = plan
         .get("nodes")

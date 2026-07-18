@@ -16,7 +16,17 @@ from .activation import (
     external_paths as activation_external_paths,
     deactivation_external_paths,
 )
-from .adapters import build_adapter_request, validate_adapter_result
+from .adapters import (
+    build_adapter_request,
+    claim_provider_invocation,
+    collect_submitted_results,
+    inspect_provider_invocation,
+    load_claim_token_file,
+    prepare_provider_invocation,
+    submit_provider_invocation,
+    validate_adapter_result,
+    validate_provider_invocation_plan,
+)
 from .canonical_json import dump, dumps, load
 from .contracts import validate
 from .discovery import DiscoveryEngine
@@ -200,6 +210,29 @@ def build_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     validate_adapter.add_argument("request")
     validate_adapter.add_argument("result")
 
+    invocation = subparsers.add_parser("invocation")
+    invocation_commands = invocation.add_subparsers(dest="invocation_command", required=True)
+    invocation_prepare = invocation_commands.add_parser("prepare")
+    invocation_prepare.add_argument("root")
+    invocation_prepare.add_argument("plan")
+    invocation_prepare.add_argument("node_id")
+    invocation_prepare.add_argument("--context", required=True)
+    invocation_prepare.add_argument("--invocation-id", required=True)
+    invocation_prepare.add_argument("--lock")
+    invocation_claim = invocation_commands.add_parser("claim")
+    invocation_claim.add_argument("root")
+    invocation_claim.add_argument("request_id")
+    invocation_claim.add_argument("--actor-id", required=True)
+    invocation_claim.add_argument("--claim-token-file", required=True)
+    invocation_submit = invocation_commands.add_parser("submit")
+    invocation_submit.add_argument("root")
+    invocation_submit.add_argument("request_id")
+    invocation_submit.add_argument("result")
+    invocation_submit.add_argument("--claim-token-file", required=True)
+    invocation_inspect = invocation_commands.add_parser("inspect")
+    invocation_inspect.add_argument("root")
+    invocation_inspect.add_argument("request_id")
+
     install = subparsers.add_parser("install")
     install.add_argument("--core-only", action="store_true")
     install.add_argument("--platform", action="append", default=[])
@@ -248,7 +281,9 @@ def build_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     run_mode = run.add_mutually_exclusive_group(required=True)
     run_mode.add_argument("--fake-adapters", action="store_true")
     run_mode.add_argument("--adapter-results")
+    run_mode.add_argument("--invocation-root")
     run.add_argument("--adapter-context")
+    run.add_argument("--invocation-selection")
     run.add_argument("--lock")
 
     resume = subparsers.add_parser("resume")
@@ -257,7 +292,9 @@ def build_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     resume_mode = resume.add_mutually_exclusive_group(required=True)
     resume_mode.add_argument("--fake-adapters", action="store_true")
     resume_mode.add_argument("--adapter-results")
+    resume_mode.add_argument("--invocation-root")
     resume.add_argument("--adapter-context")
+    resume.add_argument("--invocation-selection")
     resume.add_argument("--lock")
     return parser
 
@@ -439,7 +476,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prepare-adapter":
             plan = load(args.plan)
             validate("workflow-plan", plan)
-            _require_active_package_lock(plan, args.lock)
+            active_package_lock = _require_active_package_lock(plan, args.lock)
+            validate_provider_invocation_plan(plan, active_package_lock)
             request = build_adapter_request(
                 plan, args.node_id, context=load(args.context), invocation_id=args.invocation_id
             )
@@ -450,14 +488,69 @@ def main(argv: list[str] | None = None) -> int:
             validate_adapter_result(request, load(args.result))
             print(dumps({"request_id": request["request_id"], "status": "passed"}), end="")
             return 0
+        if args.command == "invocation":
+            if args.invocation_command == "prepare":
+                plan = load(args.plan)
+                validate("workflow-plan", plan)
+                active_package_lock = _require_active_package_lock(plan, args.lock)
+                value = prepare_provider_invocation(
+                    args.root,
+                    plan,
+                    args.node_id,
+                    context=load(args.context),
+                    invocation_id=args.invocation_id,
+                    package_lock=active_package_lock,
+                )
+            elif args.invocation_command == "claim":
+                value = claim_provider_invocation(
+                    args.root,
+                    args.request_id,
+                    actor_id=args.actor_id,
+                    claim_token=load_claim_token_file(args.claim_token_file),
+                )
+            elif args.invocation_command == "submit":
+                value = submit_provider_invocation(
+                    args.root,
+                    args.request_id,
+                    load(args.result),
+                    claim_token=load_claim_token_file(args.claim_token_file),
+                )
+            else:
+                value = inspect_provider_invocation(
+                    args.root,
+                    args.request_id,
+                )
+            print(dumps(value), end="")
+            return 0
         if args.command in {"run", "resume"}:
             plan = load(args.plan)
             validate("workflow-plan", plan)
             active_package_lock = _require_active_package_lock(plan, args.lock)
-            if args.adapter_results:
+            if args.invocation_root:
+                validate_provider_invocation_plan(plan, active_package_lock)
+            if args.invocation_selection and not args.invocation_root:
+                raise ContractError(
+                    "--invocation-selection requires --invocation-root"
+                )
+            if args.adapter_results or args.invocation_root:
                 if not args.adapter_context:
-                    raise ContractError("--adapter-context is required with --adapter-results")
-                executor = RecordedAdapterExecutor(load(args.adapter_results), context=load(args.adapter_context))
+                    raise ContractError(
+                        "--adapter-context is required with --adapter-results or --invocation-root"
+                    )
+                if args.invocation_root and not args.invocation_selection:
+                    raise ContractError(
+                        "--invocation-selection is required with --invocation-root"
+                    )
+                results = (
+                    load(args.adapter_results)
+                    if args.adapter_results
+                    else collect_submitted_results(
+                        args.invocation_root,
+                        plan["fingerprint"],
+                        load(args.invocation_selection),
+                    )
+                )
+                executor = RecordedAdapterExecutor(results, context=load(args.adapter_context))
             else:
                 executor = FakeAdapterExecutor()
             ledger = executor.run(

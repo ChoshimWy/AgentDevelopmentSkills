@@ -85,7 +85,10 @@ contains:
   validation, exact Worktree creation/compensation, checkpoint transitions, a
   locked persistent Session Registry, Manifest-driven platform/Provider
   closure compilation and Session creation, and Final Gate evidence
-  revalidation and passed-state persistence;
+  revalidation and passed-state persistence, plus a filesystem-backed Provider
+  Invocation v1 handoff with frozen execution permissions, single
+  hashed-token claims, hard deadlines, atomic result publication, and
+  explicit request-ID selection for Recorded Runtime consumption;
 - schema-aligned capability-contract type validation shared by the Python
   baseline and native normalization path;
 - Python-to-Rust byte-level differential tests covering malicious provider
@@ -116,8 +119,32 @@ working/committed source identity, exact Worktree creation/compensation,
 context refresh/checkpoint semantics, locked Registry lifecycle operations,
 Manifest-driven native Session creation with bootstrap-only and trusted-root
 gates, and Final Gate Adapter/Ledger/artifact revalidation with passed-state
-persistence. External Provider invocation and production CLI parity remain
-later phase gates.
+persistence. Host-specific live Provider execution and production CLI parity
+remain later phase gates.
+
+The native and Python lanes now also expose the same Provider Invocation v1
+transport. `prepare` freezes the Adapter Request together with the node's
+permission profile, side effects, resource keys, approval, idempotency/retry
+metadata, Provider Manifest digest, and timeout. `claim` is single-use and
+stores only the SHA-256 identity of a bearer token loaded from a no-follow
+private file; active claims with overlapping resource keys are mutually
+exclusive within one handoff root. `submit` fails at the exact deadline and
+validates the full Adapter Result identity and evidence contract before an
+atomic terminal write. Approval-bound nodes remain fail-closed until a
+runtime-granted attempt proof can be frozen, rather than letting the handoff
+CLI bypass Approval Gate. The Recorded Runtime consumes only request IDs
+explicitly authorized by a Provider Invocation Selection v1 artifact. This
+keeps repeated submissions and concurrent retries deterministic without
+silently selecting the latest result.
+
+This transport is deliberately not a subprocess runner. A trusted external
+orchestrator remains responsible for invoking a logical `skill`, `agent`,
+`script`, or `tool` binding. Core neither treats Manifest names as commands nor
+discovers or reads Provider credentials, accesses the network, or executes
+package code. It reads only a caller-supplied, owner-private, high-entropy
+transport claim token. After a crash around atomic publication, the host must
+inspect the request before retrying claim or submit. Production CLI cutover
+and host-specific live Provider execution remain later phase gates.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

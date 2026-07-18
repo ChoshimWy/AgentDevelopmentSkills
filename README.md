@@ -119,6 +119,19 @@ cargo run --locked -p agent-skills-rs -- \
   runtime-execute-recorded /path/to/workflow-plan.json \
   /path/to/adapter-results.json /path/to/task-context.json
 cargo run --locked -p agent-skills-rs -- \
+  invocation-prepare /path/to/handoff /path/to/workflow-plan.json node-id \
+  /path/to/task-context.json invocation-id
+cargo run --locked -p agent-skills-rs -- \
+  invocation-claim /path/to/handoff adapter-request-id host-actor \
+  /path/to/private-claim-token
+cargo run --locked -p agent-skills-rs -- \
+  invocation-submit /path/to/handoff adapter-request-id \
+  /path/to/adapter-result.json /path/to/private-claim-token
+cargo run --locked -p agent-skills-rs -- \
+  runtime-execute-invocations /path/to/workflow-plan.json \
+  /path/to/handoff /path/to/task-context.json \
+  --selection /path/to/provider-invocation-selection.json
+cargo run --locked -p agent-skills-rs -- \
   repository-inspect /path/to/repository app --base-ref HEAD
 cargo run --locked -p agent-skills-rs -- \
   session-context-create /path/to/session-context-input.json
@@ -138,6 +151,10 @@ cargo run --locked -p agent-skills-rs -- \
   /path/to/adapter-pairs.json /path/to/run-ledger.json /path/to/artifacts
 ```
 
+For a plan containing `package_lock_hash`, append
+`--lock /path/to/agent-skills.lock` to `invocation-prepare` and supply the same
+validated Lockfile when consuming it.
+
 The migration sequence and cutover gates are documented in
 [`docs/rust-migration.md`](docs/rust-migration.md). The Python CLI remains the
 production entry point until every relevant differential test and release gate
@@ -154,9 +171,18 @@ Worktree inspection, `repository-patch-v1`, `session-source-v1`, Session
 Context validation, exact Worktree creation/compensation, checkpoint
 transitions, the locked persistent Session Registry, trusted Manifest-driven
 platform/Provider closure compilation and Session creation, and Final Gate
-evidence revalidation/persistence. It does not invoke external providers,
-execute package code, create commits, change staging, switch the production
-CLI, or make installation changes.
+evidence revalidation/persistence. A filesystem-backed Provider Invocation v1
+handoff now freezes permissions, side effects, resources, provenance, and a
+hard timeout; it supports one hashed-token claim and accepts only an
+identity-matched Adapter Result. Runtime consumption requires an explicit
+Provider Invocation Selection v1 mapping from each node to its submitted
+request ID; retry results are never selected by timestamp. The external host
+still owns actual Provider execution: Core does not discover or read Provider
+credentials, execute a binding or package code, or make network calls. It
+reads only a caller-supplied, owner-private, high-entropy transport claim
+token. After a failure around result publication, inspect the request before
+retrying claim or submit. Core also does not create commits, change staging,
+switch the production CLI, or make installation changes.
 
 ## Release governance
 

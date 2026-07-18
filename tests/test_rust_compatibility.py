@@ -18,6 +18,22 @@ from agent_workflow.adapters import (
     build_adapter_request,
     validate_adapter_request,
     validate_adapter_result,
+    validate_provider_invocation_plan,
+)
+from agent_workflow.adapters.invocations import (
+    _claim_provider_invocation_at as claim_provider_invocation,
+)
+from agent_workflow.adapters.invocations import (
+    _collect_submitted_results_at as collect_submitted_results,
+)
+from agent_workflow.adapters.invocations import (
+    _inspect_provider_invocation_at as inspect_provider_invocation,
+)
+from agent_workflow.adapters.invocations import (
+    _prepare_provider_invocation_at as prepare_provider_invocation,
+)
+from agent_workflow.adapters.invocations import (
+    _submit_provider_invocation_at as submit_provider_invocation,
 )
 from agent_workflow.canonical_json import dump, dumps, sha256
 from agent_workflow.canonical_json import (
@@ -1786,6 +1802,29 @@ class RustCompatibilityTests(unittest.TestCase):
 
         fixture = StructuredAdapterContractTests()
         fixture.setUp()
+        fixture.plan["edges"] = []
+        fixture.plan["status"] = "ready"
+        fixture.plan["nodes"][0].update(
+            {
+                "mandatory": True,
+                "max_retries": 0,
+                "status": "ready",
+                "timeout_seconds": 300,
+            }
+        )
+        adapter_plan_content = {
+            key: value
+            for key, value in fixture.plan.items()
+            if key not in {"fingerprint", "plan_id"}
+        }
+        fixture.plan["fingerprint"] = sha256(adapter_plan_content)
+        fixture.plan["plan_id"] = f"plan-{fixture.plan['fingerprint'][:12]}"
+        fixture.request = build_adapter_request(
+            fixture.plan,
+            "apple-verify",
+            context=fixture.context,
+            invocation_id="verify-invocation-1",
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             plan_path = root / "plan.json"
@@ -2343,6 +2382,314 @@ class RustCompatibilityTests(unittest.TestCase):
             self.assertEqual(
                 _normalize_runtime_ledger(json.loads(actual_recovered.stdout)),
                 _normalize_runtime_ledger(expected_recovered),
+            )
+
+    def test_provider_invocation_transport_and_runtime_match_python(self) -> None:
+        from tests.test_adapters import AppleProviderAnchorSliceTests
+
+        fixture = AppleProviderAnchorSliceTests()
+        fixture.setUp()
+        node_id = "apple-2"
+        token = "provider-claim-token-compat-0001"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python_root = root / "python"
+            rust_root = root / "rust"
+            plan_path = root / "plan.json"
+            context_path = root / "context.json"
+            result_path = root / "result.json"
+            selection_path = root / "selection.json"
+            token_path = root / "claim-token"
+            dump(fixture.plan, plan_path)
+            dump(fixture.context, context_path)
+            token_path.write_text(token + "\n", encoding="utf-8")
+            token_path.chmod(0o600)
+
+            tampered_plan = deepcopy(fixture.plan)
+            tampered_node = next(
+                node for node in tampered_plan["nodes"] if node["id"] == node_id
+            )
+            tampered_node["permission_profile"] = "project-write"
+            with self.assertRaisesRegex(ContractError, "fingerprint mismatch"):
+                validate_provider_invocation_plan(tampered_plan, None)
+            tampered_plan_path = root / "tampered-plan.json"
+            dump(tampered_plan, tampered_plan_path)
+            rejected_tamper = self.run_rust(
+                "invocation-prepare",
+                str(rust_root),
+                str(tampered_plan_path),
+                node_id,
+                str(context_path),
+                "provider-tampered-unlocked-plan",
+            )
+            self.assertEqual(rejected_tamper.returncode, 2)
+            self.assertIn("fingerprint mismatch", rejected_tamper.stderr)
+
+            locked_plan = deepcopy(fixture.plan)
+            locked_plan["package_lock_hash"] = "0" * 64
+            locked_content = {
+                key: value
+                for key, value in locked_plan.items()
+                if key not in {"fingerprint", "plan_id"}
+            }
+            locked_plan["fingerprint"] = sha256(locked_content)
+            locked_plan["plan_id"] = f"plan-{locked_plan['fingerprint'][:12]}"
+            locked_plan_path = root / "locked-plan.json"
+            dump(locked_plan, locked_plan_path)
+            missing_lock = self.run_rust(
+                "invocation-prepare",
+                str(rust_root),
+                str(locked_plan_path),
+                node_id,
+                str(context_path),
+                "provider-locked-without-lock",
+            )
+            self.assertEqual(missing_lock.returncode, 2)
+            self.assertIn("requires the current package Lockfile", missing_lock.stderr)
+
+            prepared = self.run_rust(
+                "invocation-prepare",
+                str(rust_root),
+                str(plan_path),
+                node_id,
+                str(context_path),
+                "provider-compat-1",
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            actual_prepared = json.loads(prepared.stdout)
+            expected_prepared = prepare_provider_invocation(
+                python_root,
+                fixture.plan,
+                node_id,
+                context=fixture.context,
+                invocation_id="provider-compat-1",
+                prepared_at=actual_prepared["prepared_at"],
+            )
+            self.assertEqual(actual_prepared, expected_prepared)
+            request_id = expected_prepared["request"]["request_id"]
+
+            claimed = self.run_rust(
+                "invocation-claim",
+                str(rust_root),
+                request_id,
+                "provider-host-1",
+                str(token_path),
+            )
+            self.assertEqual(claimed.returncode, 0, claimed.stderr)
+            actual_claimed = json.loads(claimed.stdout)
+            expected_claimed = claim_provider_invocation(
+                python_root,
+                request_id,
+                actor_id="provider-host-1",
+                claim_token=token,
+                claimed_at=actual_claimed["claim"]["claimed_at"],
+            )
+            self.assertEqual(actual_claimed, expected_claimed)
+            self.assertNotIn(token, claimed.stdout)
+
+            result = fixture._result(
+                node_id,
+                "validation",
+                {"level": "affected-tests", "tests": 1},
+                invocation_id="provider-compat-1",
+            )
+            dump(result, result_path)
+            submitted = self.run_rust(
+                "invocation-submit",
+                str(rust_root),
+                request_id,
+                str(result_path),
+                str(token_path),
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            actual_submitted = json.loads(submitted.stdout)
+            expected_submitted = submit_provider_invocation(
+                python_root,
+                request_id,
+                result,
+                claim_token=token,
+                submitted_at=actual_submitted["submitted_at"],
+            )
+            self.assertEqual(actual_submitted, expected_submitted)
+            selection = {
+                "schema_version": "1.0",
+                "plan_fingerprint": fixture.plan["fingerprint"],
+                "requests": {node_id: request_id},
+            }
+            dump(selection, selection_path)
+
+            expected_inspection = inspect_provider_invocation(
+                python_root,
+                request_id,
+                at=actual_submitted["submitted_at"],
+            )
+            inspected = self.run_rust(
+                "invocation-inspect",
+                str(rust_root),
+                request_id,
+            )
+            self.assertEqual(inspected.returncode, 0, inspected.stderr)
+            self.assertEqual(json.loads(inspected.stdout), expected_inspection)
+
+            results = collect_submitted_results(
+                python_root,
+                fixture.plan["fingerprint"],
+                selection,
+                at=actual_submitted["submitted_at"],
+            )
+            expected_ledger = RecordedAdapterExecutor(
+                results,
+                context=fixture.context,
+            ).run(fixture.plan)
+            rejected_runtime_tamper = self.run_rust(
+                "runtime-execute-invocations",
+                str(tampered_plan_path),
+                str(rust_root),
+                str(context_path),
+                "--selection",
+                str(selection_path),
+            )
+            self.assertEqual(rejected_runtime_tamper.returncode, 2)
+            self.assertIn(
+                "fingerprint mismatch",
+                rejected_runtime_tamper.stderr,
+            )
+            native = self.run_rust(
+                "runtime-execute-invocations",
+                str(plan_path),
+                str(rust_root),
+                str(context_path),
+                "--selection",
+                str(selection_path),
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(native.returncode, 0, native.stderr)
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(native.stdout)),
+                _normalize_runtime_ledger(expected_ledger),
+            )
+
+            duplicate = self.run_rust(
+                "invocation-claim",
+                str(rust_root),
+                request_id,
+                "provider-host-2",
+                str(token_path),
+            )
+            self.assertEqual(duplicate.returncode, 2)
+            self.assertIn("already submitted", duplicate.stderr)
+
+            concurrent_prepared = self.run_rust(
+                "invocation-prepare",
+                str(rust_root),
+                str(plan_path),
+                node_id,
+                str(context_path),
+                "provider-compat-concurrent",
+            )
+            self.assertEqual(
+                concurrent_prepared.returncode,
+                0,
+                concurrent_prepared.stderr,
+            )
+            concurrent_request_id = json.loads(concurrent_prepared.stdout)["request"][
+                "request_id"
+            ]
+            processes = [
+                subprocess.Popen(
+                    [
+                        str(self.rust_cli),
+                        "invocation-claim",
+                        str(rust_root),
+                        concurrent_request_id,
+                        f"provider-host-{index}",
+                        str(token_path),
+                    ],
+                    cwd=ROOT,
+                    env={**os.environ, "CARGO_TERM_COLOR": "never"},
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                for index in (1, 2)
+            ]
+            outcomes = [process.communicate(timeout=10) for process in processes]
+            self.assertEqual(sorted(process.returncode for process in processes), [0, 2])
+            self.assertTrue(
+                any("cannot be claimed" in stderr for _, stderr in outcomes)
+            )
+
+            resource_request_ids = []
+            for index in (1, 2):
+                prepared_resource = self.run_rust(
+                    "invocation-prepare",
+                    str(rust_root),
+                    str(plan_path),
+                    "apple-1",
+                    str(context_path),
+                    f"provider-resource-{index}",
+                )
+                self.assertEqual(
+                    prepared_resource.returncode,
+                    0,
+                    prepared_resource.stderr,
+                )
+                resource_request_ids.append(
+                    json.loads(prepared_resource.stdout)["request"]["request_id"]
+                )
+            claimed_resource = self.run_rust(
+                "invocation-claim",
+                str(rust_root),
+                resource_request_ids[0],
+                "provider-resource-host-1",
+                str(token_path),
+            )
+            self.assertEqual(
+                claimed_resource.returncode,
+                0,
+                claimed_resource.stderr,
+            )
+            rejected_resource = self.run_rust(
+                "invocation-claim",
+                str(rust_root),
+                resource_request_ids[1],
+                "provider-resource-host-2",
+                str(token_path),
+            )
+            self.assertEqual(rejected_resource.returncode, 2)
+            self.assertIn("resource is already claimed", rejected_resource.stderr)
+
+            approval_plan = deepcopy(fixture.plan)
+            approval_node = next(
+                node for node in approval_plan["nodes"] if node["id"] == node_id
+            )
+            approval_node["approval"] = {
+                "action": "execute-provider",
+                "reason": "requires user approval",
+                "scope": {"node_id": node_id},
+            }
+            approval_content = {
+                key: value
+                for key, value in approval_plan.items()
+                if key not in {"fingerprint", "plan_id"}
+            }
+            approval_plan["fingerprint"] = sha256(approval_content)
+            approval_plan["plan_id"] = f"plan-{approval_plan['fingerprint'][:12]}"
+            approval_plan_path = root / "approval-plan.json"
+            dump(approval_plan, approval_plan_path)
+            rejected_approval = self.run_rust(
+                "invocation-prepare",
+                str(rust_root),
+                str(approval_plan_path),
+                node_id,
+                str(context_path),
+                "provider-approval-bound",
+            )
+            self.assertEqual(rejected_approval.returncode, 2)
+            self.assertIn(
+                "runtime-granted attempt proof",
+                rejected_approval.stderr,
             )
 
     def test_session_worktree_create_and_exact_compensation_match_python(

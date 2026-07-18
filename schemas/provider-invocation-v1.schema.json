@@ -1,0 +1,81 @@
+{
+  "$id": "https://agent-workflow.local/schemas/provider-invocation-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "claim": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "additionalProperties": false,
+          "properties": {
+            "actor_id": {"maxLength": 128, "minLength": 1, "type": "string"},
+            "claim_token_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+            "claimed_at": {"maximum": 18446744073709551615, "minimum": 0, "type": "integer"},
+            "deadline": {"maximum": 18446744073709551615, "minimum": 0, "type": "integer"}
+          },
+          "required": ["actor_id", "claim_token_sha256", "claimed_at", "deadline"],
+          "type": "object"
+        }
+      ]
+    },
+    "execution_contract": {
+      "additionalProperties": false,
+      "properties": {
+        "approval": {"const": null},
+        "idempotent": {"type": "boolean"},
+        "max_retries": {"maximum": 18446744073709551615, "minimum": 0, "type": "integer"},
+        "permission_profile": {"minLength": 1, "type": "string"},
+        "provider_manifest_digest": {"minLength": 1, "type": "string"},
+        "resource_keys": {
+          "items": {"minLength": 1, "type": "string"},
+          "type": "array",
+          "uniqueItems": true
+        },
+        "side_effects": {
+          "items": {"minLength": 1, "type": "string"},
+          "type": "array",
+          "uniqueItems": true
+        },
+        "timeout_seconds": {"exclusiveMinimum": 0, "maximum": 18446744073709551615, "type": "integer"}
+      },
+      "required": [
+        "approval",
+        "idempotent",
+        "max_retries",
+        "permission_profile",
+        "provider_manifest_digest",
+        "resource_keys",
+        "side_effects",
+        "timeout_seconds"
+      ],
+      "type": "object"
+    },
+    "prepared_at": {"maximum": 18446744073709551615, "minimum": 0, "type": "integer"},
+    "request": {"$ref": "adapter-request-v1.schema.json"},
+    "result": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "adapter-result-v1.schema.json"}
+      ]
+    },
+    "schema_version": {"const": "1.0"},
+    "submitted_at": {"maximum": 18446744073709551615, "minimum": 0, "type": ["integer", "null"]},
+    "transport_id": {
+      "pattern": "^provider-invocation-[0-9a-f]{16}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "transport_id",
+    "prepared_at",
+    "request",
+    "execution_contract",
+    "claim",
+    "result",
+    "submitted_at"
+  ],
+  "title": "Provider Invocation v1",
+  "type": "object"
+}

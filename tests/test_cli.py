@@ -112,6 +112,143 @@ class CLITests(unittest.TestCase):
             self.assertEqual(validated.returncode, 0, validated.stderr)
             self.assertEqual(json.loads(validated.stdout)["status"], "passed")
 
+    def test_provider_invocation_handoff_cli_uses_private_token_file(self) -> None:
+        planned = self.run_cli(
+            "plan",
+            str(FIXTURES / "apple-app"),
+            "--task",
+            "实现 iOS 功能",
+            "--dry-run",
+        )
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            handoff = root / "handoff"
+            plan_path = root / "plan.json"
+            context_path = root / "context.json"
+            result_path = root / "result.json"
+            selection_path = root / "selection.json"
+            token_path = root / "claim-token"
+            plan_path.write_text(planned.stdout, encoding="utf-8")
+            context_path.write_text(
+                json.dumps({
+                    "actors": {
+                        "implementation_actor": "builder-1",
+                        "reviewer_actor": "reviewer-1",
+                    },
+                    "checkpoints": {
+                        "CP0": "completed",
+                        "CP1": "in_progress",
+                        "CP2": "pending",
+                        "CP3": "pending",
+                    },
+                }),
+                encoding="utf-8",
+            )
+            token_path.write_text(
+                "provider-cli-private-token-0001-secure\n",
+                encoding="utf-8",
+            )
+            token_path.chmod(0o600)
+            prepared = self.run_cli(
+                "invocation",
+                "prepare",
+                str(handoff),
+                str(plan_path),
+                "apple-2",
+                "--context",
+                str(context_path),
+                "--invocation-id",
+                "provider-cli-1",
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            record = json.loads(prepared.stdout)
+            request = record["request"]
+            claimed = self.run_cli(
+                "invocation",
+                "claim",
+                str(handoff),
+                request["request_id"],
+                "--actor-id",
+                "provider-host-1",
+                "--claim-token-file",
+                str(token_path),
+            )
+            self.assertEqual(claimed.returncode, 0, claimed.stderr)
+            self.assertNotIn("provider-cli-private-token-0001-secure", claimed.stdout)
+            result_path.write_text(
+                json.dumps({
+                    "schema_version": "1.0",
+                    "request_id": request["request_id"],
+                    "invocation_id": request["invocation_id"],
+                    "plan_fingerprint": request["plan_fingerprint"],
+                    "node_id": request["node_id"],
+                    "capability": request["capability"],
+                    "provider": request["provider"],
+                    "binding": request["binding"],
+                    "status": "completed",
+                    "failure_attribution": {"category": "none", "summary": "未发现失败"},
+                    "cleanup": [],
+                    "evidence": [{
+                        "kind": "validation",
+                        "status": "passed",
+                        "summary": "定向测试通过",
+                        "data": {"tests": 1},
+                        "artifact_ids": [],
+                    }],
+                    "artifacts": [],
+                }),
+                encoding="utf-8",
+            )
+            submitted = self.run_cli(
+                "invocation",
+                "submit",
+                str(handoff),
+                request["request_id"],
+                str(result_path),
+                "--claim-token-file",
+                str(token_path),
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            selection_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "plan_fingerprint": request["plan_fingerprint"],
+                        "requests": {request["node_id"]: request["request_id"]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rejected_selection_without_root = self.run_cli(
+                "run",
+                str(plan_path),
+                "--ledger",
+                str(root / "ignored-ledger.jsonl"),
+                "--fake-adapters",
+                "--invocation-selection",
+                str(selection_path),
+            )
+            self.assertEqual(rejected_selection_without_root.returncode, 2)
+            self.assertIn(
+                "--invocation-selection requires --invocation-root",
+                rejected_selection_without_root.stderr,
+            )
+            run = self.run_cli(
+                "run",
+                str(plan_path),
+                "--ledger",
+                str(root / "ledger.jsonl"),
+                "--invocation-root",
+                str(handoff),
+                "--adapter-context",
+                str(context_path),
+                "--invocation-selection",
+                str(selection_path),
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIn(json.loads(run.stdout)["status"], {"blocked", "partial"})
+
     def test_platform_selective_install_cli(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "codex"

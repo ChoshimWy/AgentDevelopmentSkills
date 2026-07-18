@@ -114,6 +114,31 @@ def dump(value: Any, path: str | Path) -> None:
     Path(path).write_text(dumps(value), encoding="utf-8")
 
 
+def loads(encoded: bytes | str) -> Any:
+    """Parse one size-bounded UTF-8 JSON value with the shared input limits."""
+
+    if isinstance(encoded, str):
+        byte_count = len(encoded.encode("utf-8"))
+        text = encoded
+    elif isinstance(encoded, bytes):
+        byte_count = len(encoded)
+        if byte_count > MAX_CONTRACT_JSON_BYTES:
+            raise ValueError(
+                f"contract input has more than {MAX_CONTRACT_JSON_BYTES} bytes"
+            )
+        text = encoded.decode("utf-8")
+    else:
+        raise TypeError("canonical JSON input must be bytes or string")
+    if byte_count > MAX_CONTRACT_JSON_BYTES:
+        raise ValueError(
+            f"contract input has more than {MAX_CONTRACT_JSON_BYTES} bytes"
+        )
+    _validate_text_limits(text)
+    value = json.loads(text)
+    _validate_value_limits(value)
+    return value
+
+
 def load(path: str | Path) -> Any:
     source = Path(path)
     if source.stat().st_size > MAX_CONTRACT_JSON_BYTES:
@@ -126,11 +151,7 @@ def load(path: str | Path) -> Any:
         raise ValueError(
             f"contract input has more than {MAX_CONTRACT_JSON_BYTES} bytes"
         )
-    text = encoded.decode("utf-8")
-    _validate_text_limits(text)
-    value = json.loads(text)
-    _validate_value_limits(value)
-    return value
+    return loads(encoded)
 
 
 def sha256(value: Any) -> str:

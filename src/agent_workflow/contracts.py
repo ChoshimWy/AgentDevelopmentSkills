@@ -1964,6 +1964,22 @@ def _validate_install_entry(entry: dict[str, Any], label: str) -> None:
         raise ContractError(f"{label} mode is invalid")
 
 
+def validate_provider_invocation_contract(value: dict[str, Any]) -> None:
+    """Resolve the Adapter-owned validator lazily to avoid an import cycle."""
+
+    from .adapters.invocations import validate_provider_invocation
+
+    validate_provider_invocation(value)
+
+
+def validate_provider_invocation_selection_contract(value: dict[str, Any]) -> None:
+    """Resolve the selection validator lazily to avoid an import cycle."""
+
+    from .adapters.invocations import validate_provider_invocation_selection
+
+    validate_provider_invocation_selection(value)
+
+
 VALIDATORS: dict[str, Callable[[dict[str, Any]], None]] = {
     "activation-lock": validate_activation_lock,
     "agent-skills-lock": validate_agent_skills_lock,
@@ -1982,6 +1998,8 @@ VALIDATORS: dict[str, Callable[[dict[str, Any]], None]] = {
     "node-attempt": validate_node_attempt,
     "plugin-manifest": validate_manifest,
     "project-profile": validate_project_profile,
+    "provider-invocation": validate_provider_invocation_contract,
+    "provider-invocation-selection": validate_provider_invocation_selection_contract,
     "qa-plan": validate_qa_plan,
     "qa-report": validate_qa_report,
     "regression-set": validate_regression_set,

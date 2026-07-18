@@ -3,18 +3,21 @@
 use agent_contracts::{canonical_json, canonical_sha256, load_json, require_schema_version};
 use agent_engine::{
     DiscoveryEngine, compile_plan_with_package_lock, diff_package_locks, explain_package_lock,
-    resolve_package_lock, resolve_policy, validate_package_lock,
+    resolve_package_lock, resolve_policy, validate_compiled_plan, validate_package_lock,
+    validate_plan_package_lock,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
-    attach_adapter_result, build_adapter_request, compile_session_manifest_selection,
-    create_session_worktree, evaluate_session_gate, execute_fake_plan, execute_recorded_plan,
-    freeze_checkpoint, inspect_repository, new_session_context, refresh_session_source_identity,
-    registry_assert_available, registry_attach_and_gate, registry_checkpoint, registry_create,
-    registry_create_active, registry_list, registry_load, registry_transition, registry_write,
+    attach_adapter_result, build_adapter_request, claim_provider_invocation,
+    collect_submitted_results, compile_session_manifest_selection, create_session_worktree,
+    evaluate_session_gate, execute_fake_plan, execute_recorded_plan, freeze_checkpoint,
+    inspect_provider_invocation, inspect_repository, load_claim_token_file, new_session_context,
+    prepare_provider_invocation, refresh_session_source_identity, registry_assert_available,
+    registry_attach_and_gate, registry_checkpoint, registry_create, registry_create_active,
+    registry_list, registry_load, registry_transition, registry_write,
     remove_created_session_worktree, repository_patch, session_source_identity,
-    transition_session_context, validate_adapter_request, validate_adapter_result,
-    validate_worktree_session_context, worktree_status,
+    submit_provider_invocation, transition_session_context, validate_adapter_request,
+    validate_adapter_result, validate_worktree_session_context, worktree_status,
 };
 use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
@@ -157,16 +160,60 @@ enum Command {
         node_id: String,
         context: PathBuf,
         invocation_id: String,
+        #[arg(long)]
+        lock: Option<PathBuf>,
     },
     /// Validate one frozen Adapter Request v1.
     AdapterRequestValidate { request: PathBuf },
     /// Validate one Adapter Result v1 against its frozen request.
     AdapterResultValidate { request: PathBuf, result: PathBuf },
+    /// Publish one frozen Provider Invocation v1 without executing its binding.
+    InvocationPrepare {
+        root: PathBuf,
+        plan: PathBuf,
+        node_id: String,
+        context: PathBuf,
+        invocation_id: String,
+        #[arg(long)]
+        lock: Option<PathBuf>,
+    },
+    /// Grant the only time-bounded claim for one Provider invocation.
+    InvocationClaim {
+        root: PathBuf,
+        request_id: String,
+        actor_id: String,
+        claim_token_file: PathBuf,
+    },
+    /// Validate and publish one Adapter Result for a live claim.
+    InvocationSubmit {
+        root: PathBuf,
+        request_id: String,
+        result: PathBuf,
+        claim_token_file: PathBuf,
+    },
+    /// Inspect one Provider invocation and derive its current state.
+    InvocationInspect { root: PathBuf, request_id: String },
     /// Consume recorded Adapter Result v1 objects without invoking Providers.
     RuntimeExecuteRecorded {
         plan: PathBuf,
         results: PathBuf,
         context: PathBuf,
+        #[arg(long)]
+        lock: Option<PathBuf>,
+        #[arg(long)]
+        ledger: Option<PathBuf>,
+        #[arg(long)]
+        resume: bool,
+        #[arg(long)]
+        identity_seed: Option<String>,
+    },
+    /// Consume submitted Provider handoffs through the recorded Adapter runtime.
+    RuntimeExecuteInvocations {
+        plan: PathBuf,
+        root: PathBuf,
+        context: PathBuf,
+        #[arg(long)]
+        selection: PathBuf,
         #[arg(long)]
         lock: Option<PathBuf>,
         #[arg(long)]
@@ -535,13 +582,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             node_id,
             context,
             invocation_id,
+            lock,
         } => {
-            let value = build_adapter_request(
-                &load_json(plan)?,
-                &node_id,
-                &load_json(context)?,
-                &invocation_id,
-            )?;
+            let plan = load_json(plan)?;
+            let _ = validate_workflow_plan_and_lock(&plan, lock.as_deref())?;
+            let value =
+                build_adapter_request(&plan, &node_id, &load_json(context)?, &invocation_id)?;
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
         Command::AdapterRequestValidate { request } => {
@@ -554,6 +600,58 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let result = load_json(result)?;
             validate_adapter_result(&request, &result)?;
             print!("{}", String::from_utf8(canonical_json(&result)?)?);
+        }
+        Command::InvocationPrepare {
+            root,
+            plan,
+            node_id,
+            context,
+            invocation_id,
+            lock,
+        } => {
+            let plan = load_json(plan)?;
+            let lock = validate_workflow_plan_and_lock(&plan, lock.as_deref())?;
+            let value = prepare_provider_invocation(
+                &root,
+                &plan,
+                &node_id,
+                &load_json(context)?,
+                &invocation_id,
+                lock.as_ref(),
+            )?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::InvocationClaim {
+            root,
+            request_id,
+            actor_id,
+            claim_token_file,
+        } => {
+            let value = claim_provider_invocation(
+                &root,
+                &request_id,
+                &actor_id,
+                &load_claim_token_file(&claim_token_file)?,
+            )?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::InvocationSubmit {
+            root,
+            request_id,
+            result,
+            claim_token_file,
+        } => {
+            let value = submit_provider_invocation(
+                &root,
+                &request_id,
+                &load_json(result)?,
+                &load_claim_token_file(&claim_token_file)?,
+            )?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::InvocationInspect { root, request_id } => {
+            let value = inspect_provider_invocation(&root, &request_id)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
         Command::RuntimeExecuteRecorded {
             plan,
@@ -568,6 +666,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let results = load_json(results)?;
             let context = load_json(context)?;
             let lock = lock.map(load_json).transpose()?;
+            let value = execute_recorded_plan(
+                &plan,
+                &results,
+                &context,
+                lock.as_ref(),
+                ledger.as_deref(),
+                resume,
+                identity_seed.as_deref(),
+            )?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::RuntimeExecuteInvocations {
+            plan,
+            root,
+            context,
+            selection,
+            lock,
+            ledger,
+            resume,
+            identity_seed,
+        } => {
+            let plan = load_json(plan)?;
+            let lock = validate_workflow_plan_and_lock(&plan, lock.as_deref())?;
+            let results = collect_submitted_results(
+                &root,
+                plan.get("fingerprint")
+                    .and_then(Value::as_str)
+                    .ok_or("workflow plan fingerprint is required")?,
+                &load_json(selection)?,
+            )?;
+            let context = load_json(context)?;
             let value = execute_recorded_plan(
                 &plan,
                 &results,
@@ -906,6 +1035,32 @@ fn parse_lock_sources(values: &[String]) -> Result<Map<String, Value>, Box<dyn s
         sources.insert(package_id.to_owned(), json!({"kind": kind, "uri": uri}));
     }
     Ok(sources.into_iter().collect())
+}
+
+fn validate_workflow_plan_and_lock(
+    plan: &Value,
+    lock_path: Option<&std::path::Path>,
+) -> Result<Option<Value>, Box<dyn std::error::Error>> {
+    require_schema_version(plan, "1.0")?;
+    validate_compiled_plan(plan)?;
+    let frozen = plan
+        .get("package_lock_hash")
+        .is_some_and(|value| !value.is_null());
+    match (frozen, lock_path) {
+        (false, None) => Ok(None),
+        (false, Some(_)) => {
+            Err("workflow plan is not frozen to the supplied package Lockfile".into())
+        }
+        (true, None) => {
+            Err("locked workflow operation requires the current package Lockfile".into())
+        }
+        (true, Some(path)) => {
+            let package_lock = load_json(path)?;
+            validate_package_lock(&package_lock)?;
+            validate_plan_package_lock(plan, &package_lock)?;
+            Ok(Some(package_lock))
+        }
+    }
 }
 
 fn parse_source_hashes(

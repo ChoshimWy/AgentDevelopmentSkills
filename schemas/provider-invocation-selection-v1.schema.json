@@ -1,0 +1,32 @@
+{
+  "$id": "https://agent-workflow.local/schemas/provider-invocation-selection-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "plan_fingerprint": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "requests": {
+      "additionalProperties": {
+        "pattern": "^adapter-request-[0-9a-f]{16}$",
+        "type": "string"
+      },
+      "maxProperties": 16384,
+      "propertyNames": {
+        "minLength": 1
+      },
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "1.0"
+    }
+  },
+  "required": [
+    "schema_version",
+    "plan_fingerprint",
+    "requests"
+  ],
+  "title": "Provider Invocation Selection v1",
+  "type": "object"
+}
