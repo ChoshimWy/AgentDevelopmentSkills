@@ -30,6 +30,7 @@ mod post_install;
 mod rollback;
 mod rollback_stage;
 mod source_activation;
+mod source_install;
 mod staged_install;
 mod staged_tree;
 mod transaction_lock;
@@ -40,6 +41,7 @@ pub use doctor_report::inspect_doctor_report_v1;
 #[cfg(test)]
 use doctor_report::validate_doctor_report_v1;
 pub use managed_swap::{PublishedInstall, PublishedUninstall, inspect_uninstall_plan};
+pub use source_install::{SourceInstallSelection, resolve_source_install_selection};
 pub use staged_install::ValidatedInstallPlan;
 pub use transaction_lock::LifecycleLock;
 pub use transaction_workspace::LifecycleWorkspace;

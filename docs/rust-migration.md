@@ -181,6 +181,13 @@ contains:
   dry-run, Python-compatible human output, and canonical blocked JSON.
   Production command routing is not implemented yet; `uninstall.sh` still uses
   the Python production path.
+  The crate now also resolves the source package catalog used before native
+  installation: explicit platform, discipline, and runtime-config selection;
+  required and optional package dependencies; numeric version constraints;
+  deterministic provider-before-consumer order; and selection reasons. The
+  `install-selection` compatibility command is byte-level differential-tested
+  against the Python planner. This boundary does not yet snapshot package
+  assets, compile an Install Plan/Lockfile, or mutate an installation.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit
@@ -204,9 +211,10 @@ contains:
 The Rust binary is not yet installed by the production bootstrap and is not a
 binary release artifact. The parallel CLI currently covers canonical JSON,
 hashing, the shared schema-version boundary, registry snapshots, targeted
-binding resolution, an internal recipe-closure compatibility probe, repository
-discovery, policy resolution, and plan compilation. Package-lock resolution is
-also available through the parallel CLI, including local-registry,
+binding resolution, source package-selection compatibility, an internal
+recipe-closure compatibility probe, repository discovery, policy resolution,
+and plan compilation. Package-lock resolution is also available through the
+parallel CLI, including local-registry,
 relative-path, and pinned HTTPS sources, deterministic lineage, validation,
 diff, explanation, and plan freezing. Phase 4 now also exposes a deterministic
 fake-adapter runtime for semantic differential testing; it never invokes an

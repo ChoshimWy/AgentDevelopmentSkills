@@ -10,7 +10,7 @@ use agent_engine::{
 };
 use agent_lifecycle::{
     LifecycleError, LifecycleWorkspace, inspect_doctor_baseline, inspect_doctor_report_v1,
-    inspect_uninstall_plan, render_codex_config,
+    inspect_uninstall_plan, render_codex_config, resolve_source_install_selection,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
@@ -78,6 +78,18 @@ enum Command {
         disabled_providers: Vec<String>,
         #[arg(long = "provider-root")]
         provider_roots: Vec<PathBuf>,
+    },
+    /// Emit the native source-package selection compatibility projection.
+    InstallSelection {
+        root: PathBuf,
+        #[arg(long = "platform")]
+        platforms: Vec<String>,
+        #[arg(long = "discipline")]
+        disciplines: Vec<String>,
+        #[arg(long = "runtime-config")]
+        runtime_configs: Vec<String>,
+        #[arg(long)]
+        core_only: bool,
     },
     /// Emit the sorted automatic recipe capability closure for target platforms.
     RecipeCapabilities { targets: Vec<String> },
@@ -463,6 +475,25 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             let resolved = registry.resolve_binding(&capability, platform.as_deref())?;
             let value = serde_json::to_value(resolved)?;
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::InstallSelection {
+            root,
+            platforms,
+            disciplines,
+            runtime_configs,
+            core_only,
+        } => {
+            let selection = resolve_source_install_selection(
+                root,
+                &platforms,
+                &disciplines,
+                &runtime_configs,
+                core_only,
+            )?;
+            print!(
+                "{}",
+                String::from_utf8(canonical_json(&selection.compatibility_projection())?)?
+            );
         }
         Command::RecipeCapabilities { targets } => {
             let targets = targets.into_iter().collect::<BTreeSet<_>>();

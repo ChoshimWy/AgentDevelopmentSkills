@@ -48,7 +48,12 @@ from agent_workflow.contracts import (
     validate_worktree_session_context,
 )
 from agent_workflow.doctor import diagnose_install
-from agent_workflow.installation import build_install_bundle, install_bundle
+from agent_workflow.installation import (
+    _resolve_packages,
+    build_install_bundle,
+    install_bundle,
+    resolve_platform_selection,
+)
 from agent_workflow.models import ContractError
 from agent_workflow.package_lock import (
     MAX_LOCK_PACKAGES,
@@ -204,6 +209,186 @@ class RustCompatibilityTests(unittest.TestCase):
             result = self.run_rust("validate-version", str(artifact))
             self.assertEqual(result.returncode, 2)
             self.assertIn("unsupported schema_version", result.stderr)
+
+    def test_source_package_selection_matches_python(self) -> None:
+        cases = (
+            (["all"], [], [], False),
+            (["apple"], [], [], False),
+            ([], ["qa"], [], False),
+            ([], [], ["codex"], False),
+            (["apple"], [], ["codex"], False),
+            ([], [], [], True),
+        )
+        for platforms, disciplines, runtime_configs, core_only in cases:
+            with self.subTest(
+                platforms=platforms,
+                disciplines=disciplines,
+                runtime_configs=runtime_configs,
+                core_only=core_only,
+            ):
+                if (disciplines or runtime_configs) and not platforms and not core_only:
+                    selected: tuple[str, ...] = ()
+                else:
+                    selected = resolve_platform_selection(
+                        ROOT / "platforms",
+                        platforms=platforms,
+                        core_only=core_only,
+                    )
+                source = _resolve_packages(
+                    (ROOT / "platforms").resolve(),
+                    selected_platforms=selected,
+                    disciplines=disciplines,
+                    runtime_configs=runtime_configs,
+                )
+                expected = {
+                    "package_roots": [
+                        {"id": identifier, "path": str(path)}
+                        for identifier, path in source.package_roots
+                    ],
+                    "resolved_dependencies": list(source.dependencies),
+                    "selected_disciplines": list(source.selected_disciplines),
+                    "selected_platforms": list(selected),
+                    "selected_runtime_configs": list(source.selected_runtime_configs),
+                    "selection_reasons": {
+                        identifier: list(reasons)
+                        for identifier, reasons in source.selection_reasons.items()
+                    },
+                }
+                arguments = ["install-selection", str(ROOT / "platforms")]
+                for platform in platforms:
+                    arguments.extend(("--platform", platform))
+                for discipline in disciplines:
+                    arguments.extend(("--discipline", discipline))
+                for runtime_config in runtime_configs:
+                    arguments.extend(("--runtime-config", runtime_config))
+                if core_only:
+                    arguments.append("--core-only")
+                native = self.run_rust(*arguments)
+                self.assertEqual(native.returncode, 0, native.stderr)
+                self.assertEqual(json.loads(native.stdout), expected)
+
+        rejected = (
+            ([], "select --core-only"),
+            (["web"], "not installable"),
+            (["all", "apple"], "cannot be combined"),
+            (["apple", "apple"], "must be unique"),
+        )
+        for platforms, message in rejected:
+            with self.subTest(rejected=platforms):
+                arguments = ["install-selection", str(ROOT / "platforms")]
+                for platform in platforms:
+                    arguments.extend(("--platform", platform))
+                native = self.run_rust(*arguments)
+                self.assertEqual(native.returncode, 2)
+                self.assertIn(message, native.stderr)
+
+    def test_source_package_selection_accepts_omitted_package_requires(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            platforms = Path(directory) / "platforms"
+            shutil.copytree(ROOT / "platforms" / "core", platforms / "core")
+            manifest_path = platforms / "core" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest.pop("package_requires")
+            manifest_path.write_text(
+                json.dumps(
+                    manifest,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            source = _resolve_packages(
+                platforms.resolve(),
+                selected_platforms=(),
+                disciplines=(),
+                runtime_configs=(),
+            )
+            native = self.run_rust(
+                "install-selection",
+                str(platforms),
+                "--core-only",
+            )
+            self.assertEqual(native.returncode, 0, native.stderr)
+            self.assertEqual(
+                [item["id"] for item in json.loads(native.stdout)["package_roots"]],
+                [identifier for identifier, _ in source.package_roots],
+            )
+
+    def test_source_package_selection_ignores_nested_manifests_like_python(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            platforms = Path(directory) / "platforms"
+            shutil.copytree(ROOT / "platforms" / "core", platforms / "core")
+            nested = platforms / "core" / "assets" / "nested"
+            nested.mkdir(parents=True)
+            (nested / "manifest.json").write_text("{}\n", encoding="utf-8")
+
+            source = _resolve_packages(
+                platforms.resolve(),
+                selected_platforms=(),
+                disciplines=(),
+                runtime_configs=(),
+            )
+            native = self.run_rust(
+                "install-selection",
+                str(platforms),
+                "--core-only",
+            )
+            self.assertEqual(native.returncode, 0, native.stderr)
+            self.assertEqual(
+                [item["id"] for item in json.loads(native.stdout)["package_roots"]],
+                [identifier for identifier, _ in source.package_roots],
+            )
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink support is required")
+    def test_source_package_selection_symlinks_fail_closed_like_python(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            platforms = root / "platforms"
+            shutil.copytree(ROOT / "platforms" / "core", platforms / "core")
+            external = root / "external"
+            external.mkdir()
+            unsafe = platforms / "unsafe"
+            try:
+                unsafe.symlink_to(external, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"directory symlink is unavailable: {error}")
+
+            with self.assertRaisesRegex(ContractError, "package candidate is unsafe"):
+                _resolve_packages(
+                    platforms.resolve(),
+                    selected_platforms=(),
+                    disciplines=(),
+                    runtime_configs=(),
+                )
+            native_candidate = self.run_rust(
+                "install-selection",
+                str(platforms),
+                "--core-only",
+            )
+            self.assertEqual(native_candidate.returncode, 2)
+            self.assertIn("package candidate is unsafe", native_candidate.stderr)
+
+            unsafe.unlink()
+            unsafe.mkdir()
+            (unsafe / "manifest.json").symlink_to(
+                platforms / "core" / "manifest.json"
+            )
+            with self.assertRaisesRegex(ContractError, "package candidate is unsafe"):
+                _resolve_packages(
+                    platforms.resolve(),
+                    selected_platforms=(),
+                    disciplines=(),
+                    runtime_configs=(),
+                )
+            native_manifest = self.run_rust(
+                "install-selection",
+                str(platforms),
+                "--core-only",
+            )
+            self.assertEqual(native_manifest.returncode, 2)
+            self.assertIn("package candidate is unsafe", native_manifest.stderr)
 
     def test_codex_config_renderer_matches_installed_source_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

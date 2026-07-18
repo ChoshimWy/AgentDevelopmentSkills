@@ -173,6 +173,8 @@ cargo run --locked -p agent-skills-rs -- \
 
 非默认的 `lifecycle-uninstall` 兼容命令现已接入原生卸载 guard：缺失目标不会被创建，执行与只读 dry-run 的 JSON、默认人类可读输出、canonical blocked report 及最终文件系统状态均已对照 Python 路径验证；这仍不代表 `uninstall.sh` 已完成生产切换。
 
+并行的 `install-selection` 兼容命令现已覆盖可安装源包目录、显式平台/Discipline/Runtime Config 选择、必需与可选依赖闭包、版本约束、确定性拓扑顺序和选择原因，并已与 Python 规划器完成差分验证。该切片尚不读取 Package 资产、不编译完整 Install Bundle，也不会写入安装目标。
+
 ## 发布治理
 
 `Publish verified release` workflow 只接受受保护 `main` 分支当前 revision 产生的成功 qualification run。它会重新执行最终 Gate，拒绝已存在的 tag 或 Release，以原子方式创建 tag，并校验 Pages 与 Release 资产的 hash。所有第三方 GitHub Actions 均固定到完整 commit SHA，并使用 job 级最小权限。
