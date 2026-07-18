@@ -10,15 +10,24 @@ import struct
 import subprocess
 import tempfile
 import unittest
+from copy import deepcopy
 
 from agent_workflow import __version__ as PYTHON_CORE_VERSION
-from agent_workflow.canonical_json import dumps, sha256
+from agent_workflow.canonical_json import dump, dumps, sha256
 from agent_workflow.canonical_json import (
     MAX_CANONICAL_INTEGER_DIGITS,
     MAX_CANONICAL_JSON_DEPTH,
 )
 from agent_workflow.discovery import DiscoveryEngine
+from agent_workflow.installation import build_install_bundle
 from agent_workflow.models import ContractError
+from agent_workflow.package_lock import (
+    MAX_LOCK_PACKAGES,
+    diff_package_locks,
+    explain_package_lock,
+    resolve_package_lock,
+    validate_package_lock,
+)
 from agent_workflow.planning import PlanCompiler
 from agent_workflow.policy import PolicyResolver
 from agent_workflow.recipes import automatic_recipe_capabilities
@@ -1109,6 +1118,512 @@ class RustCompatibilityTests(unittest.TestCase):
                     result = self.run_rust(*arguments)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout, dumps(expected))
+
+    def test_package_lock_lifecycle_and_locked_plan_match_python_byte_for_byte(
+        self,
+    ) -> None:
+        apple = build_install_bundle(ROOT / "platforms", platforms=["apple"])
+        expanded = build_install_bundle(
+            ROOT / "platforms",
+            platforms=["apple", "desktop"],
+        ).package_lock
+        registry = ManifestRegistry.from_directory(ROOT / "platforms")
+        profile = DiscoveryEngine(registry).discover(
+            ROOT / "tests/fixtures/apple-app"
+        )
+        policy = PolicyResolver().resolve(profile, "实现 iOS 功能")
+        locked_plan = PlanCompiler(registry).compile(
+            profile,
+            policy,
+            package_lock=apple.package_lock,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install_plan_path = root / "install-plan.json"
+            lock_path = root / "agent-skills.lock"
+            expanded_path = root / "expanded.lock"
+            profile_path = root / "profile.json"
+            policy_path = root / "policy.json"
+            for value, path in (
+                (apple.plan, install_plan_path),
+                (apple.package_lock, lock_path),
+                (expanded, expanded_path),
+                (profile, profile_path),
+                (policy, policy_path),
+            ):
+                dump(value, path)
+
+            resolved = self.run_rust(
+                "lock-resolve",
+                str(install_plan_path),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(resolved.returncode, 0, resolved.stderr)
+            self.assertEqual(resolved.stdout, dumps(apple.package_lock))
+
+            validated = self.run_rust("lock-validate", str(lock_path))
+            self.assertEqual(validated.returncode, 0, validated.stderr)
+            self.assertEqual(
+                validated.stdout,
+                dumps(
+                    {
+                        "lock_hash": apple.package_lock["fingerprint"],
+                        "status": "passed",
+                    }
+                ),
+            )
+            explained = self.run_rust("lock-explain", str(expanded_path))
+            self.assertEqual(explained.returncode, 0, explained.stderr)
+            self.assertEqual(
+                explained.stdout,
+                dumps(explain_package_lock(expanded)),
+            )
+            diffed = self.run_rust(
+                "lock-diff",
+                str(lock_path),
+                str(expanded_path),
+            )
+            self.assertEqual(diffed.returncode, 0, diffed.stderr)
+            self.assertEqual(
+                diffed.stdout,
+                dumps(diff_package_locks(apple.package_lock, expanded)),
+            )
+            compiled = self.run_rust(
+                "plan-compile",
+                str(profile_path),
+                str(policy_path),
+                "--manifests",
+                str(ROOT / "platforms"),
+                "--lock",
+                str(lock_path),
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            self.assertEqual(compiled.stdout, dumps(locked_plan))
+
+            def mutate_tree_drive(value: dict) -> None:
+                package = next(
+                    item
+                    for item in value["packages"]
+                    if item["id"] == "apple"
+                )
+                package["files"][0]["path"] = "C:x"
+                package["files_sha256"] = sha256(package["files"])
+                selected = next(
+                    item
+                    for item in value["selected_packages"]
+                    if item["id"] == "apple"
+                )
+                selected["source_sha256"] = package["files_sha256"]
+                for provider in value["capability_providers"].values():
+                    if provider["package"] == "apple":
+                        provider["source_sha256"] = package["files_sha256"]
+                value["assets"] = [
+                    {
+                        "mode": entry["mode"],
+                        "package": package_record["id"],
+                        "path": entry["path"],
+                        "sha256": entry["sha256"],
+                    }
+                    for package_record in value["packages"]
+                    for entry in package_record["files"]
+                ]
+                value["asset_summary"]["content_sha256"] = sha256(
+                    value["assets"]
+                )
+
+            install_plan_mutations = {
+                "stale-fingerprint": lambda value: value.__setitem__(
+                    "fingerprint",
+                    "0" * 64,
+                ),
+                "invalid-status": lambda value: value.__setitem__(
+                    "status",
+                    "evil",
+                ),
+                "managed-roots": lambda value: value.__setitem__(
+                    "managed_roots",
+                    ["evil"],
+                ),
+                "selection-reason": lambda value: next(
+                    item
+                    for item in value["selected_packages"]
+                    if item["id"] == "apple"
+                ).__setitem__("selection_reasons", ["core"]),
+                "package-file-count": lambda value: value["packages"][
+                    0
+                ].__setitem__("file_count", 999_999),
+                "asset-summary": lambda value: value[
+                    "asset_summary"
+                ].__setitem__("content_sha256", "0" * 64),
+                "fragment-drive": lambda value: value["instructions"][
+                    "fragments"
+                ][0].__setitem__("path", "C:x"),
+                "tree-drive": mutate_tree_drive,
+            }
+            for name, mutate in install_plan_mutations.items():
+                with self.subTest(install_plan_tamper=name):
+                    invalid = deepcopy(apple.plan)
+                    if name not in {"stale-fingerprint", "invalid-status"}:
+                        invalid.pop("package_lock_hash", None)
+                    mutate(invalid)
+                    if name not in {"stale-fingerprint", "invalid-status"}:
+                        invalid["fingerprint"] = sha256({
+                            key: value
+                            for key, value in invalid.items()
+                            if key not in {"fingerprint", "status"}
+                        })
+                    with self.assertRaises(ContractError):
+                        resolve_package_lock(
+                            invalid,
+                            schema_root=ROOT / "schemas",
+                        )
+                    invalid_path = root / f"install-{name}.json"
+                    dump(invalid, invalid_path)
+                    rejected = self.run_rust(
+                        "lock-resolve",
+                        str(invalid_path),
+                        "--schemas",
+                        str(ROOT / "schemas"),
+                    )
+                    self.assertEqual(rejected.returncode, 2)
+                    self.assertEqual(rejected.stdout, "")
+
+    def test_package_lock_sources_lineage_and_tamper_boundaries_match_python(
+        self,
+    ) -> None:
+        apple = build_install_bundle(ROOT / "platforms", platforms=["apple"])
+        artifact_hash = "a" * 64
+        source_cases = (
+            (
+                ("--source", "apple=./platforms/apple", "--source-base", str(ROOT)),
+                resolve_package_lock(
+                    apple.plan,
+                    schema_root=ROOT / "schemas",
+                    package_sources={
+                        "apple": {
+                            "kind": "relative-path",
+                            "uri": "./platforms/apple",
+                        }
+                    },
+                    source_base=ROOT,
+                ),
+            ),
+            (
+                (
+                    "--source",
+                    "apple=https://example.test/releases/apple.zip",
+                    "--source-sha256",
+                    f"apple={artifact_hash}",
+                ),
+                resolve_package_lock(
+                    apple.plan,
+                    schema_root=ROOT / "schemas",
+                    package_sources={
+                        "apple": {
+                            "kind": "https",
+                            "uri": "https://example.test/releases/apple.zip",
+                        }
+                    },
+                    package_source_artifact_hashes={
+                        "apple": artifact_hash,
+                    },
+                ),
+            ),
+            *tuple(
+                (
+                    (
+                        "--source",
+                        (
+                            "apple=https://example.test/releases/apple.zip"
+                            f"{suffix}"
+                        ),
+                        "--source-sha256",
+                        f"apple={artifact_hash}",
+                    ),
+                    resolve_package_lock(
+                        apple.plan,
+                        schema_root=ROOT / "schemas",
+                        package_sources={
+                            "apple": {
+                                "kind": "https",
+                                "uri": (
+                                    "https://example.test/releases/apple.zip"
+                                    f"{suffix}"
+                                ),
+                            }
+                        },
+                        package_source_artifact_hashes={
+                            "apple": artifact_hash,
+                        },
+                    ),
+                )
+                for suffix in ("?", "#", "?#")
+            ),
+            *tuple(
+                (
+                    (
+                        "--source",
+                        f"apple={uri}",
+                        "--source-sha256",
+                        f"apple={artifact_hash}",
+                    ),
+                    resolve_package_lock(
+                        apple.plan,
+                        schema_root=ROOT / "schemas",
+                        package_sources={
+                            "apple": {
+                                "kind": "https",
+                                "uri": uri,
+                            }
+                        },
+                        package_source_artifact_hashes={
+                            "apple": artifact_hash,
+                        },
+                    ),
+                )
+                for uri in (
+                    "https://[::1]:/apple.zip",
+                    "https://[v1.test]/apple.zip",
+                    "https://[fe80::1%25eth0]/apple.zip",
+                )
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            install_plan_path = root / "install-plan.json"
+            lock_path = root / "agent-skills.lock"
+            dump(apple.plan, install_plan_path)
+            dump(apple.package_lock, lock_path)
+            for arguments, expected in source_cases:
+                with self.subTest(arguments=arguments):
+                    result = self.run_rust(
+                        "lock-resolve",
+                        str(install_plan_path),
+                        "--schemas",
+                        str(ROOT / "schemas"),
+                        *arguments,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, dumps(expected))
+
+            successor = resolve_package_lock(
+                apple.plan,
+                schema_root=ROOT / "schemas",
+                previous_lock=apple.package_lock,
+            )
+            result = self.run_rust(
+                "lock-resolve",
+                str(install_plan_path),
+                "--schemas",
+                str(ROOT / "schemas"),
+                "--previous",
+                str(lock_path),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, dumps(successor))
+
+            tampered = deepcopy(apple.package_lock)
+            tampered["packages"][-1]["source"]["sha256"] = "0" * 64
+            with self.assertRaises(ContractError):
+                validate_package_lock(tampered)
+            tampered_path = root / "tampered.lock"
+            dump(tampered, tampered_path)
+            rejected = self.run_rust("lock-validate", str(tampered_path))
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(rejected.stdout, "")
+
+            uppercase = deepcopy(source_cases[1][1])
+            apple_source = next(
+                item["source"]
+                for item in uppercase["packages"]
+                if item["id"] == "apple"
+            )
+            apple_source["uri"] = apple_source["uri"].replace(
+                "https://",
+                "HTTPS://",
+            )
+            uppercase["fingerprint"] = sha256({
+                key: value
+                for key, value in uppercase.items()
+                if key != "fingerprint"
+            })
+            validate_package_lock(uppercase)
+            uppercase_path = root / "uppercase.lock"
+            dump(uppercase, uppercase_path)
+            accepted = self.run_rust("lock-validate", str(uppercase_path))
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+            invalid_cases = {}
+            for unsafe_path in (
+                r"schemas\escaped.schema.json",
+                "C:/escaped.schema.json",
+                "C:escaped.schema.json",
+            ):
+                invalid = deepcopy(apple.package_lock)
+                invalid["schema_inventory"]["files"][0]["path"] = unsafe_path
+                invalid["schema_inventory"]["content_sha256"] = sha256(
+                    invalid["schema_inventory"]["files"]
+                )
+                invalid["fingerprint"] = sha256({
+                    key: value
+                    for key, value in invalid.items()
+                    if key != "fingerprint"
+                })
+                invalid_cases[f"schema-{unsafe_path[0]}"] = invalid
+            excessive = deepcopy(apple.package_lock)
+            excessive["selection"]["platforms"] = [
+                f"platform-{index}"
+                for index in range(MAX_LOCK_PACKAGES + 1)
+            ]
+            excessive["fingerprint"] = sha256({
+                key: value
+                for key, value in excessive.items()
+                if key != "fingerprint"
+            })
+            invalid_cases["excessive-selection"] = excessive
+            wrong_core_kind = deepcopy(apple.package_lock)
+            wrong_core_kind["packages"][0]["kind"] = "platform"
+            wrong_core_kind["fingerprint"] = sha256({
+                key: value
+                for key, value in wrong_core_kind.items()
+                if key != "fingerprint"
+            })
+            invalid_cases["wrong-core-kind"] = wrong_core_kind
+            cyclic = deepcopy(apple.package_lock)
+            cyclic["dependencies"].append({
+                "from": "design",
+                "required_capabilities": ["implementation.apple"],
+                "requirement": "optional",
+                "to": "apple",
+                "version": ">=0.2.0 <0.3.0",
+            })
+            cyclic["dependencies"].sort(
+                key=lambda dependency: (
+                    dependency["from"],
+                    dependency["to"],
+                )
+            )
+            cyclic["fingerprint"] = sha256({
+                key: value
+                for key, value in cyclic.items()
+                if key != "fingerprint"
+            })
+            invalid_cases["dependency-cycle"] = cyclic
+            for name, invalid in invalid_cases.items():
+                with self.subTest(invalid=name):
+                    with self.assertRaises(ContractError):
+                        validate_package_lock(invalid)
+                    invalid_path = root / f"{name}.lock"
+                    dump(invalid, invalid_path)
+                    result = self.run_rust(
+                        "lock-validate",
+                        str(invalid_path),
+                    )
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+
+            for malformed in (
+                "./../apple",
+                "./C:/apple",
+                "./C:",
+                "./C:apple",
+                "https://[bad/a",
+                "https://]/a",
+                "https://example.test/a\tbad",
+                r"https://example.test\evil/a",
+            ):
+                with self.subTest(malformed_source=malformed):
+                    arguments = [
+                        "lock-resolve",
+                        str(install_plan_path),
+                        "--schemas",
+                        str(ROOT / "schemas"),
+                        "--source",
+                        f"apple={malformed}",
+                    ]
+                    if malformed.startswith("https://"):
+                        arguments.extend(
+                            [
+                                "--source-sha256",
+                                f"apple={artifact_hash}",
+                            ]
+                        )
+                    unsafe = self.run_rust(*arguments)
+                    self.assertEqual(unsafe.returncode, 2)
+                    self.assertEqual(unsafe.stdout, "")
+
+            schema_repository = root / "schema-repository"
+            schemas = schema_repository / "schemas"
+            schemas.mkdir(parents=True)
+            schema = {
+                "$schema": (
+                    "https://json-schema.org/draft/2020-12/schema"
+                ),
+                "type": "object",
+            }
+            dump(schema, schemas / "root.schema.json")
+            external = schema_repository / "external"
+            external.mkdir()
+            dump(schema, external / "linked.schema.json")
+            contracts = schema_repository / "platforms/apple/contracts"
+            contracts.parent.mkdir(parents=True)
+            contracts.symlink_to(external, target_is_directory=True)
+            unanchored_plan = deepcopy(apple.plan)
+            unanchored_plan.pop("package_lock_hash")
+            unanchored_plan["fingerprint"] = sha256({
+                key: value
+                for key, value in unanchored_plan.items()
+                if key not in {"fingerprint", "status"}
+            })
+            unanchored_plan_path = root / "unanchored-install-plan.json"
+            dump(unanchored_plan, unanchored_plan_path)
+            expected = resolve_package_lock(
+                unanchored_plan,
+                schema_root=schemas,
+            )
+            result = self.run_rust(
+                "lock-resolve",
+                str(unanchored_plan_path),
+                "--schemas",
+                str(schemas),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, dumps(expected))
+
+            source_root = root / "source-root"
+            apple_source = source_root / "platforms/apple"
+            shutil.copytree(ROOT / "platforms/apple", apple_source)
+            external_skills = source_root / "external-skills"
+            (apple_source / "skills").rename(external_skills)
+            (apple_source / "skills").symlink_to(
+                external_skills,
+                target_is_directory=True,
+            )
+            with self.assertRaises(ContractError):
+                resolve_package_lock(
+                    apple.plan,
+                    schema_root=ROOT / "schemas",
+                    package_sources={
+                        "apple": {
+                            "kind": "relative-path",
+                            "uri": "./platforms/apple",
+                        }
+                    },
+                    source_base=source_root,
+                )
+            unsafe_symlink = self.run_rust(
+                "lock-resolve",
+                str(install_plan_path),
+                "--schemas",
+                str(ROOT / "schemas"),
+                "--source",
+                "apple=./platforms/apple",
+                "--source-base",
+                str(source_root),
+            )
+            self.assertEqual(unsafe_symlink.returncode, 2)
+            self.assertEqual(unsafe_symlink.stdout, "")
 
     def test_registry_provider_mutations_fail_closed_like_python(self) -> None:
         mutations = {

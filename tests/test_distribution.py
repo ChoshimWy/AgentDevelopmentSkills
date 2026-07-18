@@ -261,6 +261,7 @@ class DistributionTests(unittest.TestCase):
         self.assertIn(prefix + "Cargo.toml", names)
         self.assertIn(prefix + "crates/agent-contracts/src/lib.rs", names)
         self.assertIn(prefix + "crates/agent-engine/src/lib.rs", names)
+        self.assertIn(prefix + "crates/agent-engine/src/package_lock.rs", names)
         self.assertIn(prefix + "crates/agent-registry/src/lib.rs", names)
         self.assertIn(prefix + "docs/rust-migration.md", names)
         self.assertIn(prefix + "rust-toolchain.toml", names)

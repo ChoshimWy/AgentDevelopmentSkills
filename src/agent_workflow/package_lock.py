@@ -10,8 +10,14 @@ import re
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from .canonical_json import sha256
-from .contracts import validate_install_plan
+from .canonical_json import load, sha256
+from .contracts import (
+    MAX_INSTALL_DEPENDENCIES,
+    MAX_INSTALL_PACKAGES,
+    MAX_INSTALL_PROVIDERS,
+    MAX_INSTALL_TREE_ENTRIES,
+    validate_install_plan,
+)
 from .models import ContractError, require_fields, require_version
 from .registry.versions import satisfies
 
@@ -20,6 +26,14 @@ LOCK_SCHEMA_VERSION = "1.0"
 LOCK_MANAGER = "agent-development-skills"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
+MAX_LOCK_PACKAGES = MAX_INSTALL_PACKAGES
+MAX_LOCK_DEPENDENCIES = MAX_INSTALL_DEPENDENCIES
+MAX_LOCK_PROVIDERS = MAX_INSTALL_PROVIDERS
+MAX_LOCK_SCHEMAS = 65_536
+MAX_PACKAGE_FILES = MAX_INSTALL_TREE_ENTRIES
+MAX_SCHEMA_DIRECTORY_ENTRIES = 100_000
+MAX_LOCK_PATH_BYTES = 4_096
 
 
 def _is_sha256(value: Any) -> bool:
@@ -51,24 +65,19 @@ def schema_inventory(schema_root: str | Path) -> dict[str, Any]:
     if root.is_symlink() or not root.is_dir():
         raise ContractError(f"schema root is missing or unsafe: {root}")
     repository_root = root.parent if root.name == "schemas" else root
-    patterns = ["schemas/*.schema.json"] if root.name == "schemas" else ["*.schema.json"]
-    if root.name == "schemas":
-        patterns.extend((
-            "disciplines/*/contracts/*.schema.json",
-            "platforms/*/contracts/*.schema.json",
-            "platforms/*/config/*.schema.json",
-            "stacks/*/contracts/*.schema.json",
-        ))
-    candidates = sorted({path for pattern in patterns for path in repository_root.glob(pattern)})
+    candidates = _schema_candidates(root, repository_root)
     files: list[dict[str, str]] = []
     for path in candidates:
         if path.is_symlink() or not path.is_file():
             raise ContractError(f"schema file is unsafe: {path.name}")
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            value = load(path)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ContractError) as error:
             raise ContractError(f"schema file is invalid: {path.name}: {error}") from error
-        if value.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+        if (
+            not isinstance(value, dict)
+            or value.get("$schema") != "https://json-schema.org/draft/2020-12/schema"
+        ):
             raise ContractError(f"schema file has unsupported draft: {path.name}")
         files.append({
             "path": path.relative_to(repository_root).as_posix(),
@@ -81,6 +90,62 @@ def schema_inventory(schema_root: str | Path) -> dict[str, Any]:
         "content_sha256": sha256(files),
         "files": files,
     }
+
+
+def _schema_candidates(root: Path, repository_root: Path) -> list[Path]:
+    candidates: set[Path] = set()
+    entry_count = [0]
+    _collect_direct_schema_files(root, candidates, entry_count)
+    if root.name == "schemas":
+        for container_name, child_names in (
+            ("disciplines", ("contracts",)),
+            ("platforms", ("contracts", "config")),
+            ("stacks", ("contracts",)),
+        ):
+            container = repository_root / container_name
+            if not container.exists():
+                continue
+            if container.is_symlink() or not container.is_dir():
+                raise ContractError(f"schema directory is unsafe: {container}")
+            for package in container.iterdir():
+                entry_count[0] += 1
+                if entry_count[0] > MAX_SCHEMA_DIRECTORY_ENTRIES:
+                    raise ContractError(
+                        "schema inventory exceeds maximum of "
+                        f"{MAX_SCHEMA_DIRECTORY_ENTRIES} directory entries"
+                    )
+                if package.is_symlink() or not package.is_dir():
+                    continue
+                for child_name in child_names:
+                    child = package / child_name
+                    if child.exists() and not child.is_symlink() and child.is_dir():
+                        _collect_direct_schema_files(child, candidates, entry_count)
+    if len(candidates) > MAX_LOCK_SCHEMAS:
+        raise ContractError(f"schema inventory exceeds maximum of {MAX_LOCK_SCHEMAS} files")
+    return sorted(candidates)
+
+
+def _collect_direct_schema_files(
+    directory: Path,
+    candidates: set[Path],
+    entry_count: list[int],
+) -> None:
+    if not directory.exists():
+        return
+    if directory.is_symlink() or not directory.is_dir():
+        raise ContractError(f"schema directory is unsafe: {directory}")
+    for path in directory.iterdir():
+        entry_count[0] += 1
+        if entry_count[0] > MAX_SCHEMA_DIRECTORY_ENTRIES:
+            raise ContractError(
+                "schema inventory exceeds maximum of "
+                f"{MAX_SCHEMA_DIRECTORY_ENTRIES} directory entries"
+            )
+        if not path.name.endswith(".schema.json"):
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise ContractError(f"schema file is unsafe: {path.name}")
+        candidates.add(path)
 
 
 def _default_source(package_id: str) -> dict[str, Any]:
@@ -96,6 +161,10 @@ def _validate_source(source: Any, package_id: str) -> None:
         raise ContractError(f"package lock source kind is unsupported: {package_id}")
     if not isinstance(uri, str) or not uri or not _is_sha256(source["sha256"]):
         raise ContractError(f"package lock source identity is invalid: {package_id}")
+    if "\\" in uri or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in uri):
+        raise ContractError(f"package lock source identity is invalid: {package_id}")
+    if len(uri.encode("utf-8")) > MAX_LOCK_PATH_BYTES:
+        raise ContractError(f"package lock source identity is invalid: {package_id}")
     if kind == "local-registry":
         if source["artifact_sha256"] is not None:
             raise ContractError(f"package lock registry source must not declare an artifact: {package_id}")
@@ -110,13 +179,19 @@ def _validate_source(source: Any, package_id: str) -> None:
         if (
             not uri.startswith("./")
             or "\\" in uri
+            or _WINDOWS_DRIVE.match(relative_value) is not None
             or path.is_absolute()
             or not path.parts
             or any(part in {"", ".", ".."} for part in path.parts)
         ):
             raise ContractError(f"package lock relative source is unsafe: {package_id}")
         return
-    parsed = urlsplit(uri)
+    try:
+        parsed = urlsplit(uri)
+    except ValueError as error:
+        raise ContractError(
+            f"package lock HTTPS source is unsafe: {package_id}"
+        ) from error
     if (
         parsed.scheme != "https"
         or not parsed.netloc
@@ -149,6 +224,8 @@ def resolve_package_lock(
     sources = dict(package_sources or {})
     artifact_hashes = dict(package_source_artifact_hashes or {})
     package_ids = [item["id"] for item in install_plan["selected_packages"]]
+    if len(package_ids) > MAX_LOCK_PACKAGES:
+        raise ContractError(f"package lock exceeds maximum of {MAX_LOCK_PACKAGES} packages")
     unknown_sources = sorted(set(sources) - set(package_ids))
     if unknown_sources:
         raise ContractError("package lock source overrides reference unknown packages: " + ", ".join(unknown_sources))
@@ -252,9 +329,31 @@ def _validate_relative_source_snapshot(
     if root.is_symlink() or not root.is_dir():
         raise ContractError(f"package lock relative source is missing or unsafe: {package_id}")
     actual_files: list[dict[str, Any]] = []
+    if len(package_record["files"]) > MAX_PACKAGE_FILES:
+        raise ContractError(f"package source exceeds maximum of {MAX_PACKAGE_FILES} files")
     for expected in package_record["files"]:
-        path = root / expected["path"]
-        if path.is_symlink() or not path.is_file():
+        relative = expected["path"]
+        relative_path = PurePosixPath(relative) if isinstance(relative, str) else PurePosixPath()
+        if (
+            not isinstance(relative, str)
+            or not relative_path.parts
+            or "\\" in relative
+            or _WINDOWS_DRIVE.match(relative) is not None
+            or any(part in {"", ".", ".."} for part in relative_path.parts)
+        ):
+            raise ContractError(f"package lock relative source file is missing or unsafe: {package_id}")
+        path = root
+        for index, part in enumerate(relative_path.parts):
+            path /= part
+            if path.is_symlink():
+                raise ContractError(
+                    f"package lock relative source file is missing or unsafe: {package_id}"
+                )
+            if index < len(relative_path.parts) - 1 and not path.is_dir():
+                raise ContractError(
+                    f"package lock relative source file is missing or unsafe: {package_id}"
+                )
+        if not path.is_file():
             raise ContractError(f"package lock relative source file is missing or unsafe: {package_id}")
         actual_files.append({
             "mode": 0o755 if path.stat().st_mode & 0o111 else 0o644,
@@ -296,6 +395,10 @@ def validate_package_lock(value: dict[str, Any]) -> None:
     packages = value["packages"]
     if not isinstance(packages, list) or not packages:
         raise ContractError("agent-skills-lock packages must not be empty")
+    if len(packages) > MAX_LOCK_PACKAGES:
+        raise ContractError(
+            f"agent-skills-lock packages exceed maximum of {MAX_LOCK_PACKAGES}"
+        )
     package_ids: list[str] = []
     package_by_id: dict[str, dict[str, Any]] = {}
     for package in packages:
@@ -339,6 +442,12 @@ def validate_package_lock(value: dict[str, Any]) -> None:
     if (
         core["package_version"] != package_by_id["core"]["version"]
         or core["source_sha256"] != package_by_id["core"]["source"]["sha256"]
+        or package_by_id["core"]["kind"] != "core"
+        or any(
+            package["kind"] == "core"
+            for package_id, package in package_by_id.items()
+            if package_id != "core"
+        )
     ):
         raise ContractError("agent-skills-lock core identity differs from package closure")
 
@@ -349,6 +458,10 @@ def validate_package_lock(value: dict[str, Any]) -> None:
         raise ContractError("agent-skills-lock schema inventory identity is invalid")
     if not isinstance(inventory["files"], list):
         raise ContractError("agent-skills-lock schema files are invalid")
+    if len(inventory["files"]) > MAX_LOCK_SCHEMAS:
+        raise ContractError(
+            f"agent-skills-lock schema files exceed maximum of {MAX_LOCK_SCHEMAS}"
+        )
     schema_paths: list[str] = []
     for item in inventory["files"]:
         if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
@@ -358,6 +471,9 @@ def validate_package_lock(value: dict[str, Any]) -> None:
         if (
             not isinstance(path, str)
             or not path.endswith(".schema.json")
+            or len(path.encode("utf-8")) > MAX_LOCK_PATH_BYTES
+            or "\\" in path
+            or _WINDOWS_DRIVE.match(path) is not None
             or schema_path.is_absolute()
             or any(part in {"", ".", ".."} for part in schema_path.parts)
         ):
@@ -375,6 +491,7 @@ def validate_package_lock(value: dict[str, Any]) -> None:
         items = selection[key]
         if (
             not isinstance(items, list)
+            or len(items) > MAX_LOCK_PACKAGES
             or any(not isinstance(item, str) or not item for item in items)
             or items != sorted(set(items))
         ):
@@ -387,6 +504,7 @@ def validate_package_lock(value: dict[str, Any]) -> None:
         items = value[field]
         if (
             not isinstance(items, list)
+            or len(items) > MAX_LOCK_PROVIDERS
             or any(not isinstance(item, str) or not item for item in items)
             or items != sorted(set(items))
         ):
@@ -395,6 +513,11 @@ def validate_package_lock(value: dict[str, Any]) -> None:
     providers = value["capability_providers"]
     if not isinstance(providers, dict):
         raise ContractError("agent-skills-lock capability providers are invalid")
+    if len(providers) > MAX_LOCK_PROVIDERS:
+        raise ContractError(
+            "agent-skills-lock capability providers exceed maximum of "
+            f"{MAX_LOCK_PROVIDERS}"
+        )
     for capability, provider in providers.items():
         if not isinstance(capability, str) or not capability or not isinstance(provider, dict):
             raise ContractError("agent-skills-lock capability provider is invalid")
@@ -424,6 +547,10 @@ def validate_package_lock(value: dict[str, Any]) -> None:
     dependencies = value["dependencies"]
     if not isinstance(dependencies, list):
         raise ContractError("agent-skills-lock dependencies are invalid")
+    if len(dependencies) > MAX_LOCK_DEPENDENCIES:
+        raise ContractError(
+            f"agent-skills-lock dependencies exceed maximum of {MAX_LOCK_DEPENDENCIES}"
+        )
     dependency_edges: list[tuple[str, str]] = []
     for dependency in dependencies:
         fields = {"from", "to", "requirement", "version", "required_capabilities"}
@@ -441,6 +568,7 @@ def validate_package_lock(value: dict[str, Any]) -> None:
             or not isinstance(dependency["version"], str)
             or not isinstance(required_capabilities, list)
             or not required_capabilities
+            or len(required_capabilities) > MAX_LOCK_PROVIDERS
             or any(not isinstance(item, str) or not item for item in required_capabilities)
             or required_capabilities != sorted(set(required_capabilities))
         ):
@@ -450,6 +578,22 @@ def validate_package_lock(value: dict[str, Any]) -> None:
         dependency_edges.append((dependency["from"], dependency["to"]))
     if dependency_edges != sorted(set(dependency_edges)):
         raise ContractError("agent-skills-lock dependency edges must be sorted and unique")
+    incoming = {package_id: 0 for package_id in package_ids}
+    outgoing: dict[str, list[str]] = {package_id: [] for package_id in package_ids}
+    for source, target in dependency_edges:
+        incoming[target] += 1
+        outgoing[source].append(target)
+    queue = [package_id for package_id in package_ids if incoming[package_id] == 0]
+    visited = 0
+    while queue:
+        source = queue.pop()
+        visited += 1
+        for target in outgoing[source]:
+            incoming[target] -= 1
+            if incoming[target] == 0:
+                queue.append(target)
+    if visited != len(package_ids):
+        raise ContractError("agent-skills-lock dependency graph contains a cycle")
     reachable_packages = {"core", *selected}
     changed = True
     while changed:

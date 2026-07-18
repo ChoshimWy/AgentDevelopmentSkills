@@ -90,7 +90,8 @@ cargo run --locked -p agent-skills-rs -- registry-snapshot platforms
 ```
 
 The same compatibility lane can resolve policies, discover repository evidence,
-and compile deterministic plans without executing them:
+compile deterministic plans, and resolve or inspect persistent package
+Lockfiles without executing plans:
 
 ```bash
 cargo run --locked -p agent-skills-rs -- \
@@ -100,6 +101,11 @@ cargo run --locked -p agent-skills-rs -- \
 cargo run --locked -p agent-skills-rs -- \
   plan-compile /path/to/profile.json /path/to/policy.json \
   --manifests platforms
+cargo run --locked -p agent-skills-rs -- \
+  lock-resolve /path/to/install-plan.json --schemas schemas \
+  --output /path/to/agent-skills.lock
+cargo run --locked -p agent-skills-rs -- \
+  lock-validate /path/to/agent-skills.lock
 ```
 
 The migration sequence and cutover gates are documented in
@@ -107,7 +113,9 @@ The migration sequence and cutover gates are documented in
 production entry point until every relevant differential test and release gate
 passes. The current native lane includes canonical contracts and a read-only
 manifest registry, repository discovery, policy resolution, and plan
-compilation. It does not execute plans, package code, or installation changes.
+compilation, plus package Lockfile resolution, validation, diff, explanation,
+and locked-plan binding checks. It does not execute plans, package code, or
+installation changes.
 
 ## Release governance
 

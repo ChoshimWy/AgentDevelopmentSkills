@@ -40,11 +40,16 @@ LEGAL_NODE_TRANSITIONS = {
 }
 MAX_RESOLVED_POLICY_FIELDS = 16_384
 MAX_RESOLVED_POLICY_ITEMS = 16_384
+MAX_INSTALL_PACKAGES = 16_384
+MAX_INSTALL_DEPENDENCIES = 65_536
+MAX_INSTALL_PROVIDERS = 65_536
+MAX_INSTALL_TREE_ENTRIES = 100_000
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _GIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _REPOSITORY_PATCH = re.compile(r"^repository-patch:[0-9a-f]{64}$")
 _SESSION_SOURCE = re.compile(r"^session-source:[0-9a-f]{64}$")
+_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 
 
 def validate_activation_lock(value: dict[str, Any]) -> None:
@@ -1060,6 +1065,7 @@ def validate_install_plan(value: dict[str, Any]) -> None:
         },
         "install-plan",
     )
+    _preflight_install_plan_limits(value)
     if value["manager"] != "agent-development-skills":
         raise ContractError("install-plan manager is invalid")
     if value["managed_roots"] != ["AGENTS.md", "skills", ".agent-skills"]:
@@ -1302,6 +1308,7 @@ def validate_install_plan(value: dict[str, Any]) -> None:
             or not isinstance(fragment["path"], str)
             or not fragment["path"]
             or "\\" in fragment["path"]
+            or _WINDOWS_DRIVE.match(fragment["path"]) is not None
             or fragment["path"].startswith("/")
             or any(part in {"", ".", ".."} for part in PurePosixPath(fragment["path"]).parts)
             or not re.fullmatch(r"[0-9a-f]{64}", fragment["sha256"])
@@ -1385,6 +1392,82 @@ def validate_install_plan(value: dict[str, Any]) -> None:
     fingerprint_value = {key: item for key, item in value.items() if key not in {"fingerprint", "status"}}
     if value["fingerprint"] != sha256(fingerprint_value):
         raise ContractError("install-plan fingerprint mismatch")
+
+
+def _preflight_install_plan_limits(value: dict[str, Any]) -> None:
+    for field in ("packages", "selected_packages"):
+        items = value.get(field, [])
+        if isinstance(items, list) and len(items) > MAX_INSTALL_PACKAGES:
+            raise ContractError(
+                f"install-plan {field} exceeds maximum of {MAX_INSTALL_PACKAGES}"
+            )
+    dependencies = value.get("resolved_dependencies", [])
+    if (
+        isinstance(dependencies, list)
+        and len(dependencies) > MAX_INSTALL_DEPENDENCIES
+    ):
+        raise ContractError(
+            "install-plan resolved_dependencies exceeds maximum of "
+            f"{MAX_INSTALL_DEPENDENCIES}"
+        )
+    for field in (
+        "selected_platforms",
+        "selected_disciplines",
+        "selected_runtime_configs",
+        "permission_profiles",
+        "side_effects",
+        "skills",
+    ):
+        items = value.get(field, [])
+        if isinstance(items, list) and len(items) > MAX_INSTALL_PROVIDERS:
+            raise ContractError(
+                f"install-plan {field} exceeds maximum of {MAX_INSTALL_PROVIDERS}"
+            )
+    providers = value.get("capability_providers", {})
+    if isinstance(providers, dict) and len(providers) > MAX_INSTALL_PROVIDERS:
+        raise ContractError(
+            "install-plan capability_providers exceeds maximum of "
+            f"{MAX_INSTALL_PROVIDERS}"
+        )
+    instructions = value.get("instructions", {})
+    if isinstance(instructions, dict):
+        for field in ("fragments", "rule_trace"):
+            items = instructions.get(field, [])
+            if isinstance(items, list) and len(items) > MAX_INSTALL_PROVIDERS:
+                raise ContractError(
+                    f"install-plan instructions.{field} exceeds maximum of "
+                    f"{MAX_INSTALL_PROVIDERS}"
+                )
+    total_package_files = 0
+    for field in ("packages", "skills"):
+        records = value.get(field, [])
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            for tree_field in ("files", "directories"):
+                entries = record.get(tree_field, [])
+                if (
+                    isinstance(entries, list)
+                    and len(entries) > MAX_INSTALL_TREE_ENTRIES
+                ):
+                    raise ContractError(
+                        f"install-plan {field} {tree_field} exceeds maximum of "
+                        f"{MAX_INSTALL_TREE_ENTRIES}"
+                    )
+            if field == "packages" and isinstance(record.get("files"), list):
+                total_package_files += len(record["files"])
+                if total_package_files > MAX_INSTALL_TREE_ENTRIES:
+                    raise ContractError(
+                        "install-plan package files exceed maximum of "
+                        f"{MAX_INSTALL_TREE_ENTRIES}"
+                    )
+    assets = value.get("assets", [])
+    if isinstance(assets, list) and len(assets) > MAX_INSTALL_TREE_ENTRIES:
+        raise ContractError(
+            f"install-plan assets exceeds maximum of {MAX_INSTALL_TREE_ENTRIES}"
+        )
 
 
 def validate_agent_skills_lock(value: dict[str, Any]) -> None:
@@ -1872,6 +1955,7 @@ def _validate_install_entry(entry: dict[str, Any], label: str) -> None:
         not isinstance(path, str)
         or not path
         or "\\" in path
+        or _WINDOWS_DRIVE.match(path) is not None
         or path.startswith("/")
         or any(part in {"", ".", ".."} for part in PurePosixPath(path).parts)
     ):

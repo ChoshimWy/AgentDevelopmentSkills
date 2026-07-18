@@ -95,7 +95,7 @@ AGENT_SKILLS_RUST_COMPATIBILITY=1 \
 cargo run --locked -p agent-skills-rs -- registry-snapshot platforms
 ```
 
-同一兼容路径还可以解析策略、只读发现仓库证据并编译确定性计划：
+同一兼容路径还可以解析策略、只读发现仓库证据、编译确定性计划，并在不执行计划的前提下解析或检查持久化 Package Lock：
 
 ```bash
 cargo run --locked -p agent-skills-rs -- \
@@ -105,9 +105,14 @@ cargo run --locked -p agent-skills-rs -- \
 cargo run --locked -p agent-skills-rs -- \
   plan-compile /path/to/profile.json /path/to/policy.json \
   --manifests platforms
+cargo run --locked -p agent-skills-rs -- \
+  lock-resolve /path/to/install-plan.json --schemas schemas \
+  --output /path/to/agent-skills.lock
+cargo run --locked -p agent-skills-rs -- \
+  lock-validate /path/to/agent-skills.lock
 ```
 
-迁移顺序和切换门禁见 [Rust 迁移计划](docs/rust-migration.md)。当前原生路径已覆盖 canonical contracts、只读 Manifest Registry、仓库发现、策略解析和计划编译，但不会执行计划、package 代码或安装变更；在所有相关差分测试和发布门禁通过前，Python CLI 仍是生产入口。
+迁移顺序和切换门禁见 [Rust 迁移计划](docs/rust-migration.md)。当前原生路径已覆盖 canonical contracts、只读 Manifest Registry、仓库发现、策略解析、计划编译，以及 Package Lock 的解析、验证、差异、解释与锁定计划绑定检查，但不会执行计划、package 代码或安装变更；在所有相关差分测试和发布门禁通过前，Python CLI 仍是生产入口。
 
 ## 发布治理
 

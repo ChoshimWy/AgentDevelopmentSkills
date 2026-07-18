@@ -1,10 +1,14 @@
 //! Parallel native compatibility entry point.
 
 use agent_contracts::{canonical_json, canonical_sha256, load_json, require_schema_version};
-use agent_engine::{DiscoveryEngine, compile_plan, resolve_policy};
+use agent_engine::{
+    DiscoveryEngine, compile_plan_with_package_lock, diff_package_locks, explain_package_lock,
+    resolve_package_lock, resolve_policy, validate_package_lock,
+};
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use clap::{Parser, Subcommand};
-use std::collections::BTreeSet;
+use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -96,7 +100,31 @@ enum Command {
         disabled_providers: Vec<String>,
         #[arg(long = "provider-root")]
         provider_roots: Vec<PathBuf>,
+        #[arg(long)]
+        lock: Option<PathBuf>,
     },
+    /// Resolve an Install Plan v2 into a persistent package Lockfile.
+    LockResolve {
+        install_plan: PathBuf,
+        #[arg(long, default_value = "schemas")]
+        schemas: PathBuf,
+        #[arg(long)]
+        previous: Option<PathBuf>,
+        #[arg(long = "source")]
+        sources: Vec<String>,
+        #[arg(long = "source-base", default_value = ".")]
+        source_base: PathBuf,
+        #[arg(long = "source-sha256")]
+        source_hashes: Vec<String>,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Validate a persistent package Lockfile.
+    LockValidate { lockfile: PathBuf },
+    /// Diff two persistent package Lockfiles.
+    LockDiff { before: PathBuf, after: PathBuf },
+    /// Explain one persistent package Lockfile.
+    LockExplain { lockfile: PathBuf },
 }
 
 #[allow(clippy::too_many_lines)]
@@ -214,6 +242,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             core_version,
             disabled_providers,
             provider_roots,
+            lock,
         } => {
             let profile = load_json(profile)?;
             let policy = load_json(policy)?;
@@ -224,11 +253,112 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &disabled,
                 &core_version,
             )?;
-            let value = compile_plan(&registry, &profile, &policy)?;
+            let package_lock = lock.map(load_json).transpose()?;
+            let value = compile_plan_with_package_lock(
+                &registry,
+                &profile,
+                &policy,
+                package_lock.as_ref(),
+            )?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::LockResolve {
+            install_plan,
+            schemas,
+            previous,
+            sources,
+            source_base,
+            source_hashes,
+            output,
+        } => {
+            let install_plan = load_json(install_plan)?;
+            let previous = previous.map(load_json).transpose()?;
+            let sources = parse_lock_sources(&sources)?;
+            let source_hashes = parse_source_hashes(&source_hashes)?;
+            let value = resolve_package_lock(
+                &install_plan,
+                schemas,
+                Some(&sources),
+                Some(&source_hashes),
+                source_base,
+                previous.as_ref(),
+            )?;
+            let encoded = canonical_json(&value)?;
+            if let Some(output) = output {
+                std::fs::write(output, &encoded)?;
+            }
+            print!("{}", String::from_utf8(encoded)?);
+        }
+        Command::LockValidate { lockfile } => {
+            let value = load_json(lockfile)?;
+            validate_package_lock(&value)?;
+            let result = json!({
+                "lock_hash": value.get("fingerprint").cloned().unwrap_or(Value::Null),
+                "status": "passed",
+            });
+            print!("{}", String::from_utf8(canonical_json(&result)?)?);
+        }
+        Command::LockDiff { before, after } => {
+            let before = load_json(before)?;
+            let after = load_json(after)?;
+            let value = diff_package_locks(&before, &after)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::LockExplain { lockfile } => {
+            let value = load_json(lockfile)?;
+            let value = explain_package_lock(&value)?;
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
     }
     Ok(())
+}
+
+fn parse_lock_sources(values: &[String]) -> Result<Map<String, Value>, Box<dyn std::error::Error>> {
+    let mut sources = BTreeMap::new();
+    for value in values {
+        let (package_id, uri) = value
+            .split_once('=')
+            .filter(|(package_id, uri)| !package_id.is_empty() && !uri.is_empty())
+            .ok_or("--source must use PACKAGE=URI")?;
+        if sources.contains_key(package_id) {
+            return Err(format!("duplicate --source package: {package_id}").into());
+        }
+        let kind = if uri.starts_with("registry://") {
+            "local-registry"
+        } else if uri.starts_with("./") {
+            "relative-path"
+        } else if uri.starts_with("https://") {
+            "https"
+        } else {
+            return Err(format!("unsupported --source URI: {package_id}").into());
+        };
+        sources.insert(package_id.to_owned(), json!({"kind": kind, "uri": uri}));
+    }
+    Ok(sources.into_iter().collect())
+}
+
+fn parse_source_hashes(
+    values: &[String],
+) -> Result<Map<String, Value>, Box<dyn std::error::Error>> {
+    let mut hashes = BTreeMap::new();
+    for value in values {
+        let (package_id, digest) = value
+            .split_once('=')
+            .filter(|(package_id, digest)| !package_id.is_empty() && !digest.is_empty())
+            .ok_or("--source-sha256 must use PACKAGE=SHA256")?;
+        if hashes.contains_key(package_id) {
+            return Err(format!("duplicate --source-sha256 package: {package_id}").into());
+        }
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(format!("invalid --source-sha256 digest: {package_id}").into());
+        }
+        hashes.insert(package_id.to_owned(), Value::String(digest.to_owned()));
+    }
+    Ok(hashes.into_iter().collect())
 }
 
 fn main() {

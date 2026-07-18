@@ -61,7 +61,8 @@ file layout:
 
 ## Current state
 
-Phases 1 and 2 are complete and Phase 3 is active. The repository contains:
+Phases 1 through 3 are complete and Phase 4 is the next migration boundary. The
+repository contains:
 
 - a Rust workspace pinned to Rust 1.97.1;
 - `agent-contracts` canonical JSON, SHA-256, and schema-version primitives;
@@ -72,15 +73,16 @@ Phases 1 and 2 are complete and Phase 3 is active. The repository contains:
   external provider roots, disabled providers, and deterministic registry
   snapshots;
 - an `agent-engine` crate for bounded, read-only repository discovery,
-  deterministic task classification and policy resolution, and workflow-plan
-  compilation over the native registry;
+  deterministic task classification and policy resolution, workflow-plan
+  compilation over the native registry, persistent package Lockfile
+  resolution/validation/diff/explanation, and locked-plan binding checks;
 - schema-aligned capability-contract type validation shared by the Python
   baseline and native normalization path;
 - Python-to-Rust byte-level differential tests covering malicious provider
   roles, optional Manifest fields, symlinks, normalization mutations,
   unbounded-size numeric SemVer components, recipe closures, discovery
-  fixtures and edge cases, policy corpora, compiled workflow plans, and
-  failure limits;
+  fixtures and edge cases, policy corpora, compiled workflow plans, package
+  Lockfile sources/lineage/tamper cases, and failure limits;
 - formatting, unit-test, Clippy, Python 3.11–3.14, Linux, and macOS
   compatibility gates in CI;
 - Rust workspace sources in source releases, Python sdists/wheels, SBOM, and
@@ -91,8 +93,11 @@ binary release artifact. The parallel CLI currently covers canonical JSON,
 hashing, the shared schema-version boundary, registry snapshots, targeted
 binding resolution, an internal recipe-closure compatibility probe, repository
 discovery, policy resolution, and plan compilation. Package-lock resolution is
-the next Phase 3 migration boundary; production CLI parity is a later phase
-gate.
+also available through the parallel CLI, including local-registry,
+relative-path, and pinned HTTPS sources, deterministic lineage, validation,
+diff, explanation, and plan freezing. Runtime execution, sessions, and
+lifecycle operations are the next Phase 4 migration boundary; production CLI
+parity remains a later phase gate.
 
 ## Cutover policy
 

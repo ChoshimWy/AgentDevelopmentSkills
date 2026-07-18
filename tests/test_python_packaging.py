@@ -73,6 +73,7 @@ class PythonPackagingTests(unittest.TestCase):
             self.assertTrue((source / "Cargo.toml").is_file())
             self.assertTrue((source / "crates/agent-contracts/src/lib.rs").is_file())
             self.assertTrue((source / "crates/agent-engine/src/lib.rs").is_file())
+            self.assertTrue((source / "crates/agent-engine/src/package_lock.rs").is_file())
             self.assertTrue((source / "crates/agent-registry/src/lib.rs").is_file())
             self.assertTrue((source / "docs/rust-migration.md").is_file())
             self.assertTrue((source / "rust-toolchain.toml").is_file())

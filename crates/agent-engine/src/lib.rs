@@ -1,5 +1,12 @@
 //! Deterministic discovery, policy, and planning engine migration path.
 
+mod package_lock;
+
+pub use package_lock::{
+    diff_package_locks, explain_package_lock, install_plan_identity_hash, resolve_package_lock,
+    schema_inventory, validate_package_lock, validate_plan_package_lock,
+};
+
 use agent_contracts::{ContractError, canonical_sha256};
 use agent_registry::{
     ManifestRegistry, RegistryError, ResolvedBinding, required_platform_capabilities,
@@ -15,6 +22,8 @@ use thiserror::Error;
 pub enum EngineError {
     #[error(transparent)]
     Contract(#[from] ContractError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error(transparent)]
     Registry(#[from] RegistryError),
     #[error("{0}")]
@@ -1129,6 +1138,22 @@ pub fn compile_plan(
     profile: &Value,
     policy: &Value,
 ) -> Result<Value, EngineError> {
+    compile_plan_with_package_lock(registry, profile, policy, None)
+}
+
+/// Compile a deterministic workflow plan and optionally freeze it to a
+/// validated package Lockfile.
+///
+/// # Errors
+/// Returns a fail-closed error for malformed policy or Lockfile inputs,
+/// registry ambiguities, missing graph references, or dependency cycles.
+#[allow(clippy::too_many_lines)]
+pub fn compile_plan_with_package_lock(
+    registry: &ManifestRegistry,
+    profile: &Value,
+    policy: &Value,
+    package_lock: Option<&Value>,
+) -> Result<Value, EngineError> {
     validate_resolved_policy(policy)?;
     let policy_object = object(policy, "resolved policy")?;
     let task = object(
@@ -1408,6 +1433,22 @@ pub fn compile_plan(
                 Value::Array(bootstrap_required),
             );
     }
+    if let Some(package_lock) = package_lock {
+        validate_package_lock(package_lock)?;
+        let lock_hash = package_lock
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                EngineError::Invalid("agent-skills-lock fingerprint is invalid".to_owned())
+            })?;
+        content
+            .as_object_mut()
+            .ok_or_else(|| EngineError::Invalid("plan content must be an object".to_owned()))?
+            .insert(
+                "package_lock_hash".to_owned(),
+                Value::String(lock_hash.to_owned()),
+            );
+    }
     let fingerprint = canonical_sha256(&content)?;
     let mut plan = content
         .as_object()
@@ -1420,6 +1461,9 @@ pub fn compile_plan(
     );
     let plan = Value::Object(plan);
     validate_compiled_plan(&plan)?;
+    if let Some(package_lock) = package_lock {
+        validate_plan_package_lock(&plan, package_lock)?;
+    }
     Ok(plan)
 }
 

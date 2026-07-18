@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from tests.support import FIXTURES, MANIFESTS, ROOT
 
@@ -13,6 +15,7 @@ from agent_workflow.discovery import DiscoveryEngine
 from agent_workflow.installation import PERSISTENT_PACKAGE_LOCK, build_install_bundle, install_bundle
 from agent_workflow.models import ContractError
 from agent_workflow.package_lock import (
+    MAX_LOCK_PACKAGES,
     diff_package_locks,
     explain_package_lock,
     resolve_package_lock,
@@ -59,6 +62,81 @@ class PackageLockTests(unittest.TestCase):
             package_source_artifact_hashes={"apple": "a" * 64},
         )
         validate_package_lock(remote)
+        uppercase_remote = deepcopy(remote)
+        apple_source = next(
+            item["source"]
+            for item in uppercase_remote["packages"]
+            if item["id"] == "apple"
+        )
+        apple_source["uri"] = apple_source["uri"].replace("https://", "HTTPS://")
+        uppercase_remote["fingerprint"] = sha256({
+            key: value
+            for key, value in uppercase_remote.items()
+            if key != "fingerprint"
+        })
+        validate_package_lock(uppercase_remote)
+        for suffix in ("?", "#", "?#"):
+            with self.subTest(empty_https_suffix=suffix):
+                empty_component = resolve_package_lock(
+                    self.apple.plan,
+                    schema_root=ROOT / "schemas",
+                    package_sources={
+                        "apple": {
+                            "kind": "https",
+                            "uri": (
+                                "https://example.test/releases/apple.zip"
+                                f"{suffix}"
+                            ),
+                        }
+                    },
+                    package_source_artifact_hashes={"apple": "a" * 64},
+                )
+                validate_package_lock(empty_component)
+        for uri in (
+            "https://[::1]:/apple.zip",
+            "https://[v1.test]/apple.zip",
+            "https://[fe80::1%25eth0]/apple.zip",
+        ):
+            with self.subTest(bracket_https_source=uri):
+                bracket_source = resolve_package_lock(
+                    self.apple.plan,
+                    schema_root=ROOT / "schemas",
+                    package_sources={
+                        "apple": {
+                            "kind": "https",
+                            "uri": uri,
+                        }
+                    },
+                    package_source_artifact_hashes={"apple": "a" * 64},
+                )
+                validate_package_lock(bracket_source)
+        for malformed in (
+            "https://[bad/a",
+            "https://]/a",
+            "./C:/apple",
+            "./C:",
+            "./C:apple",
+            "https://example.test/a\tbad",
+            r"https://example.test\evil/a",
+        ):
+            with self.subTest(malformed_source=malformed):
+                kind = "https" if malformed.startswith("https://") else "relative-path"
+                with self.assertRaises((ContractError, ValueError)):
+                    resolve_package_lock(
+                        self.apple.plan,
+                        schema_root=ROOT / "schemas",
+                        package_sources={
+                            "apple": {
+                                "kind": kind,
+                                "uri": malformed,
+                            }
+                        },
+                        package_source_artifact_hashes=(
+                            {"apple": "a" * 64}
+                            if kind == "https"
+                            else None
+                        ),
+                    )
         with self.assertRaisesRegex(ContractError, "artifact SHA-256"):
             resolve_package_lock(
                 self.apple.plan,
@@ -116,6 +194,39 @@ class PackageLockTests(unittest.TestCase):
                 with self.assertRaises(ContractError):
                     validate_package_lock(invalid)
 
+        for unsafe_path in (
+            "../escaped.schema.json",
+            r"schemas\escaped.schema.json",
+            "C:/escaped.schema.json",
+            "C:escaped.schema.json",
+        ):
+            with self.subTest(unsafe_schema_path=unsafe_path):
+                invalid = deepcopy(self.apple.package_lock)
+                invalid["schema_inventory"]["files"][0]["path"] = unsafe_path
+                invalid["schema_inventory"]["content_sha256"] = sha256(
+                    invalid["schema_inventory"]["files"]
+                )
+                invalid["fingerprint"] = sha256({
+                    key: value
+                    for key, value in invalid.items()
+                    if key != "fingerprint"
+                })
+                with self.assertRaisesRegex(ContractError, "schema path"):
+                    validate_package_lock(invalid)
+
+        excessive = deepcopy(self.apple.package_lock)
+        excessive["selection"]["platforms"] = [
+            f"platform-{index}"
+            for index in range(MAX_LOCK_PACKAGES + 1)
+        ]
+        excessive["fingerprint"] = sha256({
+            key: value
+            for key, value in excessive.items()
+            if key != "fingerprint"
+        })
+        with self.assertRaisesRegex(ContractError, "selection platforms"):
+            validate_package_lock(excessive)
+
         incompatible = deepcopy(self.apple.package_lock)
         design = next(item for item in incompatible["packages"] if item["id"] == "design")
         design["version"] = "9.0.0"
@@ -138,6 +249,35 @@ class PackageLockTests(unittest.TestCase):
         })
         with self.assertRaisesRegex(ContractError, "provider compatibility"):
             validate_package_lock(incompatible_provider)
+
+        wrong_core_kind = deepcopy(self.apple.package_lock)
+        wrong_core_kind["packages"][0]["kind"] = "platform"
+        wrong_core_kind["fingerprint"] = sha256({
+            key: value
+            for key, value in wrong_core_kind.items()
+            if key != "fingerprint"
+        })
+        with self.assertRaisesRegex(ContractError, "core identity"):
+            validate_package_lock(wrong_core_kind)
+
+        cyclic = deepcopy(self.apple.package_lock)
+        cyclic["dependencies"].append({
+            "from": "design",
+            "required_capabilities": ["implementation.apple"],
+            "requirement": "optional",
+            "to": "apple",
+            "version": ">=0.2.0 <0.3.0",
+        })
+        cyclic["dependencies"].sort(
+            key=lambda dependency: (dependency["from"], dependency["to"])
+        )
+        cyclic["fingerprint"] = sha256({
+            key: value
+            for key, value in cyclic.items()
+            if key != "fingerprint"
+        })
+        with self.assertRaisesRegex(ContractError, "cycle"):
+            validate_package_lock(cyclic)
 
     def test_diff_explain_and_lineage_are_deterministic(self) -> None:
         expanded = build_install_bundle(MANIFESTS, platforms=["apple", "desktop"]).package_lock
@@ -167,6 +307,60 @@ class PackageLockTests(unittest.TestCase):
             previous_lock=self.apple.package_lock,
         )
         self.assertEqual(successor["lineage"]["previous_lock_hash"], self.apple.package_lock["fingerprint"])
+
+    def test_schema_inventory_does_not_follow_intermediate_symlink(self) -> None:
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            schemas = root / "schemas"
+            schemas.mkdir()
+            dump(schema, schemas / "root.schema.json")
+            external = root / "external"
+            external.mkdir()
+            dump(schema, external / "linked.schema.json")
+            contracts = root / "platforms/apple/contracts"
+            contracts.parent.mkdir(parents=True)
+            contracts.symlink_to(external, target_is_directory=True)
+            inventory = schema_inventory(schemas)
+            self.assertEqual(
+                [item["path"] for item in inventory["files"]],
+                ["schemas/root.schema.json"],
+            )
+
+    def test_relative_source_does_not_follow_intermediate_file_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "platforms/apple"
+            shutil.copytree(ROOT / "platforms/apple", source)
+            external = root / "external-skills"
+            (source / "skills").rename(external)
+            (source / "skills").symlink_to(external, target_is_directory=True)
+            with self.assertRaisesRegex(ContractError, "missing or unsafe"):
+                resolve_package_lock(
+                    self.apple.plan,
+                    schema_root=ROOT / "schemas",
+                    package_sources={
+                        "apple": {
+                            "kind": "relative-path",
+                            "uri": "./platforms/apple",
+                        }
+                    },
+                    source_base=root,
+                )
+
+    def test_install_plan_tree_budget_is_enforced_before_resolution(self) -> None:
+        with patch(
+            "agent_workflow.contracts.MAX_INSTALL_TREE_ENTRIES",
+            1,
+        ):
+            with self.assertRaisesRegex(ContractError, "exceeds maximum"):
+                resolve_package_lock(
+                    self.apple.plan,
+                    schema_root=ROOT / "schemas",
+                )
 
     def test_install_persists_lock_and_modified_lock_blocks_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -21,6 +21,7 @@ dependencies = [
  "agent-contracts",
  "agent-registry",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 
