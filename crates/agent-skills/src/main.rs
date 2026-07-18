@@ -4,9 +4,10 @@ use agent_contracts::{
     MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256, load_json, require_schema_version,
 };
 use agent_engine::{
-    DiscoveryEngine, compile_plan_with_package_lock, diff_package_locks, explain_package_lock,
-    resolve_package_lock, resolve_policy, validate_compiled_plan, validate_package_lock,
-    validate_plan_package_lock, validate_upgrade_conformance_evidence, validate_upgrade_plan,
+    DiscoveryEngine, UpgradePlanRequest, compile_plan_with_package_lock, compile_upgrade_plan,
+    diff_package_locks, explain_package_lock, resolve_package_lock, resolve_policy,
+    validate_compiled_plan, validate_package_lock, validate_plan_package_lock,
+    validate_upgrade_conformance_evidence, validate_upgrade_plan,
 };
 use agent_lifecycle::{
     LifecycleError, LifecycleWorkspace, compile_source_install_bundle, inspect_doctor_baseline,
@@ -35,6 +36,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const CLI_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+const MAX_UPGRADE_MIGRATIONS: usize = 128;
+const MAX_UPGRADE_MIGRATION_BYTES: usize = MAX_CONTRACT_JSON_BYTES;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -302,6 +305,31 @@ enum Command {
     LockExplain { lockfile: PathBuf },
     /// Validate one approval-bound Upgrade Conformance Evidence v1 artifact.
     UpgradeEvidenceValidate { evidence: PathBuf },
+    /// Compile one approval-bound Upgrade Plan v1 from frozen lifecycle artifacts.
+    UpgradePlanBuild {
+        #[arg(long)]
+        current_install_plan: PathBuf,
+        #[arg(long)]
+        current_package_lock: PathBuf,
+        #[arg(long)]
+        candidate_install_plan: PathBuf,
+        #[arg(long)]
+        candidate_package_lock: PathBuf,
+        #[arg(long)]
+        evidence: PathBuf,
+        #[arg(long)]
+        rollback_point: PathBuf,
+        #[arg(long)]
+        target_root: String,
+        #[arg(long, default_value = "upgrade")]
+        action: String,
+        #[arg(long = "migration")]
+        migrations: Vec<PathBuf>,
+        #[arg(long = "removed-platform")]
+        removed_platforms: Vec<String>,
+        #[arg(long = "removed-runtime-config")]
+        removed_runtime_configs: Vec<String>,
+    },
     /// Validate one approval-bound Upgrade Plan v1 artifact.
     UpgradePlanValidate { plan: PathBuf },
     /// Inspect the read-only native Doctor baseline compatibility boundary.
@@ -1099,6 +1127,47 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             let value = load_json(evidence)?;
             validate_upgrade_conformance_evidence(&value)?;
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::UpgradePlanBuild {
+            current_install_plan,
+            current_package_lock,
+            candidate_install_plan,
+            candidate_package_lock,
+            evidence,
+            rollback_point,
+            target_root,
+            action,
+            migrations,
+            removed_platforms,
+            removed_runtime_configs,
+        } => {
+            let current_install_plan = load_json(current_install_plan)?;
+            let current_package_lock = load_json(current_package_lock)?;
+            let candidate_install_plan = load_json(candidate_install_plan)?;
+            let candidate_package_lock = load_json(candidate_package_lock)?;
+            let evidence = load_json(evidence)?;
+            let rollback_point = load_json(rollback_point)?;
+            let migrations = load_upgrade_migrations(migrations)?;
+            let value = compile_upgrade_plan(&UpgradePlanRequest {
+                action: &action,
+                target_root: &target_root,
+                current_install_plan: &current_install_plan,
+                current_package_lock: &current_package_lock,
+                candidate_install_plan: &candidate_install_plan,
+                candidate_package_lock: &candidate_package_lock,
+                conformance_evidence: &evidence,
+                rollback_point: &rollback_point,
+                migrations: &migrations,
+                removed_platforms: &removed_platforms,
+                removed_runtime_configs: &removed_runtime_configs,
+            })?;
+            let encoded = canonical_json(&value)?;
+            if encoded.len() > MAX_CONTRACT_JSON_BYTES {
+                return Err(
+                    format!("Upgrade Plan has more than {MAX_CONTRACT_JSON_BYTES} bytes").into(),
+                );
+            }
+            print!("{}", String::from_utf8(encoded)?);
         }
         Command::UpgradePlanValidate { plan } => {
             let value = load_json(plan)?;
@@ -1994,6 +2063,37 @@ fn parse_lock_sources(values: &[String]) -> Result<Map<String, Value>, Box<dyn s
     Ok(sources.into_iter().collect())
 }
 
+fn load_upgrade_migrations(paths: Vec<PathBuf>) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    if paths.len() > MAX_UPGRADE_MIGRATIONS {
+        return Err(format!("upgrade migration count exceeds {MAX_UPGRADE_MIGRATIONS}").into());
+    }
+    let mut migrations = Vec::with_capacity(paths.len());
+    let mut total_bytes = 0_usize;
+    for path in paths {
+        let migration = load_json(path)?;
+        total_bytes =
+            accumulate_upgrade_migration_bytes(total_bytes, canonical_json(&migration)?.len())?;
+        migrations.push(migration);
+    }
+    Ok(migrations)
+}
+
+fn accumulate_upgrade_migration_bytes(
+    total: usize,
+    next: usize,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let total = total
+        .checked_add(next)
+        .ok_or("upgrade migration byte count overflow")?;
+    if total > MAX_UPGRADE_MIGRATION_BYTES {
+        return Err(format!(
+            "upgrade migration inputs have more than {MAX_UPGRADE_MIGRATION_BYTES} bytes"
+        )
+        .into());
+    }
+    Ok(total)
+}
+
 fn validate_workflow_plan_and_lock(
     plan: &Value,
     lock_path: Option<&std::path::Path>,
@@ -2120,6 +2220,28 @@ mod tests {
                 "  保留 Codex 系统 Skills：是\n",
                 "  旧 iOSAgentSkills 软链：未恢复（安装时未创建持久备份）\n",
             )
+        );
+    }
+
+    #[test]
+    fn upgrade_migration_inputs_have_count_and_aggregate_limits() {
+        let too_many = vec![PathBuf::from("not-opened"); MAX_UPGRADE_MIGRATIONS + 1];
+        assert_eq!(
+            load_upgrade_migrations(too_many)
+                .expect_err("migration count must fail before reading")
+                .to_string(),
+            format!("upgrade migration count exceeds {MAX_UPGRADE_MIGRATIONS}")
+        );
+        assert_eq!(
+            accumulate_upgrade_migration_bytes(MAX_UPGRADE_MIGRATION_BYTES - 1, 1)
+                .expect("exact byte boundary"),
+            MAX_UPGRADE_MIGRATION_BYTES
+        );
+        assert_eq!(
+            accumulate_upgrade_migration_bytes(MAX_UPGRADE_MIGRATION_BYTES, 1)
+                .expect_err("aggregate byte overflow must fail")
+                .to_string(),
+            format!("upgrade migration inputs have more than {MAX_UPGRADE_MIGRATION_BYTES} bytes")
         );
     }
 }

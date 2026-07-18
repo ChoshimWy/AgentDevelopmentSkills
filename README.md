@@ -377,10 +377,20 @@ separately gated paths. As the first upgrade cutover gate, Rust now strictly
 validates Upgrade Conformance Evidence v1 and Upgrade Plan v1, including
 stable attestation semantics, exact selections/removals, permission approvals,
 external-handler identity, migration ordering, rollback identity, and
-self-consistent tampering. The non-default `upgrade-evidence-validate` and
-`upgrade-plan-validate` commands have Python differential coverage; mutating
-upgrade and rollback routing remains on the existing approval-bound path until
-the native executor passes the same gates. The installed native
+self-consistent tampering. The non-default `upgrade-plan-build` command now
+reconstructs the complete approval contract from mutually anchored current
+and candidate Install Plans/Lockfiles, Conformance evidence, rollback identity,
+and removals without reading mutable host state. It deliberately accepts only
+rollback points that prove an empty external scope, rejects migrations, and
+rejects changed Apple plans because selection alone cannot prove the target
+has no Activation ownership. Source activation/deactivation upgrades remain
+on Python until the Rust lifecycle can generate a target- and ownership-bound
+external-scope receipt. No-change, changed non-Apple, and non-activated
+partial-uninstall outputs are byte-for-byte differential-tested against
+Python; `upgrade-evidence-validate` and `upgrade-plan-validate` retain negative
+contract coverage. Mutating upgrade and rollback routing remains on the
+existing approval-bound path until the native executor passes the same gates.
+The installed native
 `agent-session` dispatch preserves
 the public `create`, `list`, `inspect`, `fingerprint`, `checkpoint`, and `gate`
 surface.

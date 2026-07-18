@@ -37,6 +37,7 @@ from agent_workflow.adapters.invocations import (
 from agent_workflow.adapters.invocations import (
     _submit_provider_invocation_at as submit_provider_invocation,
 )
+from agent_workflow.activation import apply_source_activation
 from agent_workflow.canonical_json import dump, dumps, sha256
 from agent_workflow.canonical_json import (
     MAX_CANONICAL_INTEGER_DIGITS,
@@ -55,6 +56,7 @@ from agent_workflow.installation import (
     _resolve_packages,
     build_install_bundle,
     install_bundle,
+    preview_rollback_point,
     resolve_platform_selection,
 )
 from agent_workflow.models import ContractError
@@ -2384,7 +2386,10 @@ name = "one"
             root = Path(directory)
             target = root / "codex"
             install_bundle(
-                build_install_bundle(ROOT / "platforms", platforms=["apple"]),
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["desktop"],
+                ),
                 target,
             )
             candidate = prepare_upgrade_candidate(ROOT / "platforms", target)
@@ -2413,9 +2418,445 @@ name = "one"
             )
             evidence_path = root / "upgrade-evidence.json"
             plan_path = root / "upgrade-plan.json"
+            candidate_plan_path = root / "candidate-install-plan.json"
+            candidate_lock_path = root / "candidate-package-lock.json"
+            rollback_point_path = root / "rollback-point.json"
             dump(evidence, evidence_path)
             dump(operation.plan, plan_path)
+            dump(operation.candidate.bundle.plan, candidate_plan_path)
+            dump(operation.candidate.bundle.package_lock, candidate_lock_path)
+            dump(preview_rollback_point(target), rollback_point_path)
 
+            rust_compiled_plan = self.run_rust(
+                "upgrade-plan-build",
+                "--current-install-plan",
+                str(target / ".agent-skills" / "install-lock.json"),
+                "--current-package-lock",
+                str(target / ".agent-skills" / "agent-skills.lock"),
+                "--candidate-install-plan",
+                str(candidate_plan_path),
+                "--candidate-package-lock",
+                str(candidate_lock_path),
+                "--evidence",
+                str(evidence_path),
+                "--rollback-point",
+                str(rollback_point_path),
+                "--target-root",
+                operation.plan["target_root"],
+            )
+            self.assertEqual(
+                rust_compiled_plan.returncode,
+                0,
+                rust_compiled_plan.stderr,
+            )
+            self.assertEqual(rust_compiled_plan.stdout, dumps(operation.plan))
+
+            installed_candidate_plan = deepcopy(
+                operation.candidate.bundle.plan
+            )
+            installed_candidate_plan["status"] = "installed"
+            installed_candidate_plan["fingerprint"] = sha256({
+                key: value
+                for key, value in installed_candidate_plan.items()
+                if key not in {"fingerprint", "status"}
+            })
+            dump(installed_candidate_plan, candidate_plan_path)
+            rejected_installed_candidate = self.run_rust(
+                "upgrade-plan-build",
+                "--current-install-plan",
+                str(target / ".agent-skills" / "install-lock.json"),
+                "--current-package-lock",
+                str(target / ".agent-skills" / "agent-skills.lock"),
+                "--candidate-install-plan",
+                str(candidate_plan_path),
+                "--candidate-package-lock",
+                str(candidate_lock_path),
+                "--evidence",
+                str(evidence_path),
+                "--rollback-point",
+                str(rollback_point_path),
+                "--target-root",
+                operation.plan["target_root"],
+            )
+            self.assertEqual(rejected_installed_candidate.returncode, 2)
+            self.assertEqual(rejected_installed_candidate.stdout, "")
+            dump(operation.candidate.bundle.plan, candidate_plan_path)
+
+            rejected_raw_external_scope = self.run_rust(
+                "upgrade-plan-build",
+                "--current-install-plan",
+                str(target / ".agent-skills" / "install-lock.json"),
+                "--current-package-lock",
+                str(target / ".agent-skills" / "agent-skills.lock"),
+                "--candidate-install-plan",
+                str(candidate_plan_path),
+                "--candidate-package-lock",
+                str(candidate_lock_path),
+                "--evidence",
+                str(evidence_path),
+                "--rollback-point",
+                str(rollback_point_path),
+                "--target-root",
+                operation.plan["target_root"],
+                "--external-handler",
+                "evil-handler",
+                "--external-path",
+                "user-state.txt",
+            )
+            self.assertEqual(rejected_raw_external_scope.returncode, 2)
+            self.assertEqual(rejected_raw_external_scope.stdout, "")
+
+            external_file = target / "user-state.txt"
+            external_file.write_text("preserve me\n", encoding="utf-8")
+            dump(
+                preview_rollback_point(
+                    target,
+                    external_paths=["user-state.txt"],
+                ),
+                rollback_point_path,
+            )
+            rejected_scoped_rollback = self.run_rust(
+                "upgrade-plan-build",
+                "--current-install-plan",
+                str(target / ".agent-skills" / "install-lock.json"),
+                "--current-package-lock",
+                str(target / ".agent-skills" / "agent-skills.lock"),
+                "--candidate-install-plan",
+                str(candidate_plan_path),
+                "--candidate-package-lock",
+                str(candidate_lock_path),
+                "--evidence",
+                str(evidence_path),
+                "--rollback-point",
+                str(rollback_point_path),
+                "--target-root",
+                operation.plan["target_root"],
+            )
+            self.assertEqual(rejected_scoped_rollback.returncode, 2)
+            self.assertEqual(rejected_scoped_rollback.stdout, "")
+            dump(preview_rollback_point(target), rollback_point_path)
+
+            changed_repository = root / "changed-repository"
+            for source in (
+                "disciplines",
+                "platforms",
+                "runtime-configs",
+                "schemas",
+            ):
+                shutil.copytree(ROOT / source, changed_repository / source)
+            changed_skill = (
+                changed_repository
+                / "disciplines"
+                / "review"
+                / "skills"
+                / "code-review"
+                / "SKILL.md"
+            )
+            changed_skill.write_text(
+                changed_skill.read_text(encoding="utf-8")
+                + "\nNative upgrade compiler fixture.\n",
+                encoding="utf-8",
+            )
+            changed_candidate = prepare_upgrade_candidate(
+                changed_repository / "platforms",
+                target,
+            )
+            changed_evidence = make_upgrade_conformance_evidence(
+                changed_candidate.bundle.package_lock,
+                manifest_count=19,
+                negative_contract_count=16,
+                test_count=531,
+                suite_definition_hash=sha256(
+                    ["native-upgrade-contract"]
+                ),
+                runner_sha256="1" * 64,
+                environment={
+                    "platform": "compatibility-test",
+                    "python": "3.11.0",
+                },
+                command_results=[
+                    {
+                        "command": "compatibility-suite",
+                        "exit_code": 0,
+                        "stderr_sha256": "2" * 64,
+                        "stdout_sha256": "3" * 64,
+                    }
+                ],
+            )
+            changed_operation = plan_upgrade(
+                changed_repository / "platforms",
+                target,
+                changed_evidence,
+                schema_root=changed_repository / "schemas",
+            )
+            dump(changed_candidate.bundle.plan, candidate_plan_path)
+            dump(
+                changed_candidate.bundle.package_lock,
+                candidate_lock_path,
+            )
+            dump(changed_evidence, evidence_path)
+            changed_rust_plan = self.run_rust(
+                "upgrade-plan-build",
+                "--current-install-plan",
+                str(target / ".agent-skills" / "install-lock.json"),
+                "--current-package-lock",
+                str(target / ".agent-skills" / "agent-skills.lock"),
+                "--candidate-install-plan",
+                str(candidate_plan_path),
+                "--candidate-package-lock",
+                str(candidate_lock_path),
+                "--evidence",
+                str(evidence_path),
+                "--rollback-point",
+                str(rollback_point_path),
+                "--target-root",
+                changed_operation.plan["target_root"],
+            )
+            self.assertEqual(
+                changed_rust_plan.returncode,
+                0,
+                changed_rust_plan.stderr,
+            )
+            self.assertEqual(
+                changed_rust_plan.stdout,
+                dumps(changed_operation.plan),
+            )
+            self.assertEqual(changed_operation.plan["status"], "planned")
+            self.assertTrue(changed_operation.plan["upgrade_steps"])
+
+            activated_target = root / "activated-codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["apple"],
+                    runtime_configs=["codex"],
+                ),
+                activated_target,
+            )
+            activation_lock_path = (
+                activated_target
+                / ".agent-skills"
+                / "activation-lock.json"
+            )
+            dump(
+                {
+                    "files": [],
+                    "handler": (
+                        "core.source-activation.apple-codex-v1"
+                    ),
+                    "manager": "agent-development-skills",
+                    "schema_version": "2.0",
+                },
+                activation_lock_path,
+            )
+            activation_lock_path.chmod(0o644)
+            activated_empty_scope_point = preview_rollback_point(
+                activated_target
+            )
+            apply_source_activation(
+                activated_target,
+                selected_platforms=["apple"],
+            )
+            activated_candidate = prepare_upgrade_candidate(
+                changed_repository / "platforms",
+                activated_target,
+            )
+            activated_evidence = make_upgrade_conformance_evidence(
+                activated_candidate.bundle.package_lock,
+                manifest_count=19,
+                negative_contract_count=16,
+                test_count=531,
+                suite_definition_hash=sha256(
+                    ["native-upgrade-contract"]
+                ),
+                runner_sha256="1" * 64,
+                environment={
+                    "platform": "compatibility-test",
+                    "python": "3.11.0",
+                },
+                command_results=[
+                    {
+                        "command": "compatibility-suite",
+                        "exit_code": 0,
+                        "stderr_sha256": "2" * 64,
+                        "stdout_sha256": "3" * 64,
+                    }
+                ],
+            )
+            dump(activated_candidate.bundle.plan, candidate_plan_path)
+            dump(
+                activated_candidate.bundle.package_lock,
+                candidate_lock_path,
+            )
+            dump(activated_evidence, evidence_path)
+            dump(
+                activated_empty_scope_point,
+                rollback_point_path,
+            )
+            rejected_activated_target = self.run_rust(
+                "upgrade-plan-build",
+                "--current-install-plan",
+                str(
+                    activated_target
+                    / ".agent-skills"
+                    / "install-lock.json"
+                ),
+                "--current-package-lock",
+                str(
+                    activated_target
+                    / ".agent-skills"
+                    / "agent-skills.lock"
+                ),
+                "--candidate-install-plan",
+                str(candidate_plan_path),
+                "--candidate-package-lock",
+                str(candidate_lock_path),
+                "--evidence",
+                str(evidence_path),
+                "--rollback-point",
+                str(rollback_point_path),
+                "--target-root",
+                str(activated_target.resolve()),
+            )
+            self.assertEqual(rejected_activated_target.returncode, 2)
+            self.assertEqual(rejected_activated_target.stdout, "")
+
+            dump(changed_candidate.bundle.plan, candidate_plan_path)
+            dump(
+                changed_candidate.bundle.package_lock,
+                candidate_lock_path,
+            )
+            dump(changed_evidence, evidence_path)
+            unrelated_rollback = preview_rollback_point(target)
+            unrelated_rollback["package_lock_hash"] = "f" * 64
+            unrelated_rollback["point_id"] = "rollback-" + "f" * 12
+            unrelated_rollback["fingerprint"] = sha256({
+                key: value
+                for key, value in unrelated_rollback.items()
+                if key != "fingerprint"
+            })
+            dump(unrelated_rollback, rollback_point_path)
+            rejected_unrelated_rollback = self.run_rust(
+                "upgrade-plan-build",
+                "--current-install-plan",
+                str(target / ".agent-skills" / "install-lock.json"),
+                "--current-package-lock",
+                str(target / ".agent-skills" / "agent-skills.lock"),
+                "--candidate-install-plan",
+                str(candidate_plan_path),
+                "--candidate-package-lock",
+                str(candidate_lock_path),
+                "--evidence",
+                str(evidence_path),
+                "--rollback-point",
+                str(rollback_point_path),
+                "--target-root",
+                changed_operation.plan["target_root"],
+            )
+            self.assertEqual(rejected_unrelated_rollback.returncode, 2)
+            self.assertEqual(rejected_unrelated_rollback.stdout, "")
+
+            partial_target = root / "partial-codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["desktop"],
+                ),
+                partial_target,
+            )
+            partial_candidate = prepare_upgrade_candidate(
+                ROOT / "platforms",
+                partial_target,
+                platforms=[],
+                disciplines=[],
+                runtime_configs=[],
+                core_only=True,
+            )
+            partial_evidence = make_upgrade_conformance_evidence(
+                partial_candidate.bundle.package_lock,
+                manifest_count=19,
+                negative_contract_count=16,
+                test_count=531,
+                suite_definition_hash=sha256(
+                    ["native-upgrade-contract"]
+                ),
+                runner_sha256="1" * 64,
+                environment={
+                    "platform": "compatibility-test",
+                    "python": "3.11.0",
+                },
+                command_results=[
+                    {
+                        "command": "compatibility-suite",
+                        "exit_code": 0,
+                        "stderr_sha256": "2" * 64,
+                        "stdout_sha256": "3" * 64,
+                    }
+                ],
+            )
+            partial_operation = plan_upgrade(
+                ROOT / "platforms",
+                partial_target,
+                partial_evidence,
+                schema_root=ROOT / "schemas",
+                platforms=[],
+                disciplines=[],
+                runtime_configs=[],
+                core_only=True,
+                action="partial-uninstall",
+                removed_platforms=["desktop"],
+            )
+            dump(partial_candidate.bundle.plan, candidate_plan_path)
+            dump(
+                partial_candidate.bundle.package_lock,
+                candidate_lock_path,
+            )
+            dump(partial_evidence, evidence_path)
+            dump(
+                preview_rollback_point(partial_target),
+                rollback_point_path,
+            )
+            partial_rust_plan = self.run_rust(
+                "upgrade-plan-build",
+                "--current-install-plan",
+                str(
+                    partial_target
+                    / ".agent-skills"
+                    / "install-lock.json"
+                ),
+                "--current-package-lock",
+                str(
+                    partial_target
+                    / ".agent-skills"
+                    / "agent-skills.lock"
+                ),
+                "--candidate-install-plan",
+                str(candidate_plan_path),
+                "--candidate-package-lock",
+                str(candidate_lock_path),
+                "--evidence",
+                str(evidence_path),
+                "--rollback-point",
+                str(rollback_point_path),
+                "--target-root",
+                partial_operation.plan["target_root"],
+                "--action",
+                "partial-uninstall",
+                "--removed-platform",
+                "desktop",
+            )
+            self.assertEqual(
+                partial_rust_plan.returncode,
+                0,
+                partial_rust_plan.stderr,
+            )
+            self.assertEqual(
+                partial_rust_plan.stdout,
+                dumps(partial_operation.plan),
+            )
+
+            dump(evidence, evidence_path)
+            dump(operation.plan, plan_path)
             rust_evidence = self.run_rust(
                 "upgrade-evidence-validate",
                 str(evidence_path),

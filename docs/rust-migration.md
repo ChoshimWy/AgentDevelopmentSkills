@@ -330,11 +330,21 @@ Python-free. The next upgrade slice now validates Upgrade Conformance Evidence
 v1 and Upgrade Plan v1 natively. It rejects unknown fields, unstable command,
 selection, migration, or step ordering, stale attestations, malformed
 permission approvals, invalid external-handler/rollback identities, and
-self-consistent semantic tampering. The non-default
-`upgrade-evidence-validate` and `upgrade-plan-validate` commands are
-byte-differential-tested against Python. Mutating upgrade/rollback execution
-still remains behind the existing Python approval gate until the Rust executor
-binds these validated artifacts to the lifecycle transaction. Doctor,
+self-consistent semantic tampering. The non-default `upgrade-plan-build`
+command now compiles the complete Plan from frozen, mutually anchored current
+and candidate Install Plans/Lockfiles, Conformance evidence, rollback point,
+and removals. The compiler currently accepts only rollback points whose
+external-state fingerprint proves an empty scope, rejects every migration,
+and rejects semantically changed Apple plans because frozen selection alone
+cannot prove the target has no Activation ownership. Source
+activation/deactivation upgrades fail closed and remain on Python until the
+Rust lifecycle emits a fingerprinted receipt binding target, trusted handler,
+exact paths, and Activation ownership. No-change, non-Apple changed, and
+non-activated partial-uninstall results are byte-differential-tested against
+Python, while `upgrade-evidence-validate` and `upgrade-plan-validate` retain
+negative contract coverage. Mutating upgrade/rollback execution still remains
+behind the existing Python approval gate until the Rust executor binds these
+validated artifacts to the lifecycle transaction. Doctor,
 uninstall, and source activation already have native compatibility commands
 with differential, tamper, concurrency, rollback, and independent-review
 evidence; their remaining hosted public CLI cutovers stay separate from the
