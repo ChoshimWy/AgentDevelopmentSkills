@@ -89,6 +89,12 @@ contains:
   Invocation v1 handoff with frozen execution permissions, single
   hashed-token claims, hard deadlines, atomic result publication, and
   explicit request-ID selection for Recorded Runtime consumption;
+- an `agent-lifecycle` crate with the first read-only Doctor compatibility
+  slice: safe target acquisition, interrupted-transaction residue discovery,
+  managed-root layout checks, Install/Persistent Lock anchoring, and runtime
+  Schema inventory comparison. It holds directory capabilities and opens
+  contract files without following symlinks, and it never repairs or writes
+  the inspected installation;
 - schema-aligned capability-contract type validation shared by the Python
   baseline and native normalization path;
 - Python-to-Rust byte-level differential tests covering malicious provider
@@ -145,6 +151,16 @@ package code. It reads only a caller-supplied, owner-private, high-entropy
 transport claim token. After a crash around atomic publication, the host must
 inspect the request before retrying claim or submit. Production CLI cutover
 and host-specific live Provider execution remain later phase gates.
+
+The native lifecycle lane is also deliberately incomplete. Its current
+`doctor-baseline` command emits a non-public compatibility projection of
+existing Doctor checks so differential tests can freeze read-only semantics;
+it writes canonical JSON to stdout and exits with status 2 whenever any
+projected check fails, matching the production Doctor shell contract.
+Package/Skill/AGENTS/Binding/permission/activation integrity, rollback-point
+validation, full Doctor Report v1 emission, and every mutating lifecycle
+transaction remain on the Python production path until their own differential,
+tamper, concurrency, rollback, and independent-review gates pass.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

@@ -6,6 +6,7 @@ use agent_engine::{
     resolve_package_lock, resolve_policy, validate_compiled_plan, validate_package_lock,
     validate_plan_package_lock,
 };
+use agent_lifecycle::inspect_doctor_baseline;
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
     attach_adapter_result, build_adapter_request, claim_provider_invocation,
@@ -138,6 +139,12 @@ enum Command {
     LockDiff { before: PathBuf, after: PathBuf },
     /// Explain one persistent package Lockfile.
     LockExplain { lockfile: PathBuf },
+    /// Inspect the read-only native Doctor baseline compatibility boundary.
+    DoctorBaseline {
+        target_root: PathBuf,
+        #[arg(long, default_value = "schemas")]
+        schemas: PathBuf,
+    },
     /// Execute a deterministic native fake-adapter workflow runtime.
     RuntimeExecute {
         plan: PathBuf,
@@ -372,7 +379,7 @@ enum Command {
 }
 
 #[allow(clippy::too_many_lines)]
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<i32, Box<dyn std::error::Error>> {
     match Cli::parse().command {
         Command::Canonicalize { artifact } => {
             let value = load_json(artifact)?;
@@ -552,6 +559,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let value = load_json(lockfile)?;
             let value = explain_package_lock(&value)?;
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::DoctorBaseline {
+            target_root,
+            schemas,
+        } => {
+            let value = inspect_doctor_baseline(target_root, schemas)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+            if value
+                .get("checks")
+                .and_then(Value::as_array)
+                .is_some_and(|checks| {
+                    checks
+                        .iter()
+                        .any(|check| check.get("status").and_then(Value::as_str) == Some("failed"))
+                })
+            {
+                return Ok(2);
+            }
         }
         Command::RuntimeExecute {
             plan,
@@ -1010,7 +1035,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
     }
-    Ok(())
+    Ok(0)
 }
 
 fn parse_lock_sources(values: &[String]) -> Result<Map<String, Value>, Box<dyn std::error::Error>> {
@@ -1088,8 +1113,12 @@ fn parse_source_hashes(
 }
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("{error}");
-        std::process::exit(2);
+    match run() {
+        Ok(0) => {}
+        Ok(exit_code) => std::process::exit(exit_code),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
     }
 }

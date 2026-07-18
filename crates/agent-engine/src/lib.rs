@@ -4,7 +4,7 @@ mod package_lock;
 
 pub use package_lock::{
     diff_package_locks, explain_package_lock, install_plan_identity_hash, resolve_package_lock,
-    schema_inventory, validate_package_lock, validate_plan_package_lock,
+    schema_inventory, validate_install_plan, validate_package_lock, validate_plan_package_lock,
 };
 
 use agent_contracts::{ContractError, canonical_sha256};

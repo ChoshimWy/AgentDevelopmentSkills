@@ -1,8 +1,11 @@
 //! Persistent deterministic package Lockfile compatibility.
 
 use super::{EngineError, invalid};
-use agent_contracts::{canonical_sha256, load_json};
+use agent_contracts::{MAX_CONTRACT_JSON_BYTES, canonical_sha256, parse_json};
 use agent_registry::satisfies;
+use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, OpenOptions};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,83 +42,65 @@ pub fn install_plan_identity_hash(install_plan: &Value) -> Result<String, Engine
 /// Returns a fail-closed error for unsafe roots, symlinks, malformed schemas,
 /// unsupported drafts, excessive directory breadth, or I/O failures.
 pub fn schema_inventory(schema_root: impl AsRef<Path>) -> Result<Value, EngineError> {
-    let root = schema_root.as_ref();
-    let metadata = std::fs::symlink_metadata(root).map_err(|error| {
-        EngineError::Invalid(format!(
-            "schema root is missing or unsafe: {}: {error}",
-            root.display()
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return invalid(format!(
-            "schema root is missing or unsafe: {}",
-            root.display()
-        ));
-    }
+    let root = lexical_absolute(schema_root.as_ref())?;
     let root_is_schemas = root.file_name().is_some_and(|name| name == "schemas");
-    let repository_root = if root_is_schemas {
+    let repository_root: &Path = if root_is_schemas {
         root.parent().ok_or_else(|| {
             EngineError::Invalid("schema root has no repository parent".to_owned())
         })?
     } else {
-        root
+        &root
     };
-    let mut candidates = BTreeSet::new();
+    let repository_directory = open_schema_root(repository_root)?;
+    let root_directory = if root_is_schemas {
+        open_schema_child_directory(&repository_directory, "schemas", true)?.ok_or_else(|| {
+            EngineError::Invalid(format!(
+                "schema root is missing or unsafe: {}",
+                root.display()
+            ))
+        })?
+    } else {
+        repository_directory.try_clone()?
+    };
+    let mut candidates = BTreeMap::new();
     let mut entry_count = 0_usize;
     if root_is_schemas {
-        collect_schema_files(root, &mut candidates, &mut entry_count)?;
+        collect_schema_files_cap(
+            &root_directory,
+            Path::new("schemas"),
+            &mut candidates,
+            &mut entry_count,
+        )?;
         for (container, children) in [
             ("disciplines", &["contracts"][..]),
             ("platforms", &["contracts", "config"][..]),
             ("stacks", &["contracts"][..]),
         ] {
-            collect_nested_schema_files(
-                &repository_root.join(container),
+            collect_nested_schema_files_cap(
+                &repository_directory,
+                container,
                 children,
                 &mut candidates,
                 &mut entry_count,
             )?;
         }
     } else {
-        collect_schema_files(root, &mut candidates, &mut entry_count)?;
+        collect_schema_files_cap(
+            &root_directory,
+            Path::new(""),
+            &mut candidates,
+            &mut entry_count,
+        )?;
     }
     if candidates.len() > MAX_LOCK_SCHEMAS {
         return invalid(format!(
             "schema inventory exceeds maximum of {MAX_LOCK_SCHEMAS} files"
         ));
     }
-    let mut files = Vec::with_capacity(candidates.len());
-    for path in candidates {
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return invalid(format!(
-                "schema file is unsafe: {}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            ));
-        }
-        let value = load_json(&path).map_err(|error| {
-            EngineError::Invalid(format!(
-                "schema file is invalid: {}: {error}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            ))
-        })?;
-        if value.get("$schema").and_then(Value::as_str)
-            != Some("https://json-schema.org/draft/2020-12/schema")
-        {
-            return invalid(format!(
-                "schema file has unsupported draft: {}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            ));
-        }
-        let relative = path
-            .strip_prefix(repository_root)
-            .map_err(|_| EngineError::Invalid("schema file escapes repository root".to_owned()))?;
-        let relative = portable_relative_path(relative)?;
-        files.push(json!({
-            "path": relative,
-            "sha256": file_sha256(&path)?,
-        }));
-    }
+    let files = candidates
+        .into_iter()
+        .map(|(path, sha256)| json!({"path": path, "sha256": sha256}))
+        .collect::<Vec<_>>();
     if files.is_empty() {
         return invalid("schema inventory must not be empty");
     }
@@ -143,7 +128,7 @@ pub fn resolve_package_lock(
     source_base: impl AsRef<Path>,
     previous_lock: Option<&Value>,
 ) -> Result<Value, EngineError> {
-    validate_install_plan_projection(install_plan)?;
+    validate_install_plan(install_plan)?;
     let plan = object(install_plan, "Install Plan")?;
     if plan.get("lock_schema_version").and_then(Value::as_str) != Some("2.0") {
         return invalid("persistent package lock requires Install Plan/Lock v2 metadata");
@@ -841,8 +826,14 @@ pub fn validate_plan_package_lock(plan: &Value, package_lock: &Value) -> Result<
     Ok(())
 }
 
+/// Validate the frozen Install Plan v2 projection consumed by native lifecycle
+/// and package-Lock operations.
+///
+/// # Errors
+/// Returns a fail-closed error for malformed identity, package closure, assets,
+/// bindings, permissions, instructions, or fingerprint fields.
 #[allow(clippy::too_many_lines)]
-fn validate_install_plan_projection(value: &Value) -> Result<(), EngineError> {
+pub fn validate_install_plan(value: &Value) -> Result<(), EngineError> {
     let plan = object(value, "Install Plan")?;
     for field in [
         "asset_summary",
@@ -1989,92 +1980,217 @@ fn validate_dependency_acyclic(
     Ok(())
 }
 
-fn collect_schema_files(
-    directory: &Path,
-    candidates: &mut BTreeSet<PathBuf>,
+fn collect_schema_files_cap(
+    directory: &Dir,
+    relative_directory: &Path,
+    candidates: &mut BTreeMap<String, String>,
     entry_count: &mut usize,
 ) -> Result<(), EngineError> {
-    if !directory.exists() {
-        return Ok(());
-    }
-    let metadata = std::fs::symlink_metadata(directory)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return invalid(format!(
-            "schema directory is unsafe: {}",
-            directory.display()
-        ));
-    }
-    for entry in std::fs::read_dir(directory)? {
+    for entry in directory.entries()? {
         let entry = entry?;
-        *entry_count = entry_count.checked_add(1).ok_or_else(|| {
-            EngineError::Invalid("schema directory entry counter overflow".to_owned())
-        })?;
-        if *entry_count > MAX_SCHEMA_DIRECTORY_ENTRIES {
-            return invalid(format!(
-                "schema inventory exceeds maximum of {MAX_SCHEMA_DIRECTORY_ENTRIES} directory entries"
-            ));
+        reserve_schema_entry(entry_count)?;
+        let name = entry.file_name();
+        let Some(name_text) = name.to_str() else {
+            return invalid("schema inventory contains a non-UTF-8 path");
+        };
+        if !name_text.ends_with(".schema.json") {
+            continue;
         }
         let file_type = entry.file_type()?;
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".schema.json"))
+        if file_type.is_symlink() || !file_type.is_file() {
+            return invalid(format!("schema file is unsafe: {name_text}"));
+        }
+        let relative = relative_directory.join(name_text);
+        let portable = portable_relative_path(&relative)?;
+        let bytes = read_schema_file(directory, &name, name_text)?;
+        let value = parse_json(&bytes).map_err(|error| {
+            EngineError::Invalid(format!("schema file is invalid: {name_text}: {error}"))
+        })?;
+        if value.get("$schema").and_then(Value::as_str)
+            != Some("https://json-schema.org/draft/2020-12/schema")
         {
-            if file_type.is_symlink() || !file_type.is_file() {
-                return invalid(format!(
-                    "schema file is unsafe: {}",
-                    path.file_name().unwrap_or_default().to_string_lossy()
-                ));
-            }
-            candidates.insert(path);
+            return invalid(format!("schema file has unsupported draft: {name_text}"));
+        }
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        if candidates.insert(portable, sha256).is_some() {
+            return invalid("schema inventory contains duplicate paths");
         }
     }
     Ok(())
 }
 
-fn collect_nested_schema_files(
-    container: &Path,
+fn collect_nested_schema_files_cap(
+    repository: &Dir,
+    container_name: &str,
     children: &[&str],
-    candidates: &mut BTreeSet<PathBuf>,
+    candidates: &mut BTreeMap<String, String>,
     entry_count: &mut usize,
 ) -> Result<(), EngineError> {
-    if !container.exists() {
+    let Some(container) = open_schema_child_directory(repository, container_name, true)? else {
         return Ok(());
-    }
-    let metadata = std::fs::symlink_metadata(container)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return invalid(format!(
-            "schema directory is unsafe: {}",
-            container.display()
-        ));
-    }
-    for entry in std::fs::read_dir(container)? {
+    };
+    for entry in container.entries()? {
         let entry = entry?;
-        *entry_count = entry_count.checked_add(1).ok_or_else(|| {
-            EngineError::Invalid("schema directory entry counter overflow".to_owned())
-        })?;
-        if *entry_count > MAX_SCHEMA_DIRECTORY_ENTRIES {
-            return invalid(format!(
-                "schema inventory exceeds maximum of {MAX_SCHEMA_DIRECTORY_ENTRIES} directory entries"
-            ));
-        }
+        reserve_schema_entry(entry_count)?;
         let file_type = entry.file_type()?;
         if file_type.is_symlink() || !file_type.is_dir() {
             continue;
         }
+        let package_name = entry.file_name();
+        let Some(package_text) = package_name.to_str() else {
+            return invalid("schema inventory contains a non-UTF-8 path");
+        };
+        let package =
+            open_schema_child_directory(&container, package_text, false)?.ok_or_else(|| {
+                EngineError::Invalid("schema package changed while opening".to_owned())
+            })?;
         for child in children {
-            let nested = entry.path().join(child);
-            if nested.exists() {
-                let metadata = std::fs::symlink_metadata(&nested)?;
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    continue;
-                }
-                collect_schema_files(&nested, candidates, entry_count)?;
-            }
+            let Some(nested) = open_schema_child_directory(&package, child, false)? else {
+                continue;
+            };
+            collect_schema_files_cap(
+                &nested,
+                &Path::new(container_name).join(package_text).join(child),
+                candidates,
+                entry_count,
+            )?;
         }
     }
     Ok(())
+}
+
+fn reserve_schema_entry(entry_count: &mut usize) -> Result<(), EngineError> {
+    *entry_count = entry_count.checked_add(1).ok_or_else(|| {
+        EngineError::Invalid("schema directory entry counter overflow".to_owned())
+    })?;
+    if *entry_count > MAX_SCHEMA_DIRECTORY_ENTRIES {
+        return invalid(format!(
+            "schema inventory exceeds maximum of {MAX_SCHEMA_DIRECTORY_ENTRIES} directory entries"
+        ));
+    }
+    Ok(())
+}
+
+fn open_schema_root(path: &Path) -> Result<Dir, EngineError> {
+    let before = std::fs::symlink_metadata(path).map_err(|error| {
+        EngineError::Invalid(format!(
+            "schema root is missing or unsafe: {}: {error}",
+            path.display()
+        ))
+    })?;
+    if before.file_type().is_symlink() || !before.is_dir() {
+        return invalid(format!(
+            "schema root is missing or unsafe: {}",
+            path.display()
+        ));
+    }
+    let directory = Dir::open_ambient_dir(path, ambient_authority())?;
+    let opened = directory.dir_metadata()?;
+    let after = std::fs::symlink_metadata(path)?;
+    if after.file_type().is_symlink()
+        || !same_schema_object_std_cap(&before, &opened)
+        || !same_schema_object_std_cap(&after, &opened)
+    {
+        return invalid(format!(
+            "schema root changed while opening: {}",
+            path.display()
+        ));
+    }
+    Ok(directory)
+}
+
+fn open_schema_child_directory(
+    parent: &Dir,
+    name: &str,
+    reject_unsafe: bool,
+) -> Result<Option<Dir>, EngineError> {
+    let before = match parent.symlink_metadata(name) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if before.file_type().is_symlink() || !before.is_dir() {
+        if reject_unsafe {
+            return invalid(format!("schema directory is unsafe: {name}"));
+        }
+        return Ok(None);
+    }
+    let directory = parent.open_dir_nofollow(name)?;
+    let opened = directory.dir_metadata()?;
+    let after = parent.symlink_metadata(name)?;
+    if after.file_type().is_symlink()
+        || !same_schema_object_cap(&before, &opened)
+        || !same_schema_object_cap(&after, &opened)
+    {
+        return invalid(format!("schema directory changed while opening: {name}"));
+    }
+    Ok(Some(directory))
+}
+
+fn read_schema_file(
+    directory: &Dir,
+    name: &std::ffi::OsStr,
+    display_name: &str,
+) -> Result<Vec<u8>, EngineError> {
+    read_schema_file_with_hooks(directory, name, display_name, || Ok(()), || Ok(()))
+}
+
+fn read_schema_file_with_hooks(
+    directory: &Dir,
+    name: &std::ffi::OsStr,
+    display_name: &str,
+    before_open: impl FnOnce() -> Result<(), EngineError>,
+    after_open: impl FnOnce() -> Result<(), EngineError>,
+) -> Result<Vec<u8>, EngineError> {
+    let before = directory.symlink_metadata(name)?;
+    if before.file_type().is_symlink() || !before.is_file() {
+        return invalid(format!("schema file is unsafe: {display_name}"));
+    }
+    before_open()?;
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    configure_schema_nofollow(&mut options);
+    let mut file = directory.open_with(name, &options)?;
+    let opened = file.metadata()?;
+    after_open()?;
+    let current = directory.symlink_metadata(name)?;
+    if current.file_type().is_symlink()
+        || !current.is_file()
+        || !same_schema_object_cap(&before, &opened)
+        || !same_schema_object_cap(&current, &opened)
+    {
+        return invalid(format!("schema file changed while opening: {display_name}"));
+    }
+    if opened.len() > MAX_CONTRACT_JSON_BYTES as u64 {
+        return invalid(format!(
+            "schema file is invalid: {display_name}: contract input has more than {MAX_CONTRACT_JSON_BYTES} bytes"
+        ));
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(opened.len())
+            .unwrap_or(MAX_CONTRACT_JSON_BYTES)
+            .min(MAX_CONTRACT_JSON_BYTES),
+    );
+    file.by_ref()
+        .take((MAX_CONTRACT_JSON_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CONTRACT_JSON_BYTES {
+        return invalid(format!(
+            "schema file is invalid: {display_name}: contract input has more than {MAX_CONTRACT_JSON_BYTES} bytes"
+        ));
+    }
+    let after_file = file.metadata()?;
+    let after_path = directory.symlink_metadata(name)?;
+    if after_path.file_type().is_symlink()
+        || !after_path.is_file()
+        || !same_schema_object_cap(&opened, &after_file)
+        || !same_schema_object_cap(&opened, &after_path)
+        || !same_schema_content_state(&opened, &after_file)
+        || !same_schema_content_state(&opened, &after_path)
+    {
+        return invalid(format!("schema file changed while reading: {display_name}"));
+    }
+    Ok(bytes)
 }
 
 fn reject_unknown_override_keys(
@@ -2349,6 +2465,118 @@ fn is_valid_bracket_host(value: &str) -> bool {
         && !address.is_empty()
 }
 
+fn lexical_absolute(path: &Path) -> Result<PathBuf, EngineError> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+#[cfg(unix)]
+fn configure_schema_nofollow(options: &mut OpenOptions) {
+    use cap_std::fs::OpenOptionsExt as _;
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+}
+
+#[cfg(windows)]
+fn configure_schema_nofollow(options: &mut OpenOptions) {
+    use cap_std::fs::OpenOptionsExt as _;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_schema_nofollow(_options: &mut OpenOptions) {}
+
+#[cfg(unix)]
+fn same_schema_object_std_cap(
+    standard: &std::fs::Metadata,
+    capability: &cap_std::fs::Metadata,
+) -> bool {
+    use cap_std::fs::MetadataExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+    standard.dev() == capability.dev() && standard.ino() == capability.ino()
+}
+
+#[cfg(unix)]
+fn same_schema_object_cap(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
+    use cap_std::fs::MetadataExt as _;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(unix)]
+fn same_schema_content_state(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
+    use cap_std::fs::MetadataExt as _;
+    left.size() == right.size()
+        && left.mtime() == right.mtime()
+        && left.mtime_nsec() == right.mtime_nsec()
+        && left.ctime() == right.ctime()
+        && left.ctime_nsec() == right.ctime_nsec()
+}
+
+#[cfg(windows)]
+fn same_schema_object_std_cap(
+    standard: &std::fs::Metadata,
+    capability: &cap_std::fs::Metadata,
+) -> bool {
+    use cap_std::fs::MetadataExt as _;
+    use std::os::windows::fs::MetadataExt as _;
+    matches!(
+        (
+            standard.volume_serial_number(),
+            standard.file_index(),
+            capability.volume_serial_number(),
+            capability.file_index(),
+        ),
+        (Some(left_volume), Some(left_index), Some(right_volume), Some(right_index))
+            if left_volume == right_volume && left_index == right_index
+    )
+}
+
+#[cfg(windows)]
+fn same_schema_object_cap(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
+    use cap_std::fs::MetadataExt as _;
+    matches!(
+        (
+            left.volume_serial_number(),
+            left.file_index(),
+            right.volume_serial_number(),
+            right.file_index(),
+        ),
+        (Some(left_volume), Some(left_index), Some(right_volume), Some(right_index))
+            if left_volume == right_volume && left_index == right_index
+    )
+}
+
+#[cfg(windows)]
+fn same_schema_content_state(left: &cap_std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
+    left.len() == right.len()
+        && left.modified().ok().is_some()
+        && left.modified().ok() == right.modified().ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_schema_object_std_cap(
+    _standard: &std::fs::Metadata,
+    _capability: &cap_std::fs::Metadata,
+) -> bool {
+    false
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_schema_object_cap(_left: &cap_std::fs::Metadata, _right: &cap_std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_schema_content_state(
+    _left: &cap_std::fs::Metadata,
+    _right: &cap_std::fs::Metadata,
+) -> bool {
+    false
+}
+
 fn portable_relative_path(path: &Path) -> Result<String, EngineError> {
     let mut parts = Vec::new();
     for component in path.components() {
@@ -2395,7 +2623,33 @@ const fn executable_mode(_metadata: &std::fs::Metadata) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_safe_contract_path, is_safe_https_uri, is_safe_relative_uri};
+    use super::{
+        MAX_CONTRACT_JSON_BYTES, is_safe_contract_path, is_safe_https_uri, is_safe_relative_uri,
+        read_schema_file_with_hooks, schema_inventory,
+    };
+    use cap_std::ambient_authority;
+    use cap_std::fs::Dir;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn temporary_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "agent-engine-schema-{label}-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).expect("create schema test root");
+        root
+    }
+
+    fn schema_bytes(title: &str) -> Vec<u8> {
+        format!(
+            "{{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"title\":\"{title}\",\"type\":\"object\"}}\n"
+        )
+        .into_bytes()
+    }
 
     #[test]
     fn source_boundaries_are_fail_closed() {
@@ -2414,5 +2668,74 @@ mod tests {
         assert!(is_safe_contract_path("灯:example.schema.json"));
         assert!(!is_safe_contract_path("../schemas/example.schema.json"));
         assert!(!is_safe_contract_path("C:example.schema.json"));
+    }
+
+    #[test]
+    fn schema_inventory_rejects_oversized_file_before_reading() {
+        let root = temporary_root("oversized");
+        let path = root.join("huge.schema.json");
+        let file = std::fs::File::create(&path).expect("create oversized schema");
+        file.set_len((MAX_CONTRACT_JSON_BYTES + 1) as u64)
+            .expect("make sparse oversized schema");
+        let error = schema_inventory(&root).expect_err("oversized schema must fail");
+        assert!(error.to_string().contains("more than"));
+        std::fs::remove_dir_all(root).expect("remove schema test root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema_file_symlink_swap_and_concurrent_replacement_fail_closed() {
+        use std::ffi::OsStr;
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_root("swap");
+        let path = root.join("target.schema.json");
+        let external = root.parent().expect("schema root parent").join(format!(
+            "agent-engine-schema-external-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, schema_bytes("original")).expect("write original schema");
+        std::fs::write(&external, schema_bytes("external")).expect("write external schema");
+        let directory =
+            Dir::open_ambient_dir(&root, ambient_authority()).expect("open schema test root");
+        let swap_path = path.clone();
+        let external_path = external.clone();
+        let error = read_schema_file_with_hooks(
+            &directory,
+            OsStr::new("target.schema.json"),
+            "target.schema.json",
+            move || {
+                std::fs::remove_file(&swap_path)?;
+                symlink(&external_path, &swap_path)?;
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .expect_err("symlink swap must fail");
+        assert!(!error.to_string().is_empty());
+        std::fs::remove_file(&path).expect("remove swapped schema");
+
+        std::fs::write(&path, schema_bytes("original")).expect("rewrite original schema");
+        let replacement = root.join("replacement.schema.json");
+        std::fs::write(&replacement, schema_bytes("replacement"))
+            .expect("write replacement schema");
+        let replace_path = path.clone();
+        let error = read_schema_file_with_hooks(
+            &directory,
+            OsStr::new("target.schema.json"),
+            "target.schema.json",
+            || Ok(()),
+            move || {
+                std::fs::rename(&replacement, &replace_path)?;
+                Ok(())
+            },
+        )
+        .expect_err("concurrent replacement must fail");
+        assert!(error.to_string().contains("changed"));
+
+        drop(directory);
+        std::fs::remove_dir_all(root).expect("remove schema test root");
+        std::fs::remove_file(external).expect("remove external schema");
     }
 }

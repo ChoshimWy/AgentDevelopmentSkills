@@ -20,8 +20,24 @@ version = "0.2.0"
 dependencies = [
  "agent-contracts",
  "agent-registry",
+ "cap-fs-ext",
+ "cap-std",
+ "libc",
  "serde_json",
  "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "agent-lifecycle"
+version = "0.2.0"
+dependencies = [
+ "agent-contracts",
+ "agent-engine",
+ "cap-fs-ext",
+ "cap-std",
+ "libc",
+ "serde_json",
  "thiserror",
 ]
 
@@ -56,6 +72,7 @@ version = "0.2.0"
 dependencies = [
  "agent-contracts",
  "agent-engine",
+ "agent-lifecycle",
  "agent-registry",
  "agent-runtime",
  "clap",

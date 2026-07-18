@@ -2,6 +2,7 @@
 members = [
     "crates/agent-contracts",
     "crates/agent-engine",
+    "crates/agent-lifecycle",
     "crates/agent-registry",
     "crates/agent-runtime",
     "crates/agent-skills",

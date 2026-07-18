@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -42,7 +43,8 @@ from agent_workflow.canonical_json import (
 )
 from agent_workflow.discovery import DiscoveryEngine
 from agent_workflow.contracts import validate_worktree_session_context
-from agent_workflow.installation import build_install_bundle
+from agent_workflow.doctor import diagnose_install
+from agent_workflow.installation import build_install_bundle, install_bundle
 from agent_workflow.models import ContractError
 from agent_workflow.package_lock import (
     MAX_LOCK_PACKAGES,
@@ -1366,6 +1368,153 @@ class RustCompatibilityTests(unittest.TestCase):
                     )
                     self.assertEqual(rejected.returncode, 2)
                     self.assertEqual(rejected.stdout, "")
+
+    def test_doctor_baseline_matches_python_and_remains_read_only(self) -> None:
+        check_ids = {
+            "filesystem.target",
+            "recovery.residue",
+            "filesystem.layout",
+            "install.lock",
+            "lock.persistent",
+            "schema.inventory",
+        }
+
+        def python_projection(target: Path) -> dict:
+            report = diagnose_install(target, schema_root=ROOT / "schemas")
+            return {
+                "checks": [
+                    check
+                    for check in report["checks"]
+                    if check["id"] in check_ids
+                ],
+                "install": report["install"],
+                "recovery": report["recovery"],
+                "target_root": report["target_root"],
+            }
+
+        def normalize_failures(value: dict) -> dict:
+            normalized = deepcopy(value)
+            normalized.pop("fingerprint", None)
+            for check in normalized["checks"]:
+                if check["status"] == "failed":
+                    check["details"] = {"errors": ["failed"]}
+            return normalized
+
+        def filesystem_identity(root: Path) -> list[tuple]:
+            if root.is_symlink():
+                return [("symlink", ".", os.readlink(root))]
+            if not root.exists():
+                return []
+            entries: list[tuple] = []
+            for path in [root, *sorted(root.rglob("*"))]:
+                relative = (
+                    "."
+                    if path == root
+                    else path.relative_to(root).as_posix()
+                )
+                mode = path.lstat().st_mode & 0o777
+                if path.is_symlink():
+                    entries.append(
+                        ("symlink", relative, mode, os.readlink(path))
+                    )
+                elif path.is_dir():
+                    entries.append(("directory", relative, mode))
+                else:
+                    entries.append(
+                        (
+                            "file",
+                            relative,
+                            mode,
+                            hashlib.sha256(path.read_bytes()).hexdigest(),
+                        )
+                    )
+            return entries
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["apple", "desktop"],
+                ),
+                target,
+            )
+
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            actual = json.loads(result.stdout)
+            actual.pop("fingerprint")
+            self.assertEqual(actual, expected)
+            self.assertEqual(filesystem_identity(target), before)
+
+            residue = target / ".agent-skills-stage-interrupted"
+            residue.mkdir()
+            residue_before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(
+                normalize_failures(json.loads(result.stdout)),
+                normalize_failures(expected),
+            )
+            self.assertEqual(filesystem_identity(target), residue_before)
+            residue.rmdir()
+
+            package_lock = (
+                target / ".agent-skills" / "agent-skills.lock"
+            )
+            package_lock.write_text("{}\n", encoding="utf-8")
+            tampered_before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(
+                normalize_failures(json.loads(result.stdout)),
+                normalize_failures(expected),
+            )
+            self.assertEqual(filesystem_identity(target), tampered_before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            real = root / "real"
+            real.mkdir()
+            linked = root / "linked"
+            linked.symlink_to(real, target_is_directory=True)
+            before = filesystem_identity(linked)
+            expected = python_projection(linked)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(linked),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(
+                normalize_failures(json.loads(result.stdout)),
+                normalize_failures(expected),
+            )
+            self.assertEqual(filesystem_identity(linked), before)
 
     def test_package_lock_sources_lineage_and_tamper_boundaries_match_python(
         self,

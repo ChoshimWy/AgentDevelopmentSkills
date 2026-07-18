@@ -107,6 +107,8 @@ cargo run --locked -p agent-skills-rs -- \
 cargo run --locked -p agent-skills-rs -- \
   lock-validate /path/to/agent-skills.lock
 cargo run --locked -p agent-skills-rs -- \
+  doctor-baseline /path/to/installed-root --schemas schemas
+cargo run --locked -p agent-skills-rs -- \
   runtime-execute /path/to/workflow-plan.json \
   --behaviors /path/to/fake-behaviors.json
 cargo run --locked -p agent-skills-rs -- \
@@ -181,8 +183,14 @@ still owns actual Provider execution: Core does not discover or read Provider
 credentials, execute a binding or package code, or make network calls. It
 reads only a caller-supplied, owner-private, high-entropy transport claim
 token. After a failure around result publication, inspect the request before
-retrying claim or submit. Core also does not create commits, change staging,
-switch the production CLI, or make installation changes.
+retrying claim or submit. The first native lifecycle slice now provides a
+read-only Doctor compatibility projection for the safe target, recovery
+residue, managed layout, Install/Persistent Lock anchors, and runtime Schema
+inventory. It holds directory capabilities and opens contract files without
+following symlinks; it does not repair, install, upgrade, roll back, uninstall,
+or otherwise write the target. Failed projected checks keep canonical JSON on
+stdout and return exit status 2. Core also does not create commits, change
+staging, switch the production CLI, or make installation changes.
 
 ## Release governance
 
