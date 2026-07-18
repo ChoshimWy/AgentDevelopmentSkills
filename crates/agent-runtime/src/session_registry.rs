@@ -319,7 +319,7 @@ impl Registry {
             }
             self.directory
                 .rename(&temporary, &self.directory, file_name)?;
-            self.directory.try_clone()?.into_std_file().sync_all()?;
+            self.directory.open(".")?.into_std().sync_all()?;
             Ok(())
         })();
         if write_result.is_err() {
