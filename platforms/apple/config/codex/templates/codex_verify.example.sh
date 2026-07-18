@@ -447,6 +447,15 @@ def canonical_write(path: Path, value: object) -> None:
     os.replace(temporary, path)
 
 
+def atomic_text_write(path: Path, value: str) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        temporary.write_text(value, encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def text(path: Path) -> str | None:
     try:
         if path.is_symlink() or not path.is_file():
@@ -488,6 +497,17 @@ def controlled_job(raw: str | None) -> Path | None:
     except OSError:
         return None
     return candidate if candidate.is_dir() else None
+
+
+def release_job_leases(job: Path, reason: str) -> None:
+    for lease in (sorted(slots.glob("**/lease.lockdir")) if slots.is_dir() else []):
+        if lease.is_symlink() or not lease.is_dir():
+            continue
+        if controlled_job(text(lease / "job_dir")) != job:
+            continue
+        record("slot-lease-stale", lease, reason)
+        shutil.rmtree(lease)
+        actions.append({"action": "deleted", "category": "leases", "path": str(lease), "reason": reason})
 
 
 def daemon_identity() -> dict[str, object] | None:
@@ -760,7 +780,8 @@ for job in job_entries:
             (job / "job.log").open("a", encoding="utf-8").write("[codex_verify] job interrupted during queue reconciliation\n")
             (job / "exit_code").write_text("70\n", encoding="utf-8")
             (job / "finished_at").write_text(datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z") + "\n", encoding="utf-8")
-            (job / "state").write_text("failed\n", encoding="utf-8")
+            release_job_leases(job, "interrupted running job lease released before terminal state")
+            atomic_text_write(job / "state", "failed\n")
             actions.append({"action": "failed", "category": "jobs", "path": str(job), "reason": reason})
 
 staging_entries = sorted(staging.iterdir(), key=lambda item: item.name) if staging.is_dir() else []
@@ -2441,8 +2462,8 @@ mark_running_jobs_failed_on_recovery() {
       append_log_line "$job_dir/job.log" "[codex_verify] job interrupted: daemon restarted before completion"
       write_text_file "$job_dir/exit_code" "1"
       write_text_file "$job_dir/finished_at" "$(timestamp_now)"
-      set_job_state "$job_dir" 'failed'
       release_derived_data_slot_lease "$job_dir"
+      set_job_state "$job_dir" 'failed'
     fi
   done
   rm -f "$ACTIVE_JOB_FILE"
@@ -2677,8 +2698,8 @@ run_job() {
     write_text_file "$job_dir/finished_at" "$(timestamp_now)"
     generate_verification_artifacts "$job_dir" "$status"
     write_text_file "$job_dir/exit_code" "$status"
-    set_job_state "$job_dir" 'failed'
     release_derived_data_slot_lease "$job_dir"
+    set_job_state "$job_dir" 'failed'
     rm -f "$ACTIVE_JOB_FILE"
     return 0
   fi
@@ -2698,8 +2719,8 @@ run_job() {
     write_text_file "$job_dir/finished_at" "$(timestamp_now)"
     generate_verification_artifacts "$job_dir" "$status"
     write_text_file "$job_dir/exit_code" "$status"
-    set_job_state "$job_dir" 'failed'
     release_derived_data_slot_lease "$job_dir"
+    set_job_state "$job_dir" 'failed'
     rm -f "$ACTIVE_JOB_FILE"
     return 0
   fi
@@ -2709,8 +2730,8 @@ run_job() {
     write_text_file "$job_dir/finished_at" "$(timestamp_now)"
     generate_verification_artifacts "$job_dir" "$status"
     write_text_file "$job_dir/exit_code" "$status"
-    set_job_state "$job_dir" 'failed'
     release_derived_data_slot_lease "$job_dir"
+    set_job_state "$job_dir" 'failed'
     rm -f "$ACTIVE_JOB_FILE"
     return 0
   fi
@@ -2759,12 +2780,14 @@ run_job() {
     status=65
   fi
   write_text_file "$job_dir/exit_code" "$status"
+  # A terminal state is the externally observable commit point. Release the
+  # slot first so clients cannot observe completion while the lease is live.
+  release_derived_data_slot_lease "$job_dir"
   if [[ $status -eq 0 ]]; then
     set_job_state "$job_dir" 'succeeded'
   else
     set_job_state "$job_dir" 'failed'
   fi
-  release_derived_data_slot_lease "$job_dir"
   rm -f "$ACTIVE_JOB_FILE"
 }
 
@@ -2789,8 +2812,8 @@ PY
       append_log_line "$active_job/job.log" "[codex_verify] daemon exited before job finalization"
       write_text_file "$active_job/finished_at" "$(timestamp_now)"
       write_text_file "$active_job/exit_code" '70'
-      set_job_state "$active_job" 'failed'
       release_derived_data_slot_lease "$active_job"
+      set_job_state "$active_job" 'failed'
     fi
     rm -f "$ACTIVE_JOB_FILE"
     rm -f "$DAEMON_PID_FILE"

@@ -269,6 +269,56 @@ class WrapperPolicyTests(unittest.TestCase):
             self.assertIn("running-job-interrupted", {item["code"] for item in report["issues"]})
             self.assertEqual("running", (running / "state").read_text(encoding="utf-8").strip())
 
+    def test_queue_repair_releases_owned_lease_before_atomic_terminal_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue = root / "queue"
+            running = queue / "jobs" / "job-1"
+            running.mkdir(parents=True)
+            state = running / "state"
+            state.write_text("running\n", encoding="utf-8")
+            original_state_inode = state.stat().st_ino
+            (queue / "queue-meta.json").write_text(
+                '{"generation_id":"codex-verify-v2","producer":"codex_verify","schema_version":"2.0"}\n',
+                encoding="utf-8",
+            )
+            lease = queue / "derived-data-slots" / "project" / "environment" / "lease.lockdir"
+            lease.mkdir(parents=True)
+            (lease / "job_dir").write_text(f"{running}\n", encoding="utf-8")
+            wrapper = ROOT / "platforms/apple/config/codex/templates/codex_verify.example.sh"
+
+            repaired = subprocess.run(
+                ["bash", str(wrapper), "--queue-doctor", "--repair"],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "CODEX_BUILD_QUEUE_ROOT": str(queue),
+                    "HOME": str(root / "home"),
+                },
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(0, repaired.returncode, repaired.stderr)
+            report = json.loads(repaired.stdout.strip().splitlines()[-1])
+            lease_action = next(
+                index
+                for index, action in enumerate(report["actions"])
+                if action["category"] == "leases" and action["path"] == str(lease)
+            )
+            terminal_action = next(
+                index
+                for index, action in enumerate(report["actions"])
+                if action["category"] == "jobs" and action["path"] == str(running)
+            )
+            self.assertLess(lease_action, terminal_action)
+            self.assertFalse(lease.exists())
+            self.assertEqual("failed", state.read_text(encoding="utf-8").strip())
+            self.assertNotEqual(original_state_inode, state.stat().st_ino)
+            self.assertFalse(any(running.glob(".state.*.tmp")))
+
     def test_queue_status_json_propagates_configuration_errors(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
