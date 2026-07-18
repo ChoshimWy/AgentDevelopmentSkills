@@ -373,7 +373,15 @@ cleanup. Apple installation also freezes the exact launcher bytes and
 completes source activation in the same guarded transaction. Core-only and
 Apple projections remain differential-tested against Python. Replacement
 installs, upgrades, legacy adoption, and compatibility-only requests remain on
-separately gated paths. The installed native `agent-session` dispatch preserves
+separately gated paths. As the first upgrade cutover gate, Rust now strictly
+validates Upgrade Conformance Evidence v1 and Upgrade Plan v1, including
+stable attestation semantics, exact selections/removals, permission approvals,
+external-handler identity, migration ordering, rollback identity, and
+self-consistent tampering. The non-default `upgrade-evidence-validate` and
+`upgrade-plan-validate` commands have Python differential coverage; mutating
+upgrade and rollback routing remains on the existing approval-bound path until
+the native executor passes the same gates. The installed native
+`agent-session` dispatch preserves
 the public `create`, `list`, `inspect`, `fingerprint`, `checkpoint`, and `gate`
 surface.
 

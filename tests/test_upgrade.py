@@ -17,7 +17,11 @@ from unittest.mock import patch
 from tests.support import MANIFESTS, ROOT
 
 from agent_workflow.canonical_json import dump, dumps, load, sha256
-from agent_workflow.contracts import validate
+from agent_workflow.contracts import (
+    validate,
+    validate_migration_report,
+    validate_upgrade_conformance_evidence,
+)
 from agent_workflow.cli import (
     _partial_uninstall_external_context,
     _partial_uninstall_selection,
@@ -113,6 +117,61 @@ class UpgradeTests(unittest.TestCase):
         ):
             returncode = cli.main()
         return subprocess.CompletedProcess(argv, returncode, stdout.getvalue(), stderr.getvalue())
+
+    def test_upgrade_contracts_reject_schema_incompatible_scalar_types(self) -> None:
+        evidence = _evidence(self.current_bundle.package_lock)
+        for invalid_exit_code in (False, 0.0, -0.0):
+            with self.subTest(invalid_exit_code=repr(invalid_exit_code)):
+                invalid = deepcopy(evidence)
+                invalid["command_results"][0]["exit_code"] = invalid_exit_code
+                stable = {
+                    key: value
+                    for key, value in invalid.items()
+                    if key not in {"attestation_key", "fingerprint"}
+                }
+                stable["command_results"] = [
+                    {
+                        "command": item["command"],
+                        "exit_code": item["exit_code"],
+                    }
+                    for item in invalid["command_results"]
+                ]
+                invalid["attestation_key"] = sha256(stable)
+                invalid["fingerprint"] = sha256({
+                    key: value
+                    for key, value in invalid.items()
+                    if key != "fingerprint"
+                })
+                with self.assertRaisesRegex(ContractError, "command result"):
+                    validate_upgrade_conformance_evidence(invalid)
+
+        migration = {
+            "after_sha256": "4" * 64,
+            "artifact": "activation-lock",
+            "before_sha256": "5" * 64,
+            "from_version": "1.0",
+            "lossless": True,
+            "schema_version": "1.0",
+            "status": "planned",
+            "steps": [
+                {
+                    "changes": ["temporary-version"],
+                    "from_version": "1.0",
+                    "lossless": True,
+                    "to_version": 7,
+                },
+                {
+                    "changes": ["final-version"],
+                    "from_version": 7,
+                    "lossless": True,
+                    "to_version": "2.0",
+                },
+            ],
+            "to_version": "2.0",
+        }
+        migration["fingerprint"] = sha256(migration)
+        with self.assertRaisesRegex(ContractError, "step chain"):
+            validate_migration_report(migration)
 
     def test_no_change_plan_is_deterministic_and_apply_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

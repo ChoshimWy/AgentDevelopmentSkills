@@ -6,7 +6,7 @@ use agent_contracts::{
 use agent_engine::{
     DiscoveryEngine, compile_plan_with_package_lock, diff_package_locks, explain_package_lock,
     resolve_package_lock, resolve_policy, validate_compiled_plan, validate_package_lock,
-    validate_plan_package_lock,
+    validate_plan_package_lock, validate_upgrade_conformance_evidence, validate_upgrade_plan,
 };
 use agent_lifecycle::{
     LifecycleError, LifecycleWorkspace, compile_source_install_bundle, inspect_doctor_baseline,
@@ -300,6 +300,10 @@ enum Command {
     LockDiff { before: PathBuf, after: PathBuf },
     /// Explain one persistent package Lockfile.
     LockExplain { lockfile: PathBuf },
+    /// Validate one approval-bound Upgrade Conformance Evidence v1 artifact.
+    UpgradeEvidenceValidate { evidence: PathBuf },
+    /// Validate one approval-bound Upgrade Plan v1 artifact.
+    UpgradePlanValidate { plan: PathBuf },
     /// Inspect the read-only native Doctor baseline compatibility boundary.
     DoctorBaseline {
         target_root: PathBuf,
@@ -1089,6 +1093,16 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         Command::LockExplain { lockfile } => {
             let value = load_json(lockfile)?;
             let value = explain_package_lock(&value)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::UpgradeEvidenceValidate { evidence } => {
+            let value = load_json(evidence)?;
+            validate_upgrade_conformance_evidence(&value)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::UpgradePlanValidate { plan } => {
+            let value = load_json(plan)?;
+            validate_upgrade_plan(&value)?;
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
         Command::DoctorBaseline {

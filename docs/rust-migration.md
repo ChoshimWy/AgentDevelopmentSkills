@@ -326,10 +326,19 @@ assembles the complete v1 artifact, recomputes summary/status/fingerprint, and
 validates its cross-field invariants. Its required `--python-version` is
 supplied by the compatibility host rather than inferred or executed by Rust,
 so this closes report-emission parity without claiming the production CLI is
-Python-free. Doctor, upgrade, rollback, uninstall, and source activation now
-have native compatibility commands with differential, tamper, concurrency,
-rollback, and independent-review evidence. Their hosted public CLI cutover
-remains separate from the now Python-free eligible fresh-install route.
+Python-free. The next upgrade slice now validates Upgrade Conformance Evidence
+v1 and Upgrade Plan v1 natively. It rejects unknown fields, unstable command,
+selection, migration, or step ordering, stale attestations, malformed
+permission approvals, invalid external-handler/rollback identities, and
+self-consistent semantic tampering. The non-default
+`upgrade-evidence-validate` and `upgrade-plan-validate` commands are
+byte-differential-tested against Python. Mutating upgrade/rollback execution
+still remains behind the existing Python approval gate until the Rust executor
+binds these validated artifacts to the lifecycle transaction. Doctor,
+uninstall, and source activation already have native compatibility commands
+with differential, tamper, concurrency, rollback, and independent-review
+evidence; their remaining hosted public CLI cutovers stay separate from the
+now Python-free eligible fresh-install route.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

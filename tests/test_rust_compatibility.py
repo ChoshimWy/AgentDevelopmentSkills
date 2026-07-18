@@ -45,6 +45,8 @@ from agent_workflow.canonical_json import (
 from agent_workflow.discovery import DiscoveryEngine
 from agent_workflow.contracts import (
     validate_doctor_report,
+    validate_upgrade_conformance_evidence,
+    validate_upgrade_plan,
     validate_worktree_session_context,
 )
 from agent_workflow.doctor import diagnose_install
@@ -68,6 +70,11 @@ from agent_workflow.policy import PolicyResolver
 from agent_workflow.recipes import automatic_recipe_capabilities
 from agent_workflow.registry import ManifestRegistry
 from agent_workflow.runtime import FakeAdapterExecutor, RecordedAdapterExecutor, RunLedger
+from agent_workflow.upgrade import (
+    make_upgrade_conformance_evidence,
+    plan_upgrade,
+    prepare_upgrade_candidate,
+)
 if os.name != "nt":
     from agent_workflow.worktree_sessions.git_workspace import (
         create_session_worktree,
@@ -2367,6 +2374,189 @@ name = "one"
             )
             self.assertEqual(invalid.returncode, 2)
             self.assertEqual(invalid.stdout, "")
+
+    @unittest.skipIf(
+        os.name == "nt",
+        "Python installation mode contract is POSIX-only",
+    )
+    def test_upgrade_control_plane_contracts_match_python(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "codex"
+            install_bundle(
+                build_install_bundle(ROOT / "platforms", platforms=["apple"]),
+                target,
+            )
+            candidate = prepare_upgrade_candidate(ROOT / "platforms", target)
+            evidence = make_upgrade_conformance_evidence(
+                candidate.bundle.package_lock,
+                manifest_count=19,
+                negative_contract_count=16,
+                test_count=531,
+                suite_definition_hash=sha256(["native-upgrade-contract"]),
+                runner_sha256="1" * 64,
+                environment={"platform": "compatibility-test", "python": "3.11.0"},
+                command_results=[
+                    {
+                        "command": "compatibility-suite",
+                        "exit_code": 0,
+                        "stderr_sha256": "2" * 64,
+                        "stdout_sha256": "3" * 64,
+                    }
+                ],
+            )
+            operation = plan_upgrade(
+                ROOT / "platforms",
+                target,
+                evidence,
+                schema_root=ROOT / "schemas",
+            )
+            evidence_path = root / "upgrade-evidence.json"
+            plan_path = root / "upgrade-plan.json"
+            dump(evidence, evidence_path)
+            dump(operation.plan, plan_path)
+
+            rust_evidence = self.run_rust(
+                "upgrade-evidence-validate",
+                str(evidence_path),
+            )
+            self.assertEqual(rust_evidence.returncode, 0, rust_evidence.stderr)
+            self.assertEqual(rust_evidence.stdout, dumps(evidence))
+            rust_plan = self.run_rust(
+                "upgrade-plan-validate",
+                str(plan_path),
+            )
+            self.assertEqual(rust_plan.returncode, 0, rust_plan.stderr)
+            self.assertEqual(rust_plan.stdout, dumps(operation.plan))
+
+            invalid_evidence = deepcopy(evidence)
+            invalid_evidence["command_results"].append(
+                deepcopy(invalid_evidence["command_results"][0])
+            )
+            stable_evidence = {
+                key: value
+                for key, value in invalid_evidence.items()
+                if key not in {"attestation_key", "fingerprint"}
+            }
+            stable_evidence["command_results"] = [
+                {
+                    "command": item["command"],
+                    "exit_code": item["exit_code"],
+                }
+                for item in invalid_evidence["command_results"]
+            ]
+            invalid_evidence["attestation_key"] = sha256(stable_evidence)
+            invalid_evidence["fingerprint"] = sha256({
+                key: value
+                for key, value in invalid_evidence.items()
+                if key != "fingerprint"
+            })
+            with self.assertRaises(ContractError):
+                validate_upgrade_conformance_evidence(invalid_evidence)
+            dump(invalid_evidence, evidence_path)
+            rejected_evidence = self.run_rust(
+                "upgrade-evidence-validate",
+                str(evidence_path),
+            )
+            self.assertEqual(rejected_evidence.returncode, 2)
+            self.assertEqual(rejected_evidence.stdout, "")
+
+            for invalid_exit_code in (False, 0.0, -0.0):
+                with self.subTest(invalid_exit_code=repr(invalid_exit_code)):
+                    invalid_evidence = deepcopy(evidence)
+                    invalid_evidence["command_results"][0][
+                        "exit_code"
+                    ] = invalid_exit_code
+                    stable_evidence = {
+                        key: value
+                        for key, value in invalid_evidence.items()
+                        if key not in {"attestation_key", "fingerprint"}
+                    }
+                    stable_evidence["command_results"] = [
+                        {
+                            "command": item["command"],
+                            "exit_code": item["exit_code"],
+                        }
+                        for item in invalid_evidence["command_results"]
+                    ]
+                    invalid_evidence["attestation_key"] = sha256(
+                        stable_evidence
+                    )
+                    invalid_evidence["fingerprint"] = sha256({
+                        key: value
+                        for key, value in invalid_evidence.items()
+                        if key != "fingerprint"
+                    })
+                    with self.assertRaises(ContractError):
+                        validate_upgrade_conformance_evidence(
+                            invalid_evidence
+                        )
+                    dump(invalid_evidence, evidence_path)
+                    rejected_evidence = self.run_rust(
+                        "upgrade-evidence-validate",
+                        str(evidence_path),
+                    )
+                    self.assertEqual(rejected_evidence.returncode, 2)
+                    self.assertEqual(rejected_evidence.stdout, "")
+
+            invalid_plan = deepcopy(operation.plan)
+            invalid_plan["current_selection"]["core_only"] = True
+            invalid_plan["fingerprint"] = sha256({
+                key: value
+                for key, value in invalid_plan.items()
+                if key != "fingerprint"
+            })
+            with self.assertRaises(ContractError):
+                validate_upgrade_plan(invalid_plan)
+            dump(invalid_plan, plan_path)
+            rejected_plan = self.run_rust(
+                "upgrade-plan-validate",
+                str(plan_path),
+            )
+            self.assertEqual(rejected_plan.returncode, 2)
+            self.assertEqual(rejected_plan.stdout, "")
+
+            invalid_plan = deepcopy(operation.plan)
+            migration = {
+                "after_sha256": "4" * 64,
+                "artifact": "activation-lock",
+                "before_sha256": "5" * 64,
+                "from_version": "1.0",
+                "lossless": True,
+                "schema_version": "1.0",
+                "status": "planned",
+                "steps": [
+                    {
+                        "changes": ["temporary-version"],
+                        "from_version": "1.0",
+                        "lossless": True,
+                        "to_version": 7,
+                    },
+                    {
+                        "changes": ["final-version"],
+                        "from_version": 7,
+                        "lossless": True,
+                        "to_version": "2.0",
+                    },
+                ],
+                "to_version": "2.0",
+            }
+            migration["fingerprint"] = sha256(migration)
+            invalid_plan["migrations"] = [migration]
+            invalid_plan["fingerprint"] = sha256({
+                key: value
+                for key, value in invalid_plan.items()
+                if key != "fingerprint"
+            })
+            with self.assertRaises(ContractError):
+                validate_upgrade_plan(invalid_plan)
+            dump(invalid_plan, plan_path)
+            rejected_plan = self.run_rust(
+                "upgrade-plan-validate",
+                str(plan_path),
+            )
+            self.assertEqual(rejected_plan.returncode, 2)
+            self.assertEqual(rejected_plan.stdout, "")
 
     @unittest.skipIf(
         os.name == "nt",

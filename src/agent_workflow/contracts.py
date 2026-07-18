@@ -1657,6 +1657,8 @@ def validate_upgrade_conformance_evidence(value: dict[str, Any]) -> None:
         if (
             not isinstance(result["command"], str)
             or not result["command"]
+            or not isinstance(result["exit_code"], int)
+            or isinstance(result["exit_code"], bool)
             or result["exit_code"] != 0
             or any(
                 not isinstance(result[field], str) or not re.fullmatch(r"[0-9a-f]{64}", result[field])
@@ -1879,7 +1881,14 @@ def validate_migration_report(value: dict[str, Any]) -> None:
     all_lossless = True
     for step in value["steps"]:
         _exact_object(step, {"from_version", "to_version", "lossless", "changes"}, "migration-report.step")
-        if step["from_version"] != expected_from or step["from_version"] == step["to_version"]:
+        if (
+            not isinstance(step["from_version"], str)
+            or not step["from_version"]
+            or not isinstance(step["to_version"], str)
+            or not step["to_version"]
+            or step["from_version"] != expected_from
+            or step["from_version"] == step["to_version"]
+        ):
             raise ContractError("migration-report step chain is invalid")
         if not isinstance(step["lossless"], bool):
             raise ContractError("migration-report step lossless flag is invalid")
