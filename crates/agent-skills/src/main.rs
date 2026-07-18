@@ -6,6 +6,7 @@ use agent_engine::{
     resolve_package_lock, resolve_policy, validate_package_lock,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
+use agent_runtime::execute_fake_plan;
 use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -125,6 +126,22 @@ enum Command {
     LockDiff { before: PathBuf, after: PathBuf },
     /// Explain one persistent package Lockfile.
     LockExplain { lockfile: PathBuf },
+    /// Execute a deterministic native fake-adapter workflow runtime.
+    RuntimeExecute {
+        plan: PathBuf,
+        #[arg(long)]
+        behaviors: Option<PathBuf>,
+        #[arg(long)]
+        approvals: Option<PathBuf>,
+        #[arg(long)]
+        lock: Option<PathBuf>,
+        #[arg(long)]
+        ledger: Option<PathBuf>,
+        #[arg(long)]
+        resume: bool,
+        #[arg(long)]
+        identity_seed: Option<String>,
+    },
 }
 
 #[allow(clippy::too_many_lines)]
@@ -307,6 +324,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Command::LockExplain { lockfile } => {
             let value = load_json(lockfile)?;
             let value = explain_package_lock(&value)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::RuntimeExecute {
+            plan,
+            behaviors,
+            approvals,
+            lock,
+            ledger,
+            resume,
+            identity_seed,
+        } => {
+            let plan = load_json(plan)?;
+            let behaviors = behaviors.map(load_json).transpose()?;
+            let approvals = approvals.map(load_json).transpose()?;
+            let lock = lock.map(load_json).transpose()?;
+            let value = execute_fake_plan(
+                &plan,
+                behaviors.as_ref(),
+                approvals.as_ref(),
+                lock.as_ref(),
+                ledger.as_deref(),
+                resume,
+                identity_seed.as_deref(),
+            )?;
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
     }

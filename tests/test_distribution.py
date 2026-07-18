@@ -263,6 +263,7 @@ class DistributionTests(unittest.TestCase):
         self.assertIn(prefix + "crates/agent-engine/src/lib.rs", names)
         self.assertIn(prefix + "crates/agent-engine/src/package_lock.rs", names)
         self.assertIn(prefix + "crates/agent-registry/src/lib.rs", names)
+        self.assertIn(prefix + "crates/agent-runtime/src/lib.rs", names)
         self.assertIn(prefix + "docs/rust-migration.md", names)
         self.assertIn(prefix + "rust-toolchain.toml", names)
         self.assertIn(prefix + "scripts/validate_github_publication.py", names)

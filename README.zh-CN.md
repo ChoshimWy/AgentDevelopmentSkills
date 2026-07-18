@@ -95,7 +95,7 @@ AGENT_SKILLS_RUST_COMPATIBILITY=1 \
 cargo run --locked -p agent-skills-rs -- registry-snapshot platforms
 ```
 
-同一兼容路径还可以解析策略、只读发现仓库证据、编译确定性计划，并在不执行计划的前提下解析或检查持久化 Package Lock：
+同一兼容路径还可以解析策略、只读发现仓库证据、编译确定性计划、解析或检查持久化 Package Lock，并在不调用外部 Provider 的前提下模拟工作流 Runtime 合同：
 
 ```bash
 cargo run --locked -p agent-skills-rs -- \
@@ -110,9 +110,12 @@ cargo run --locked -p agent-skills-rs -- \
   --output /path/to/agent-skills.lock
 cargo run --locked -p agent-skills-rs -- \
   lock-validate /path/to/agent-skills.lock
+cargo run --locked -p agent-skills-rs -- \
+  runtime-execute /path/to/workflow-plan.json \
+  --behaviors /path/to/fake-behaviors.json
 ```
 
-迁移顺序和切换门禁见 [Rust 迁移计划](docs/rust-migration.md)。当前原生路径已覆盖 canonical contracts、只读 Manifest Registry、仓库发现、策略解析、计划编译，以及 Package Lock 的解析、验证、差异、解释与锁定计划绑定检查，但不会执行计划、package 代码或安装变更；在所有相关差分测试和发布门禁通过前，Python CLI 仍是生产入口。
+迁移顺序和切换门禁见 [Rust 迁移计划](docs/rust-migration.md)。当前原生路径已覆盖 canonical contracts、只读 Manifest Registry、仓库发现、策略解析、计划编译，以及 Package Lock 的解析、验证、差异、解释与锁定计划绑定检查。Phase 4 已开始迁移确定性 fake-adapter Runtime，覆盖节点状态转换、重试、审批、资源调度、append-only Ledger 回放和锁定计划执行；它不会调用外部 Provider、执行 package 代码或修改安装目标。在所有相关差分测试和发布门禁通过前，Python CLI 仍是生产入口。
 
 ## 发布治理
 

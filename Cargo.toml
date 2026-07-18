@@ -3,6 +3,7 @@ members = [
     "crates/agent-contracts",
     "crates/agent-engine",
     "crates/agent-registry",
+    "crates/agent-runtime",
     "crates/agent-skills",
 ]
 resolver = "2"
@@ -15,6 +16,7 @@ repository = "https://github.com/ChoshimWy/AgentDevelopmentSkills"
 rust-version = "1.97"
 
 [workspace.dependencies]
+cap-std = "4.0.2"
 clap = { version = "4.5.54", features = ["derive"] }
 hex = "0.4.3"
 serde = { version = "1.0.228", features = ["derive"] }

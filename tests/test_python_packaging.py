@@ -75,6 +75,7 @@ class PythonPackagingTests(unittest.TestCase):
             self.assertTrue((source / "crates/agent-engine/src/lib.rs").is_file())
             self.assertTrue((source / "crates/agent-engine/src/package_lock.rs").is_file())
             self.assertTrue((source / "crates/agent-registry/src/lib.rs").is_file())
+            self.assertTrue((source / "crates/agent-runtime/src/lib.rs").is_file())
             self.assertTrue((source / "docs/rust-migration.md").is_file())
             self.assertTrue((source / "rust-toolchain.toml").is_file())
             rebuilt = root / "rebuilt"

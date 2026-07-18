@@ -32,6 +32,7 @@ from agent_workflow.planning import PlanCompiler
 from agent_workflow.policy import PolicyResolver
 from agent_workflow.recipes import automatic_recipe_capabilities
 from agent_workflow.registry import ManifestRegistry
+from agent_workflow.runtime import FakeAdapterExecutor, RunLedger
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,35 @@ RUST_COMPATIBILITY_ENABLED = (
     os.environ.get("AGENT_SKILLS_RUST_COMPATIBILITY") == "1"
     and shutil.which("cargo") is not None
 )
+
+
+def _normalize_runtime_ledger(value: dict) -> dict:
+    """Remove runtime-generated identities and timestamps for semantic parity."""
+
+    normalized = deepcopy(value)
+    attempt_ids = {
+        attempt["attempt_id"]: (
+            f"attempt:{attempt['node_id']}:{attempt['attempt_number']}"
+        )
+        for attempt in normalized["node_attempts"]
+    }
+    normalized["run_id"] = "run"
+    for attempt in normalized["node_attempts"]:
+        attempt["attempt_id"] = attempt_ids[attempt["attempt_id"]]
+        attempt["deadline"] = "deadline"
+        for event in attempt["events"]:
+            event["at"] = "time"
+    for collection in (
+        "resource_events",
+        "approval_records",
+        "artifact_hashes",
+        "adapter_outcomes",
+        "evidence",
+    ):
+        for item in normalized.get(collection, []):
+            if "attempt_id" in item:
+                item["attempt_id"] = attempt_ids[item["attempt_id"]]
+    return normalized
 
 
 @unittest.skipUnless(
@@ -1718,6 +1748,423 @@ class RustCompatibilityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertIn("ids must be unique", result.stderr)
+
+    def test_fake_runtime_semantics_resume_and_lock_match_python(self) -> None:
+        registry = ManifestRegistry.from_directory(ROOT / "platforms")
+        profile = DiscoveryEngine(registry).discover(
+            ROOT / "tests/fixtures/apple-app"
+        )
+        policy = PolicyResolver().resolve(profile, "实现 iOS 功能")
+        plan = PlanCompiler(registry).compile(profile, policy)
+        cases = (
+            ({}, {}, plan),
+            ({"implementation.apple": "failed"}, {}, plan),
+            (
+                {
+                    "verification.apple.affected-tests": [
+                        "failed",
+                        "passed",
+                    ]
+                },
+                {},
+                plan,
+            ),
+            (
+                {"verification.apple.affected-tests": "timed-out"},
+                {},
+                plan,
+            ),
+            ({"implementation.apple": "cancelled"}, {}, plan),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_path = root / "plan.json"
+            behaviors_path = root / "behaviors.json"
+            approvals_path = root / "approvals.json"
+            for index, (behaviors, approvals, candidate) in enumerate(cases):
+                with self.subTest(case=index):
+                    dump(candidate, plan_path)
+                    dump(behaviors, behaviors_path)
+                    dump(approvals, approvals_path)
+                    expected = FakeAdapterExecutor(
+                        behaviors,
+                        approval_decisions=approvals,
+                    ).run(candidate)
+                    result = self.run_rust(
+                        "runtime-execute",
+                        str(plan_path),
+                        "--behaviors",
+                        str(behaviors_path),
+                        "--approvals",
+                        str(approvals_path),
+                        "--identity-seed",
+                        "0123456789abcdef",
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        _normalize_runtime_ledger(json.loads(result.stdout)),
+                        _normalize_runtime_ledger(expected),
+                    )
+
+            optional = deepcopy(plan)
+            verification = next(
+                node for node in optional["nodes"] if node["id"] == "apple-2"
+            )
+            verification["mandatory"] = False
+            verification["provider"] = None
+            optional["status"] = "degraded"
+            optional["missing_capabilities"] = [verification["capability"]]
+            blocked = deepcopy(plan)
+            blocked["status"] = "blocked"
+            blocked["missing_capabilities"] = ["routing.platform-selection"]
+            for index, candidate in enumerate((optional, blocked)):
+                with self.subTest(plan_status=index):
+                    dump(candidate, plan_path)
+                    expected = FakeAdapterExecutor().run(candidate)
+                    result = self.run_rust(
+                        "runtime-execute",
+                        str(plan_path),
+                        "--identity-seed",
+                        "0123456789abcdef",
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        _normalize_runtime_ledger(json.loads(result.stdout)),
+                        _normalize_runtime_ledger(expected),
+                    )
+
+            approval_plan = deepcopy(plan)
+            intent = next(
+                node for node in approval_plan["nodes"] if node["id"] == "intent"
+            )
+            intent["approval"] = {
+                "action": "repository-read",
+                "reason": "fixture",
+                "scope": {"root": "."},
+            }
+            dump(approval_plan, plan_path)
+            python_ledger = root / "python-ledger.jsonl"
+            rust_ledger = root / "rust-ledger.jsonl"
+            first_python = FakeAdapterExecutor().run(
+                approval_plan,
+                ledger_path=python_ledger,
+            )
+            first_rust = self.run_rust(
+                "runtime-execute",
+                str(plan_path),
+                "--ledger",
+                str(rust_ledger),
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(first_rust.returncode, 0, first_rust.stderr)
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(first_rust.stdout)),
+                _normalize_runtime_ledger(first_python),
+            )
+            dump({"core.intent-lock": "granted"}, approvals_path)
+            resumed_python = FakeAdapterExecutor(
+                approval_decisions={"core.intent-lock": "granted"}
+            ).run(
+                approval_plan,
+                ledger_path=python_ledger,
+                resume=True,
+            )
+            resumed_rust = self.run_rust(
+                "runtime-execute",
+                str(plan_path),
+                "--approvals",
+                str(approvals_path),
+                "--ledger",
+                str(rust_ledger),
+                "--resume",
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(resumed_rust.returncode, 0, resumed_rust.stderr)
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(resumed_rust.stdout)),
+                _normalize_runtime_ledger(resumed_python),
+            )
+
+            retry_python_ledger = root / "retry-python-ledger.jsonl"
+            retry_rust_ledger = root / "retry-rust-ledger.jsonl"
+            dump(plan, plan_path)
+            dump({"implementation.apple": "failed"}, behaviors_path)
+            first_python = FakeAdapterExecutor(
+                {"implementation.apple": "failed"}
+            ).run(
+                plan,
+                ledger_path=retry_python_ledger,
+            )
+            first_rust = self.run_rust(
+                "runtime-execute",
+                str(plan_path),
+                "--behaviors",
+                str(behaviors_path),
+                "--ledger",
+                str(retry_rust_ledger),
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(first_rust.returncode, 0, first_rust.stderr)
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(first_rust.stdout)),
+                _normalize_runtime_ledger(first_python),
+            )
+            resumed_python = FakeAdapterExecutor().run(
+                plan,
+                ledger_path=retry_python_ledger,
+                resume=True,
+            )
+            resumed_rust = self.run_rust(
+                "runtime-execute",
+                str(plan_path),
+                "--ledger",
+                str(retry_rust_ledger),
+                "--resume",
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(resumed_rust.returncode, 0, resumed_rust.stderr)
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(resumed_rust.stdout)),
+                _normalize_runtime_ledger(resumed_python),
+            )
+
+            install = build_install_bundle(
+                ROOT / "platforms",
+                platforms=["apple"],
+            )
+            locked = PlanCompiler(registry).compile(
+                profile,
+                policy,
+                package_lock=install.package_lock,
+            )
+            lock_path = root / "agent-skills.lock"
+            dump(locked, plan_path)
+            dump(install.package_lock, lock_path)
+            expected = FakeAdapterExecutor().run(
+                locked,
+                package_lock=install.package_lock,
+            )
+            result = self.run_rust(
+                "runtime-execute",
+                str(plan_path),
+                "--lock",
+                str(lock_path),
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                _normalize_runtime_ledger(json.loads(result.stdout)),
+                _normalize_runtime_ledger(expected),
+            )
+
+            missing_lock = self.run_rust(
+                "runtime-execute",
+                str(plan_path),
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(missing_lock.returncode, 2)
+            self.assertEqual(missing_lock.stdout, "")
+            self.assertIn("requires the current package Lockfile", missing_lock.stderr)
+
+            invalid_lock_identity = deepcopy(plan)
+            invalid_lock_identity["package_lock_hash"] = 0
+            dump(invalid_lock_identity, plan_path)
+            invalid_ledger = root / "invalid-lock-ledger.jsonl"
+            rejected = self.run_rust(
+                "runtime-execute",
+                str(plan_path),
+                "--ledger",
+                str(invalid_ledger),
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(rejected.stdout, "")
+            self.assertIn("package_lock_hash is invalid", rejected.stderr)
+            self.assertFalse(invalid_ledger.exists())
+
+            unbounded = deepcopy(plan)
+            verification = next(
+                node for node in unbounded["nodes"] if node["id"] == "apple-2"
+            )
+            verification["idempotent"] = True
+            verification["max_retries"] = 100_000
+            dump(unbounded, plan_path)
+            with self.assertRaisesRegex(
+                ContractError,
+                "projected events exceed maximum",
+            ):
+                FakeAdapterExecutor().run(unbounded)
+            rejected = self.run_rust(
+                "runtime-execute",
+                str(plan_path),
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(rejected.stdout, "")
+            self.assertIn("projected events exceed maximum", rejected.stderr)
+
+            cyclic = deepcopy(plan)
+            cyclic["edges"].append({"from": "report", "to": "intent"})
+            dump(cyclic, plan_path)
+            with self.assertRaisesRegex(ContractError, "dependency cycle"):
+                FakeAdapterExecutor().run(cyclic)
+            rejected = self.run_rust(
+                "runtime-execute",
+                str(plan_path),
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(rejected.stdout, "")
+            self.assertIn("dependency cycle", rejected.stderr)
+
+            if os.name != "nt":
+                unmanaged = root / "unmanaged-ledger"
+                unmanaged.write_text("unmanaged\n", encoding="utf-8")
+                linked_ledger = root / "linked-ledger"
+                linked_ledger.symlink_to(unmanaged)
+                dump(plan, plan_path)
+                rejected = self.run_rust(
+                    "runtime-execute",
+                    str(plan_path),
+                    "--ledger",
+                    str(linked_ledger),
+                    "--identity-seed",
+                    "0123456789abcdef",
+                )
+                self.assertEqual(rejected.returncode, 2)
+                self.assertEqual(rejected.stdout, "")
+                self.assertIn("regular file", rejected.stderr)
+                self.assertEqual(
+                    unmanaged.read_text(encoding="utf-8"),
+                    "unmanaged\n",
+                )
+                linked_parent = root / "linked-parent"
+                external_parent = root / "external-parent"
+                external_parent.mkdir()
+                linked_parent.symlink_to(external_parent, target_is_directory=True)
+                dump(plan, plan_path)
+                rejected = self.run_rust(
+                    "runtime-execute",
+                    str(plan_path),
+                    "--ledger",
+                    str(linked_parent / "ledger.jsonl"),
+                    "--identity-seed",
+                    "0123456789abcdef",
+                )
+                self.assertEqual(rejected.returncode, 2)
+                self.assertEqual(rejected.stdout, "")
+                self.assertIn("real directories", rejected.stderr)
+                self.assertFalse((external_parent / "ledger.jsonl").exists())
+
+            invalid_artifact_ledger = root / "invalid-artifact-ledger.jsonl"
+            shutil.copy2(rust_ledger, invalid_artifact_ledger)
+            ledger_run_id = json.loads(
+                rust_ledger.read_text(encoding="utf-8").splitlines()[0]
+            )["run_id"]
+            with invalid_artifact_ledger.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    dumps(
+                        {
+                            "event_type": "artifact-hash",
+                            "run_id": ledger_run_id,
+                            "value": {},
+                        }
+                    )
+                )
+            dump(approval_plan, plan_path)
+            rejected = self.run_rust(
+                "runtime-execute",
+                str(plan_path),
+                "--ledger",
+                str(invalid_artifact_ledger),
+                "--resume",
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(rejected.stdout, "")
+            self.assertIn("artifact-hash fields are invalid", rejected.stderr)
+
+            blank_line_ledger = root / "blank-line-ledger.jsonl"
+            valid_lines = rust_ledger.read_text(encoding="utf-8").splitlines()
+            blank_line_ledger.write_text(
+                valid_lines[0] + "\n\n" + "\n".join(valid_lines[1:]) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(json.JSONDecodeError):
+                RunLedger.replay(
+                    blank_line_ledger,
+                    approval_plan["fingerprint"],
+                )
+            rejected = self.run_rust(
+                "runtime-execute",
+                str(plan_path),
+                "--ledger",
+                str(blank_line_ledger),
+                "--resume",
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(rejected.stdout, "")
+            self.assertTrue(rejected.stderr)
+
+            no_start_ledger = root / "no-start-ledger.jsonl"
+            source_events = [
+                json.loads(line)
+                for line in rust_ledger.read_text(encoding="utf-8").splitlines()
+            ]
+            node_event = next(
+                event
+                for event in source_events
+                if event["event_type"] == "node-attempt"
+            )
+            no_start_ledger.write_text(dumps(node_event), encoding="utf-8")
+            rejected = self.run_rust(
+                "runtime-execute",
+                str(plan_path),
+                "--ledger",
+                str(no_start_ledger),
+                "--resume",
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(rejected.stdout, "")
+            self.assertIn("exactly one run-started", rejected.stderr)
+
+            with rust_ledger.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    dumps(
+                        {
+                            "event_type": "invented-event",
+                            "run_id": ledger_run_id,
+                            "value": {},
+                        }
+                    )
+                )
+            dump(approval_plan, plan_path)
+            rejected = self.run_rust(
+                "runtime-execute",
+                str(plan_path),
+                "--ledger",
+                str(rust_ledger),
+                "--resume",
+                "--identity-seed",
+                "0123456789abcdef",
+            )
+            self.assertEqual(rejected.returncode, 2)
+            self.assertEqual(rejected.stdout, "")
+            self.assertIn("unknown ledger event type", rejected.stderr)
 
 
 if __name__ == "__main__":

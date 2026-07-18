@@ -17,6 +17,11 @@ from .scheduler import ResourceScheduler
 from .state_machine import NodeStateMachine
 
 
+MAX_RUNTIME_NODES = 16_384
+MAX_RUNTIME_EDGES = 65_536
+MAX_RUNTIME_LEDGER_EVENTS = 100_000
+
+
 class FakeAdapterExecutor:
     """Exercise Runtime contracts without claiming real platform execution."""
 
@@ -41,6 +46,7 @@ class FakeAdapterExecutor:
         package_lock: dict[str, Any] | None = None,
         resume: bool = False,
     ) -> dict[str, Any]:
+        required_events = _preflight_runtime_plan(plan)
         if plan.get("package_lock_hash") is not None:
             if package_lock is None:
                 raise ContractError("locked workflow execution requires the current package Lockfile")
@@ -54,6 +60,12 @@ class FakeAdapterExecutor:
             ledger = RunLedger.replay(ledger_file, plan["fingerprint"])
             if ledger.value["package_lock_hash"] != plan.get("package_lock_hash", ""):
                 raise ContractError("cannot resume ledger with a different package lock")
+            if ledger.event_count + required_events > MAX_RUNTIME_LEDGER_EVENTS:
+                raise ContractError(
+                    "workflow runtime cannot reserve "
+                    f"{required_events} events within maximum "
+                    f"{MAX_RUNTIME_LEDGER_EVENTS}"
+                )
             ledger.append("run-resumed", {
                 "package_lock_hash": plan.get("package_lock_hash", ""),
                 "plan_fingerprint": plan["fingerprint"],
@@ -539,3 +551,77 @@ def _approval_for_attempt(
         return None
     matching = [record for record in records if record["attempt_id"] == attempt["attempt_id"]]
     return matching[-1] if matching else None
+
+
+def _preflight_runtime_plan(plan: dict[str, Any]) -> int:
+    nodes = plan.get("nodes")
+    edges = plan.get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        raise ContractError("workflow runtime requires node and edge arrays")
+    if len(nodes) > MAX_RUNTIME_NODES:
+        raise ContractError(f"workflow runtime nodes exceed maximum {MAX_RUNTIME_NODES}")
+    if len(edges) > MAX_RUNTIME_EDGES:
+        raise ContractError(f"workflow runtime edges exceed maximum {MAX_RUNTIME_EDGES}")
+    node_ids = [
+        node.get("id") if isinstance(node, dict) else None
+        for node in nodes
+    ]
+    if (
+        any(not isinstance(node_id, str) or not node_id for node_id in node_ids)
+        or len(node_ids) != len(set(node_ids))
+    ):
+        raise ContractError("workflow runtime node ids must be non-empty and unique")
+    known = set(node_ids)
+    incoming = {node_id: 0 for node_id in node_ids}
+    outgoing: dict[str, list[str]] = {node_id: [] for node_id in node_ids}
+    for edge in edges:
+        if (
+            not isinstance(edge, dict)
+            or edge.get("from") not in known
+            or edge.get("to") not in known
+        ):
+            raise ContractError("workflow runtime edge references unknown node")
+        incoming[edge["to"]] += 1
+        outgoing[edge["from"]].append(edge["to"])
+    queue = deque(sorted(node_id for node_id, count in incoming.items() if count == 0))
+    visited = 0
+    while queue:
+        node_id = queue.popleft()
+        visited += 1
+        for target in sorted(outgoing[node_id]):
+            incoming[target] -= 1
+            if incoming[target] == 0:
+                queue.append(target)
+    if visited != len(node_ids):
+        raise ContractError("workflow runtime contains dependency cycle")
+    projected_events = 3 if plan.get("status") == "blocked" else 2
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise ContractError("workflow runtime node must be an object")
+        retries = node.get("max_retries", 0)
+        timeout = node.get("timeout_seconds", 300)
+        if (
+            not isinstance(retries, int)
+            or isinstance(retries, bool)
+            or retries < 0
+            or not isinstance(timeout, int)
+            or isinstance(timeout, bool)
+            or timeout <= 0
+        ):
+            raise ContractError("workflow runtime retry or timeout metadata is invalid")
+        resources = node.get("resource_keys", [])
+        if (
+            not isinstance(resources, list)
+            or any(not isinstance(item, str) for item in resources)
+        ):
+            raise ContractError("workflow runtime resource keys are invalid")
+        attempts = retries + 1 if node.get("idempotent") else 1
+        projected_events += attempts * (3 * len(set(resources)) + 1)
+        if node.get("approval"):
+            projected_events += 2
+        if projected_events > MAX_RUNTIME_LEDGER_EVENTS:
+            raise ContractError(
+                "workflow runtime projected events exceed maximum "
+                f"{MAX_RUNTIME_LEDGER_EVENTS}"
+            )
+    return projected_events

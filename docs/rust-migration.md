@@ -61,8 +61,8 @@ file layout:
 
 ## Current state
 
-Phases 1 through 3 are complete and Phase 4 is the next migration boundary. The
-repository contains:
+Phases 1 through 3 are complete and Phase 4 is in progress. The repository
+contains:
 
 - a Rust workspace pinned to Rust 1.97.1;
 - `agent-contracts` canonical JSON, SHA-256, and schema-version primitives;
@@ -76,6 +76,10 @@ repository contains:
   deterministic task classification and policy resolution, workflow-plan
   compilation over the native registry, persistent package Lockfile
   resolution/validation/diff/explanation, and locked-plan binding checks;
+- an `agent-runtime` crate for deterministic fake-adapter execution, node
+  lifecycle transitions, idempotent retry limits, attempt-scoped approvals,
+  resource scheduling, append-only JSONL ledger replay, and package-Lock-bound
+  workflow execution;
 - schema-aligned capability-contract type validation shared by the Python
   baseline and native normalization path;
 - Python-to-Rust byte-level differential tests covering malicious provider
@@ -95,9 +99,16 @@ binding resolution, an internal recipe-closure compatibility probe, repository
 discovery, policy resolution, and plan compilation. Package-lock resolution is
 also available through the parallel CLI, including local-registry,
 relative-path, and pinned HTTPS sources, deterministic lineage, validation,
-diff, explanation, and plan freezing. Runtime execution, sessions, and
-lifecycle operations are the next Phase 4 migration boundary; production CLI
-parity remains a later phase gate.
+diff, explanation, and plan freezing. Phase 4 now also exposes a deterministic
+fake-adapter runtime for semantic differential testing; it never invokes an
+external Provider or package code. Recorded Adapter Results, session/worktree
+orchestration, and transactional lifecycle operations remain the next Phase 4
+boundaries; production CLI parity remains a later phase gate.
+
+For the native compatibility command, a supplied `--ledger` parent directory
+must already exist and contain only real directories. The runtime opens the
+ledger relative to a held parent-directory capability and keeps one exclusively
+locked file handle for replay and append operations.
 
 ## Cutover policy
 

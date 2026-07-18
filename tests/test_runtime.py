@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+import os
 import tempfile
 import unittest
 
 from tests.support import FIXTURES, MANIFESTS
 
+from agent_workflow.canonical_json import dumps
 from agent_workflow.discovery import DiscoveryEngine
 from agent_workflow.models import ContractError, NodeStatus
 from agent_workflow.planning import PlanCompiler
@@ -194,6 +196,17 @@ class ExecutorTests(unittest.TestCase):
             with self.assertRaisesRegex(ContractError, "unknown ledger event type"):
                 RunLedger.replay(path, self.plan["fingerprint"])
 
+    def test_ledger_replay_requires_unique_leading_run_started(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.jsonl"
+            path.write_text(
+                '{"event_type":"run-finalized","run_id":"forged",'
+                '"value":{"status":"completed"}}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ContractError, "exactly one run-started"):
+                RunLedger.replay(path, self.plan["fingerprint"])
+
     def test_resume_retries_failed_nodes_and_preserves_passed_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ledger.jsonl"
@@ -213,12 +226,72 @@ class ExecutorTests(unittest.TestCase):
             with self.assertRaises(ContractError):
                 FakeAdapterExecutor().run(changed, ledger_path=path, resume=True)
 
+    def test_resume_reserves_projected_events_before_appending(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.jsonl"
+            run_id = "run-event-boundary"
+            started = dumps({
+                "event_type": "run-started",
+                "run_id": run_id,
+                "value": {
+                    "package_lock_hash": "",
+                    "plan_fingerprint": self.plan["fingerprint"],
+                },
+            })
+            blocked = dumps({
+                "event_type": "run-blocked",
+                "run_id": run_id,
+                "value": {},
+            })
+            finalized = dumps({
+                "event_type": "run-finalized",
+                "run_id": run_id,
+                "value": {"status": "blocked"},
+            })
+            path.write_text(
+                started + (blocked * 99_997) + finalized,
+                encoding="utf-8",
+            )
+            original = path.read_bytes()
+            with self.assertRaisesRegex(ContractError, "cannot reserve"):
+                FakeAdapterExecutor().run(self.plan, ledger_path=path, resume=True)
+            self.assertEqual(path.read_bytes(), original)
+
     def test_cancelled_adapter_releases_resource(self) -> None:
         executor = FakeAdapterExecutor({"implementation.apple": "cancelled"})
         ledger = executor.run(self.plan)
         self.assertEqual(ledger["final_status"], "cancelled")
         self.assertIsNone(executor.scheduler.owner("repository-write:{target-root}"))
         self.assertIn("cancelled", [item["action"] for item in ledger["resource_events"]])
+
+    def test_runtime_rejects_unbounded_retry_event_projection(self) -> None:
+        plan = deepcopy(self.plan)
+        verification = next(item for item in plan["nodes"] if item["id"] == "apple-2")
+        verification["idempotent"] = True
+        verification["max_retries"] = 100_000
+        with self.assertRaisesRegex(ContractError, "projected events exceed maximum"):
+            FakeAdapterExecutor().run(plan)
+
+    def test_runtime_rejects_dependency_cycle_before_ledger_write(self) -> None:
+        plan = deepcopy(self.plan)
+        plan["edges"].append({"from": "report", "to": "intent"})
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "ledger.jsonl"
+            with self.assertRaisesRegex(ContractError, "dependency cycle"):
+                FakeAdapterExecutor().run(plan, ledger_path=ledger)
+            self.assertFalse(ledger.exists())
+
+    @unittest.skipIf(os.name == "nt", "symlink creation requires elevated Windows privileges")
+    def test_new_ledger_rejects_symlink_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            external = root / "external.jsonl"
+            external.write_text("unmanaged\n", encoding="utf-8")
+            ledger = root / "ledger.jsonl"
+            ledger.symlink_to(external)
+            with self.assertRaisesRegex(ContractError, "regular file"):
+                FakeAdapterExecutor().run(self.plan, ledger_path=ledger)
+            self.assertEqual(external.read_text(encoding="utf-8"), "unmanaged\n")
 
 
 if __name__ == "__main__":

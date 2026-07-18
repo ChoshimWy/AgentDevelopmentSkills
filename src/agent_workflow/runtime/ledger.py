@@ -12,6 +12,10 @@ from ..contracts import validate_run_ledger
 from ..models import ContractError
 
 
+MAX_LEDGER_BYTES = 64 * 1024 * 1024
+MAX_LEDGER_EVENTS = 100_000
+
+
 class RunLedger:
     def __init__(
         self,
@@ -23,6 +27,7 @@ class RunLedger:
         run_id: str | None = None,
     ) -> None:
         self.path = Path(path) if path else None
+        self._event_count = 0
         self.value: dict[str, Any] = {
             "approval_records": [],
             "artifact_hashes": [],
@@ -38,6 +43,10 @@ class RunLedger:
             "schema_version": "1.0",
         }
 
+    @property
+    def event_count(self) -> int:
+        return self._event_count
+
     def append(self, event_type: str, value: dict[str, Any]) -> None:
         supported = {
             "adapter-evidence", "adapter-outcome", "approval-record", "artifact-hash",
@@ -45,11 +54,19 @@ class RunLedger:
         }
         if event_type not in supported:
             raise ContractError(f"unknown ledger event type: {event_type}")
+        if self._event_count >= MAX_LEDGER_EVENTS:
+            raise ContractError(f"runtime ledger has more than {MAX_LEDGER_EVENTS} events")
         event = {"event_type": event_type, "run_id": self.value["run_id"], "value": value}
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            if self.path.is_symlink() or (self.path.exists() and not self.path.is_file()):
+                raise ContractError("runtime ledger path must be a regular file")
+            encoded = dumps(event)
+            if self.path.exists() and self.path.stat().st_size + len(encoded.encode("utf-8")) > MAX_LEDGER_BYTES:
+                raise ContractError(f"runtime ledger has more than {MAX_LEDGER_BYTES} bytes")
             with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(dumps(event))
+                handle.write(encoded)
+        self._event_count += 1
         if event_type == "node-attempt":
             # JSONL remains append-only, while the validated materialized view keeps
             # exactly one current snapshot for each logical attempt.  Resume may
@@ -98,9 +115,27 @@ class RunLedger:
     @staticmethod
     def replay(path: str | Path, plan_fingerprint: str) -> "RunLedger":
         ledger_path = Path(path)
-        events = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+        if ledger_path.is_symlink() or not ledger_path.is_file():
+            raise ContractError("runtime ledger path must be a regular file")
+        if ledger_path.stat().st_size > MAX_LEDGER_BYTES:
+            raise ContractError(f"runtime ledger has more than {MAX_LEDGER_BYTES} bytes")
+        events = []
+        for line in ledger_path.read_text(encoding="utf-8").splitlines():
+            event = json.loads(line)
+            dumps(event)
+            events.append(event)
+        if len(events) > MAX_LEDGER_EVENTS:
+            raise ContractError(f"runtime ledger has more than {MAX_LEDGER_EVENTS} events")
+        if (
+            not events
+            or events[0].get("event_type") != "run-started"
+            or sum(event.get("event_type") == "run-started" for event in events) != 1
+        ):
+            raise ContractError(
+                "runtime ledger must begin with exactly one run-started event"
+            )
         run_id = events[0]["run_id"] if events else None
-        started = next((event for event in events if event["event_type"] == "run-started"), None)
+        started = events[0]
         if started and started["value"]["plan_fingerprint"] != plan_fingerprint:
             raise ContractError("cannot resume ledger with a different plan fingerprint")
         package_lock_hash = started["value"].get("package_lock_hash", "") if started else ""
