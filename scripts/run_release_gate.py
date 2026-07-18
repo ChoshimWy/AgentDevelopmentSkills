@@ -63,6 +63,7 @@ _MAX_SDIST_BYTES = 128 * 1024 * 1024
 _MAX_SDIST_ENTRIES = 10000
 _MAX_SDIST_EXPANDED_BYTES = 512 * 1024 * 1024
 _MAX_CANDIDATE_OUTPUT_BYTES = 8 * 1024 * 1024
+_MAX_CANDIDATE_FILE_BYTES = _MAX_SDIST_BYTES
 _RSA_SHA256_DIGEST_INFO_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
 _POSIX_METADATA_BEGIN = "# BEGIN agent-skills embedded release metadata"
 _POSIX_METADATA_END = "# END agent-skills embedded release metadata"
@@ -154,7 +155,7 @@ def _run_candidate_command(
             return
         resource.setrlimit(
             resource.RLIMIT_FSIZE,
-            (_MAX_CANDIDATE_OUTPUT_BYTES + 1, _MAX_CANDIDATE_OUTPUT_BYTES + 1),
+            (_MAX_CANDIDATE_FILE_BYTES + 1, _MAX_CANDIDATE_FILE_BYTES + 1),
         )
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         cpu_limit = max(1, timeout)

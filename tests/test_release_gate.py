@@ -837,6 +837,49 @@ class ReleaseGateTests(unittest.TestCase):
             else:
                 self.fail("candidate child process survived its isolated process group")
 
+    def test_candidate_artifact_and_output_limits_are_independent(self) -> None:
+        if os.name != "posix" or gate.resource is None:
+            self.skipTest("RLIMIT_FSIZE is POSIX-only")
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(gate, "_MAX_CANDIDATE_OUTPUT_BYTES", 1024),
+            mock.patch.object(gate, "_MAX_CANDIDATE_FILE_BYTES", 8192),
+        ):
+            root = Path(directory)
+            artifact = gate._run_candidate_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; Path('artifact').write_bytes(b'x' * 4096)",
+                ],
+                cwd=root,
+                timeout=10,
+            )
+            self.assertEqual(artifact.returncode, 0, artifact.stderr)
+            self.assertEqual((root / "artifact").stat().st_size, 4096)
+
+            with self.assertRaisesRegex(ContractError, "output limit"):
+                gate._run_candidate_command(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys; sys.stdout.write('x' * 4096)",
+                    ],
+                    cwd=root,
+                    timeout=10,
+                )
+
+            oversized = gate._run_candidate_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; Path('oversized').write_bytes(b'x' * 16384)",
+                ],
+                cwd=root,
+                timeout=10,
+            )
+            self.assertNotEqual(oversized.returncode, 0)
+
     def test_resigned_standalone_bootstrap_must_match_source_sbom(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             release = Path(directory) / "release"
