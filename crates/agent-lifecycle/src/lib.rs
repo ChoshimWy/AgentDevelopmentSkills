@@ -3,7 +3,9 @@
 //! This crate deliberately starts with the non-mutating Doctor boundary. It
 //! does not install, upgrade, roll back, or remove managed content.
 
-use agent_contracts::{ContractError, MAX_CONTRACT_JSON_BYTES, canonical_sha256, parse_json};
+use agent_contracts::{
+    ContractError, MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256, parse_json,
+};
 use agent_engine::{
     install_plan_identity_hash, schema_inventory, validate_install_plan, validate_package_lock,
 };
@@ -11,6 +13,8 @@ use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
+use std::collections::HashSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -110,9 +114,9 @@ impl BaselineState {
 ///
 /// The returned projection contains the existing Doctor check records for the
 /// safe-target, recovery-residue, managed-layout, Install Lock, persistent
-/// Lockfile, Core runtime identity, and Schema inventory checks. It is
-/// intentionally a compatibility probe rather than a new public artifact
-/// schema.
+/// Lockfile, Core runtime identity, Schema inventory, and Activation integrity
+/// checks. It is intentionally a compatibility probe rather than a new public
+/// artifact schema.
 ///
 /// Target and managed directories are held as directory capabilities. Contract
 /// files are opened without following symlinks and their identities are checked
@@ -318,6 +322,32 @@ pub fn inspect_doctor_baseline(
             "schema",
             "skipped",
             "Schema inventory check requires a valid package Lockfile",
+            json!({}),
+        );
+    }
+
+    if let Some(target_directory) = target_directory.as_ref() {
+        match check_activation(target_directory) {
+            Ok(details) => state.record(
+                "activation.integrity",
+                "activation",
+                "passed",
+                "Activation files are absent or match their Lock",
+                details,
+            ),
+            Err(error) => state.failed(
+                "activation.integrity",
+                "activation",
+                "Activation files are absent or match their Lock",
+                error,
+            ),
+        }
+    } else {
+        state.record(
+            "activation.integrity",
+            "activation",
+            "skipped",
+            "Activation verification requires a safe install target",
             json!({}),
         );
     }
@@ -556,6 +586,261 @@ fn check_schema_inventory(schemas: &Path, package_lock: &Value) -> Result<Value,
         "content_sha256": current.get("content_sha256").cloned().unwrap_or(Value::Null),
         "file_count": current.get("files").and_then(Value::as_array).map_or(0, Vec::len),
     }))
+}
+
+fn check_activation(target: &Dir) -> Result<Value, LifecycleError> {
+    let lock_path = Path::new(".agent-skills").join(EXTERNAL_ACTIVATION_LOCK);
+    match target.symlink_metadata(&lock_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({"managed": false}));
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let managed = open_child_directory(
+        target,
+        ".agent-skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "managed metadata directory",
+    )?;
+    let activation = load_json_file(
+        &managed,
+        EXTERNAL_ACTIVATION_LOCK,
+        MANAGED_FILE_MODE,
+        "activation Lock",
+    )?;
+    let (version, files) = validate_activation_lock_contract(&activation)?;
+    for entry in files {
+        let path = entry.get("path").and_then(Value::as_str).ok_or_else(|| {
+            LifecycleError::Invalid("activation-lock file path is invalid".to_owned())
+        })?;
+        let mode = entry
+            .get("mode")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                LifecycleError::Invalid("activation-lock file mode is invalid".to_owned())
+            })?;
+        let expected = entry.get("sha256").and_then(Value::as_str).ok_or_else(|| {
+            LifecycleError::Invalid("activation-lock file hash is invalid".to_owned())
+        })?;
+        let actual = hash_relative_file(target, path, mode)?;
+        if actual != expected {
+            return Err(LifecycleError::Invalid(format!(
+                "activated file differs: {path}"
+            )));
+        }
+    }
+    Ok(json!({
+        "deprecation": if version == "1.0" { "blocked-new-use" } else { "current" },
+        "file_count": files.len(),
+        "managed": true,
+        "schema_version": version,
+    }))
+}
+
+fn validate_activation_lock_contract(value: &Value) -> Result<(&str, &[Value]), LifecycleError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| LifecycleError::Invalid("activation-lock must be an object".to_owned()))?;
+    let version_value = object.get("schema_version").unwrap_or(&Value::Null);
+    let Some(version) = version_value.as_str() else {
+        return Err(LifecycleError::Invalid(format!(
+            "unsupported activation-lock schema_version: {}",
+            canonical_json_inline(version_value)?
+        )));
+    };
+    let fields = if version == "1.0" {
+        &["files", "manager", "schema_version"][..]
+    } else if version == "2.0" {
+        &["files", "handler", "manager", "schema_version"][..]
+    } else {
+        return Err(LifecycleError::Invalid(format!(
+            "unsupported activation-lock schema_version: {}",
+            canonical_json_inline(version_value)?
+        )));
+    };
+    if object.len() != fields.len() || fields.iter().any(|field| !object.contains_key(*field)) {
+        return Err(LifecycleError::Invalid(
+            "activation-lock fields differ from its versioned contract".to_owned(),
+        ));
+    }
+    if object.get("manager").and_then(Value::as_str) != Some("agent-development-skills") {
+        return Err(LifecycleError::Invalid(
+            "activation-lock manager is invalid".to_owned(),
+        ));
+    }
+    if version == "2.0"
+        && object.get("handler").and_then(Value::as_str)
+            != Some("core.source-activation.apple-codex-v1")
+    {
+        return Err(LifecycleError::Invalid(
+            "activation-lock handler is invalid".to_owned(),
+        ));
+    }
+    let files = object
+        .get("files")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            LifecycleError::Invalid("activation-lock files must be an array".to_owned())
+        })?;
+    let mut paths = HashSet::with_capacity(files.len());
+    for entry in files {
+        let entry = entry.as_object().ok_or_else(|| {
+            LifecycleError::Invalid("activation-lock file entry is invalid".to_owned())
+        })?;
+        if entry.len() != 3
+            || ["mode", "path", "sha256"]
+                .iter()
+                .any(|field| !entry.contains_key(*field))
+        {
+            return Err(LifecycleError::Invalid(
+                "activation-lock file entry is invalid".to_owned(),
+            ));
+        }
+        let path = entry.get("path").and_then(Value::as_str).ok_or_else(|| {
+            LifecycleError::Invalid("activation-lock file path is invalid".to_owned())
+        })?;
+        if path.is_empty() || path.starts_with('/') || path.split('/').any(|part| part == "..") {
+            return Err(LifecycleError::Invalid(
+                "activation-lock file path is invalid".to_owned(),
+            ));
+        }
+        if entry
+            .get("mode")
+            .and_then(Value::as_u64)
+            .is_none_or(|mode| mode > 0o777)
+        {
+            return Err(LifecycleError::Invalid(
+                "activation-lock file mode is invalid".to_owned(),
+            ));
+        }
+        if !entry
+            .get("sha256")
+            .and_then(Value::as_str)
+            .is_some_and(valid_sha256)
+        {
+            return Err(LifecycleError::Invalid(
+                "activation-lock file hash is invalid".to_owned(),
+            ));
+        }
+        if !paths.insert(path) {
+            return Err(LifecycleError::Invalid(
+                "activation-lock file paths must be unique".to_owned(),
+            ));
+        }
+    }
+    Ok((version, files))
+}
+
+fn hash_relative_file(root: &Dir, relative: &str, mode: u32) -> Result<String, LifecycleError> {
+    let mut file = open_relative_file(root, relative, mode)?;
+    let opened = file.metadata()?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    let after = file.metadata()?;
+    let current = open_relative_file(root, relative, mode)?.metadata()?;
+    if !same_object_cap(&opened, &after)
+        || !same_object_cap(&opened, &current)
+        || !same_content_state_cap(&opened, &after)
+        || !same_content_state_cap(&opened, &current)
+    {
+        return Err(LifecycleError::Invalid(
+            "activated file changed while reading".to_owned(),
+        ));
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn open_relative_file(
+    root: &Dir,
+    relative: &str,
+    mode: u32,
+) -> Result<cap_std::fs::File, LifecycleError> {
+    let path = Path::new(relative);
+    if path.is_absolute() {
+        return Err(LifecycleError::Invalid(
+            "activated file must be a package-relative path".to_owned(),
+        ));
+    }
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                parts.push(part.to_str().ok_or_else(|| {
+                    LifecycleError::Invalid("activated file path is invalid".to_owned())
+                })?);
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::Prefix(_)
+            | std::path::Component::RootDir => {
+                return Err(LifecycleError::Invalid(
+                    "activated file must be a package-relative path".to_owned(),
+                ));
+            }
+        }
+    }
+    let (name, parents) = parts.split_last().ok_or_else(|| {
+        LifecycleError::Invalid("activated file must be a package-relative path".to_owned())
+    })?;
+    let mut directory = root.try_clone()?;
+    for parent in parents {
+        match directory.symlink_metadata(parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(LifecycleError::Invalid(format!(
+                    "activated file must not traverse a symlink: {relative}"
+                )));
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            _ => {
+                return Err(LifecycleError::Invalid(format!(
+                    "activated file differs: {relative}"
+                )));
+            }
+        }
+        directory = open_child_directory(&directory, parent, None, "activation directory")
+            .map_err(|_| LifecycleError::Invalid(format!("activated file differs: {relative}")))?;
+    }
+    match directory.symlink_metadata(name) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(LifecycleError::Invalid(format!(
+                "activated file must not traverse a symlink: {relative}"
+            )));
+        }
+        Ok(metadata) if metadata.is_file() => {}
+        _ => {
+            return Err(LifecycleError::Invalid(format!(
+                "activated file differs: {relative}"
+            )));
+        }
+    }
+    open_child_file(&directory, name, mode, "activated file")
+        .map_err(|_| LifecycleError::Invalid(format!("activated file differs: {relative}")))
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn canonical_json_inline(value: &Value) -> Result<String, LifecycleError> {
+    let mut bytes = canonical_json(value)?;
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| LifecycleError::Invalid("canonical JSON must be UTF-8".to_owned()))
 }
 
 fn open_root_directory(path: &Path, mode: Option<u32>, label: &str) -> Result<Dir, LifecycleError> {
@@ -941,6 +1226,14 @@ mod tests {
             Some(&json!("skipped"))
         );
         assert_eq!(
+            check(&value, "activation.integrity").get("status"),
+            Some(&json!("passed"))
+        );
+        assert_eq!(
+            check(&value, "activation.integrity").get("details"),
+            Some(&json!({"managed": false}))
+        );
+        assert_eq!(
             std::fs::read_dir(&root)
                 .expect("re-read lifecycle test root")
                 .count(),
@@ -996,6 +1289,90 @@ mod tests {
             error.to_string(),
             "Core runtime version differs from the installed Lockfiles"
         );
+    }
+
+    #[test]
+    fn activation_lock_versions_and_paths_are_fail_closed() {
+        let legacy = json!({
+            "files": [{
+                "mode": 0o644,
+                "path": "agents/reviewer.toml",
+                "sha256": "a".repeat(64),
+            }],
+            "manager": "agent-development-skills",
+            "schema_version": "1.0",
+        });
+        let (version, files) =
+            validate_activation_lock_contract(&legacy).expect("legacy activation Lock");
+        assert_eq!(version, "1.0");
+        assert_eq!(files.len(), 1);
+
+        let current = json!({
+            "files": [],
+            "handler": "core.source-activation.apple-codex-v1",
+            "manager": "agent-development-skills",
+            "schema_version": "2.0",
+        });
+        assert_eq!(
+            validate_activation_lock_contract(&current)
+                .expect("current activation Lock")
+                .0,
+            "2.0"
+        );
+
+        let mut unsafe_path = legacy.clone();
+        unsafe_path["files"][0]["path"] = json!("../outside");
+        assert!(
+            validate_activation_lock_contract(&unsafe_path)
+                .expect_err("unsafe activation path must fail")
+                .to_string()
+                .contains("path is invalid")
+        );
+
+        let mut duplicate = legacy.clone();
+        let duplicate_entry = duplicate["files"][0].clone();
+        duplicate["files"]
+            .as_array_mut()
+            .expect("activation files")
+            .push(duplicate_entry);
+        assert_eq!(
+            validate_activation_lock_contract(&duplicate)
+                .expect_err("duplicate paths must fail")
+                .to_string(),
+            "activation-lock file paths must be unique"
+        );
+
+        let mut invalid_version = legacy;
+        invalid_version["schema_version"] = json!(1);
+        assert_eq!(
+            validate_activation_lock_contract(&invalid_version)
+                .expect_err("non-string version must fail")
+                .to_string(),
+            "unsupported activation-lock schema_version: 1"
+        );
+
+        for (invalid, expected) in [
+            (
+                json!("a'b"),
+                r#"unsupported activation-lock schema_version: "a'b""#,
+            ),
+            (
+                json!("a\u{2028}b"),
+                "unsupported activation-lock schema_version: \"a\u{2028}b\"",
+            ),
+            (
+                json!("a\u{034f}b"),
+                "unsupported activation-lock schema_version: \"a\u{034f}b\"",
+            ),
+        ] {
+            invalid_version["schema_version"] = invalid;
+            assert_eq!(
+                validate_activation_lock_contract(&invalid_version)
+                    .expect_err("unsupported string version must fail")
+                    .to_string(),
+                expected
+            );
+        }
     }
 
     #[cfg(unix)]

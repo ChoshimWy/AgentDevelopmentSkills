@@ -92,9 +92,12 @@ contains:
 - an `agent-lifecycle` crate with the first read-only Doctor compatibility
   slice: safe target acquisition, interrupted-transaction residue discovery,
   managed-root layout checks, Install/Persistent Lock anchoring, Core runtime
-  identity comparison, and runtime Schema inventory comparison. It holds
-  directory capabilities and opens contract files without following symlinks,
-  and it never repairs or writes the inspected installation;
+  identity comparison, runtime Schema inventory comparison, and managed
+  Activation file verification. It holds directory capabilities and opens
+  contract files without following symlinks, and it never repairs or writes
+  the inspected installation. Activation mode parity is POSIX-only for now;
+  Windows-native Doctor verifies the Lock contract, no-follow paths, and
+  content hashes without treating POSIX mode bits as an ACL guarantee;
 - schema-aligned capability-contract type validation shared by the Python
   baseline and native normalization path;
 - Python-to-Rust byte-level differential tests covering malicious provider
@@ -157,10 +160,10 @@ The native lifecycle lane is also deliberately incomplete. Its current
 existing Doctor checks so differential tests can freeze read-only semantics;
 it writes canonical JSON to stdout and exits with status 2 whenever any
 projected check fails, matching the production Doctor shell contract.
-Package/Skill/AGENTS/Binding/permission/activation integrity, rollback-point
-validation, full Doctor Report v1 emission, and every mutating lifecycle
-transaction remain on the Python production path until their own differential,
-tamper, concurrency, rollback, and independent-review gates pass.
+Package/Skill/AGENTS/Binding/permission integrity, rollback-point validation,
+full Doctor Report v1 emission, and every mutating lifecycle transaction remain
+on the Python production path until their own differential, tamper,
+concurrency, rollback, and independent-review gates pass.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

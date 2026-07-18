@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 import re
 from typing import Any
 
-from .canonical_json import sha256
+from .canonical_json import dumps, sha256
 from .models import ContractError, NodeStatus, require_fields, require_version
 from .design.contracts import (
     validate_canonical_ui_ir,
@@ -66,7 +66,10 @@ def validate_activation_lock(value: dict[str, Any]) -> None:
     if version == "2.0":
         expected.add("handler")
     elif version != "1.0":
-        raise ContractError(f"unsupported activation-lock schema_version: {version!r}")
+        encoded_version = dumps(version).removesuffix("\n")
+        raise ContractError(
+            f"unsupported activation-lock schema_version: {encoded_version}"
+        )
     if set(value) != expected:
         raise ContractError("activation-lock fields differ from its versioned contract")
     if value.get("manager") != "agent-development-skills":

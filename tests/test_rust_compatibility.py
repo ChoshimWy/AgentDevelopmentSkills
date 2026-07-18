@@ -1386,6 +1386,7 @@ class RustCompatibilityTests(unittest.TestCase):
             "lock.persistent",
             "environment.core",
             "schema.inventory",
+            "activation.integrity",
         }
 
         def python_projection(target: Path) -> dict:
@@ -1604,6 +1605,328 @@ class RustCompatibilityTests(unittest.TestCase):
                 ["environment.core"],
             )
             self.assertEqual(filesystem_identity(target), before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["apple", "desktop"],
+                ),
+                target,
+            )
+            activated = target / "bin" / "managed-tool"
+            activated.parent.mkdir()
+            activated.write_bytes(b"managed\n")
+            activated.chmod(0o755)
+            activation_lock = {
+                "files": [{
+                    "mode": 0o755,
+                    "path": "bin/managed-tool",
+                    "sha256": hashlib.sha256(
+                        activated.read_bytes()
+                    ).hexdigest(),
+                }],
+                "manager": "agent-development-skills",
+                "schema_version": "1.0",
+            }
+            activation_lock_path = (
+                target / ".agent-skills" / "activation-lock.json"
+            )
+            dump(activation_lock, activation_lock_path)
+            activation_lock_path.chmod(0o644)
+
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            actual = json.loads(result.stdout)
+            actual.pop("fingerprint")
+            self.assertEqual(actual, expected)
+            self.assertEqual(
+                next(
+                    check
+                    for check in actual["checks"]
+                    if check["id"] == "activation.integrity"
+                )["details"],
+                {
+                    "deprecation": "blocked-new-use",
+                    "file_count": 1,
+                    "managed": True,
+                    "schema_version": "1.0",
+                },
+            )
+            self.assertEqual(filesystem_identity(target), before)
+
+            activation_lock["handler"] = (
+                "core.source-activation.apple-codex-v1"
+            )
+            activation_lock["schema_version"] = "2.0"
+            dump(activation_lock, activation_lock_path)
+            activation_lock_path.chmod(0o644)
+            before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            actual = json.loads(result.stdout)
+            actual.pop("fingerprint")
+            self.assertEqual(actual, expected)
+            self.assertEqual(
+                next(
+                    check
+                    for check in actual["checks"]
+                    if check["id"] == "activation.integrity"
+                )["details"]["deprecation"],
+                "current",
+            )
+            self.assertEqual(filesystem_identity(target), before)
+
+            invalid_version = deepcopy(activation_lock)
+            invalid_version["schema_version"] = 1
+            invalid_version.pop("handler")
+            dump(invalid_version, activation_lock_path)
+            activation_lock_path.chmod(0o644)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            actual = json.loads(result.stdout)
+            expected_activation = next(
+                check
+                for check in expected["checks"]
+                if check["id"] == "activation.integrity"
+            )
+            actual_activation = next(
+                check
+                for check in actual["checks"]
+                if check["id"] == "activation.integrity"
+            )
+            self.assertEqual(actual_activation, expected_activation)
+            self.assertEqual(
+                actual_activation["details"],
+                {
+                    "errors": [
+                        "unsupported activation-lock schema_version: 1"
+                    ]
+                },
+            )
+
+            for invalid, error in (
+                (
+                    "a'b",
+                    'unsupported activation-lock schema_version: "a\'b"',
+                ),
+                (
+                    "a\u2028b",
+                    'unsupported activation-lock schema_version: "a\u2028b"',
+                ),
+                (
+                    "a\u034fb",
+                    'unsupported activation-lock schema_version: "a\u034fb"',
+                ),
+            ):
+                invalid_version["schema_version"] = invalid
+                dump(invalid_version, activation_lock_path)
+                activation_lock_path.chmod(0o644)
+                expected = python_projection(target)
+                result = self.run_rust(
+                    "doctor-baseline",
+                    str(target),
+                    "--schemas",
+                    str(ROOT / "schemas"),
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                actual_activation = next(
+                    check
+                    for check in json.loads(result.stdout)["checks"]
+                    if check["id"] == "activation.integrity"
+                )
+                expected_activation = next(
+                    check
+                    for check in expected["checks"]
+                    if check["id"] == "activation.integrity"
+                )
+                self.assertEqual(actual_activation, expected_activation)
+                self.assertEqual(
+                    actual_activation["details"],
+                    {"errors": [error]},
+                )
+
+            invalid_path = deepcopy(activation_lock)
+            invalid_path["files"][0]["path"] = "."
+            dump(invalid_path, activation_lock_path)
+            activation_lock_path.chmod(0o644)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            actual_activation = next(
+                check
+                for check in json.loads(result.stdout)["checks"]
+                if check["id"] == "activation.integrity"
+            )
+            expected_activation = next(
+                check
+                for check in expected["checks"]
+                if check["id"] == "activation.integrity"
+            )
+            self.assertEqual(actual_activation, expected_activation)
+            self.assertEqual(
+                actual_activation["details"],
+                {
+                    "errors": [
+                        "activated file must be a package-relative path"
+                    ]
+                },
+            )
+
+            dump(activation_lock, activation_lock_path)
+            activation_lock_path.chmod(0o644)
+            activated.chmod(0o644)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            actual_activation = next(
+                check
+                for check in json.loads(result.stdout)["checks"]
+                if check["id"] == "activation.integrity"
+            )
+            expected_activation = next(
+                check
+                for check in expected["checks"]
+                if check["id"] == "activation.integrity"
+            )
+            self.assertEqual(actual_activation, expected_activation)
+            self.assertEqual(
+                actual_activation["details"],
+                {"errors": ["activated file differs: bin/managed-tool"]},
+            )
+
+            activated.chmod(0o755)
+            real_activated = activated.with_name("real-managed-tool")
+            activated.rename(real_activated)
+            activated.symlink_to(real_activated.name)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            actual_activation = next(
+                check
+                for check in json.loads(result.stdout)["checks"]
+                if check["id"] == "activation.integrity"
+            )
+            expected_activation = next(
+                check
+                for check in expected["checks"]
+                if check["id"] == "activation.integrity"
+            )
+            self.assertEqual(actual_activation, expected_activation)
+            self.assertEqual(
+                actual_activation["details"],
+                {
+                    "errors": [
+                        "activated file must not traverse a symlink: "
+                        "bin/managed-tool"
+                    ]
+                },
+            )
+            activated.unlink()
+            real_activated.rename(activated)
+
+            activated.write_bytes(b"tampered\n")
+            tampered_before = filesystem_identity(target)
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(result.stderr, "")
+            actual = json.loads(result.stdout)
+            self.assertEqual(
+                normalize_failures(actual),
+                normalize_failures(expected),
+            )
+            self.assertEqual(
+                [
+                    check["id"]
+                    for check in actual["checks"]
+                    if check["status"] == "failed"
+                ],
+                ["activation.integrity"],
+            )
+            self.assertEqual(
+                filesystem_identity(target),
+                tampered_before,
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "codex"
+            install_bundle(
+                build_install_bundle(
+                    ROOT / "platforms",
+                    platforms=["apple", "desktop"],
+                ),
+                target,
+            )
+            activation_lock_path = (
+                target / ".agent-skills" / "activation-lock.json"
+            )
+            activation_lock_path.symlink_to("missing-activation-lock.json")
+            expected = python_projection(target)
+            result = self.run_rust(
+                "doctor-baseline",
+                str(target),
+                "--schemas",
+                str(ROOT / "schemas"),
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            actual_activation = next(
+                check
+                for check in json.loads(result.stdout)["checks"]
+                if check["id"] == "activation.integrity"
+            )
+            expected_activation = next(
+                check
+                for check in expected["checks"]
+                if check["id"] == "activation.integrity"
+            )
+            self.assertEqual(actual_activation, expected_activation)
+            self.assertEqual(
+                actual_activation["details"],
+                {"errors": ["activation Lock is missing or unsafe"]},
+            )
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

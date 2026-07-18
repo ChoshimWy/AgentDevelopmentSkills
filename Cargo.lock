@@ -38,6 +38,7 @@ dependencies = [
  "cap-std",
  "libc",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 
