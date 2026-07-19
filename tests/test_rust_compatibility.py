@@ -226,6 +226,65 @@ class RustCompatibilityTests(unittest.TestCase):
             self.assertEqual(report["status"], "planned")
             self.assertFalse(target.exists())
 
+    @unittest.skipIf(os.name == "nt", "source uninstaller is POSIX-only")
+    def test_source_checkout_uninstall_uses_real_offline_rust_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="agent-skills-real-source-uninstall-"
+        ) as directory:
+            target = Path(directory).resolve() / "target"
+            installed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/install_local.py"),
+                    "--target-root",
+                    str(target),
+                    "--platform",
+                    "desktop",
+                    "--json",
+                ],
+                cwd=ROOT,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            before = sorted(
+                path.relative_to(target).as_posix()
+                for path in target.rglob("*")
+            )
+            completed = subprocess.run(
+                [
+                    "/bin/bash",
+                    str(ROOT / "uninstall.sh"),
+                    "--target-root",
+                    str(target),
+                    "--platform",
+                    "desktop",
+                    "--json",
+                    "--dry-run",
+                ],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "AGENT_SKILLS_UNINSTALL_ENGINE": "rust",
+                    "CARGO_TERM_COLOR": "never",
+                },
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["status"], "planned")
+            self.assertEqual(report["selected_platforms"], ["desktop"])
+            self.assertEqual(
+                sorted(
+                    path.relative_to(target).as_posix()
+                    for path in target.rglob("*")
+                ),
+                before,
+            )
+
     def test_canonical_json_and_hash_match_python(self) -> None:
         value = {
             "z": [3, 2, 1],

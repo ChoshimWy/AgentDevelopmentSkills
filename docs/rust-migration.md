@@ -194,9 +194,11 @@ The repository contains:
   dry-run, Python-compatible human output, and canonical blocked JSON.
   The gated hosted `uninstall.sh` verifies the installed executable against its
   embedded host artifact size and SHA-256 before defaulting to the native
-  guard. Source-checkout, release-mismatch, unsupported-host, and
-  compatibility-only requests retain the verified Python path; a selected
-  native execution never silently falls back.
+  guard. Source-checkout uninstall now defaults compatible target/platform
+  requests to a locked, offline Cargo build in a private temporary target.
+  Release mismatch, unsupported hosts, compatibility-only requests, and an
+  explicitly selected Python engine retain the verified Python path; a
+  selected native build or execution never silently falls back.
   The crate now also resolves the source package catalog used before native
   installation: explicit platform, discipline, and runtime-config selection;
   required and optional package dependencies; numeric version constraints;
@@ -323,9 +325,11 @@ alias). Eligible Apple installs publish the frozen executable as both
 `bin/agent-session` and `bin/agent-skills`, so installed users can preview and
 execute the native full-uninstall transaction without Python. Host-specific
 live Provider execution and complete production CLI parity remain later phase
-gates. Although the release matrix includes Windows binaries, Windows
-production source install remains blocked until its full filesystem contract
-is enabled.
+gates. The POSIX source-checkout uninstaller now builds that transaction with
+locked offline Cargo in an isolated target by default, while preserving an
+explicit Python compatibility engine. Although the release matrix includes
+Windows binaries, Windows production source install remains blocked until its
+full filesystem contract is enabled.
 
 The native and Python lanes now also expose the same Provider Invocation v1
 transport. `prepare` freezes the Adapter Request together with the node's
@@ -428,10 +432,11 @@ and rejects any source, candidate, target, Plan, or approval drift.
 Doctor, uninstall, rollback, and source activation now have native public or
 transaction routes with differential, tamper, concurrency, recovery, and
 independent-review evidence. The signed POSIX release bootstrap now exposes
-the explicit guarded `--upgrade` route without Python. The remaining hosted
-lifecycle cutover is PowerShell and the other compatibility bootstrap
-surfaces, separate from both the operator-invoked native routes and the
-Python-free eligible fresh-install route.
+the explicit guarded `--upgrade` route without Python, and POSIX source
+checkout install/uninstall default eligible non-interactive requests to
+isolated locked offline Rust builds. The remaining hosted lifecycle cutover is
+PowerShell and the other compatibility bootstrap surfaces, separate from both
+the operator-invoked native routes and the Python-free eligible source routes.
 Upgrade Source Qualification v1 establishes the release-side input for that
 cutover. It binds the completed repository Conformance suite to the immutable
 source archive hash and size, source revision, complete SBOM material identity,

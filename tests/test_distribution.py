@@ -990,6 +990,165 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(no_cargo.returncode, 2)
         self.assertIn("requires cargo", no_cargo.stderr)
 
+    @unittest.skipIf(os.name == "nt", "POSIX source bootstrap is covered on macOS/Linux")
+    def test_source_checkout_uninstall_builds_and_routes_rust_without_python(self) -> None:
+        tools = self.root / "source-uninstall-tools"
+        tools.mkdir()
+        cargo_arguments = self.root / "source-uninstall-cargo-arguments.txt"
+        native_arguments = self.root / "source-uninstall-arguments.txt"
+        native_executable = self.root / "source-uninstall-executable.txt"
+        cargo = tools / "cargo"
+        cargo.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "printf '%s\\n' \"$@\" > \"$AGENT_SKILLS_TEST_CARGO_ARGS\"\n"
+            "target_dir=\n"
+            "while [ \"$#\" -gt 0 ]; do\n"
+            "  if [ \"$1\" = '--target-dir' ]; then\n"
+            "    target_dir=$2\n"
+            "    shift 2\n"
+            "  else\n"
+            "    shift\n"
+            "  fi\n"
+            "done\n"
+            "mkdir -p \"$target_dir/debug\"\n"
+            "cat > \"$target_dir/debug/agent-skills-rs\" <<'NATIVE'\n"
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$0\" > \"$AGENT_SKILLS_TEST_NATIVE_EXECUTABLE\"\n"
+            "printf '%s\\n' \"$@\" > \"$AGENT_SKILLS_TEST_NATIVE_ARGS\"\n"
+            "printf '%s\\n' '{\"engine\":\"rust\",\"status\":\"planned\"}'\n"
+            "NATIVE\n"
+            "chmod 700 \"$target_dir/debug/agent-skills-rs\"\n",
+            encoding="utf-8",
+        )
+        cargo.chmod(0o755)
+        target = self.root / "source-uninstall-target"
+        target.mkdir()
+        environment = {
+            **os.environ,
+            "AGENT_SKILLS_PYTHON": str(self.root / "missing-python"),
+            "AGENT_SKILLS_TEST_CARGO_ARGS": str(cargo_arguments),
+            "AGENT_SKILLS_TEST_NATIVE_ARGS": str(native_arguments),
+            "AGENT_SKILLS_TEST_NATIVE_EXECUTABLE": str(native_executable),
+            "PATH": f"{tools}:/usr/bin:/bin",
+        }
+        completed = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "uninstall.sh"),
+                "--target-root",
+                str(target),
+                "--platform",
+                "apple",
+                "--dry-run",
+                "--json",
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {"engine": "rust", "status": "planned"},
+        )
+        build_arguments = cargo_arguments.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(build_arguments[0], "build")
+        self.assertIn("--locked", build_arguments)
+        self.assertIn("--offline", build_arguments)
+        self.assertIn(str(ROOT / "Cargo.toml"), build_arguments)
+        self.assertIn("--package", build_arguments)
+        self.assertIn("agent-skills-rs", build_arguments)
+        self.assertIn("--target-dir", build_arguments)
+        forwarded = native_arguments.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            forwarded,
+            [
+                "uninstall",
+                str(target),
+                "--platform",
+                "apple",
+                "--dry-run",
+                "--json",
+            ],
+        )
+        executable = Path(native_executable.read_text(encoding="utf-8").strip())
+        self.assertTrue(str(executable).endswith("/target/debug/agent-skills-rs"))
+        self.assertFalse(executable.parents[2].exists())
+        self.assertTrue(target.is_dir())
+
+        cargo.write_text("#!/bin/sh\nexit 39\n", encoding="utf-8")
+        cargo.chmod(0o755)
+        failed = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "uninstall.sh"),
+                "--target-root",
+                str(target),
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(failed.returncode, 39)
+        self.assertNotIn("Python", failed.stderr)
+
+        cargo_called = self.root / "malformed-uninstall-cargo-called"
+        cargo.write_text(
+            "#!/bin/sh\n"
+            "printf called > \"$AGENT_SKILLS_TEST_CARGO_CALLED\"\n"
+            "exit 40\n",
+            encoding="utf-8",
+        )
+        cargo.chmod(0o755)
+        malformed = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "uninstall.sh"),
+                "--target-root",
+                str(target),
+                f"--target-root={target}",
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env={
+                **environment,
+                "AGENT_SKILLS_TEST_CARGO_CALLED": str(cargo_called),
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(malformed.returncode, 2)
+        self.assertIn("target arguments are malformed or unsafe", malformed.stderr)
+        self.assertFalse(cargo_called.exists())
+
+        no_cargo = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "uninstall.sh"),
+                "--target-root",
+                str(target),
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env={
+                **environment,
+                "AGENT_SKILLS_UNINSTALL_ENGINE": "rust",
+                "PATH": "/usr/bin:/bin",
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(no_cargo.returncode, 2)
+        self.assertIn("requires cargo", no_cargo.stderr)
+
     @unittest.skipIf(os.name == "nt", "POSIX native bootstrap is covered on macOS/Linux")
     def test_rendered_posix_bootstrap_installs_without_python(self) -> None:
         release = self.root / "rendered-native-release"
@@ -1467,7 +1626,22 @@ class DistributionTests(unittest.TestCase):
             native_records=[native_record],
             version="1.0.0",
         )
-        script = self.root / "rendered-uninstall.sh"
+        collision_root = self.root / "rendered-uninstall-source-collision"
+        (collision_root / "scripts").mkdir(parents=True)
+        (collision_root / "scripts" / "uninstall_local.py").write_text(
+            "raise SystemExit('rendered uninstall used source checkout')\n",
+            encoding="utf-8",
+        )
+        cargo_called = self.root / "rendered-uninstall-cargo-called"
+        fake_cargo = collision_root / "cargo"
+        fake_cargo.write_text(
+            "#!/bin/sh\n"
+            "printf called > \"$AGENT_SKILLS_TEST_CARGO_CALLED\"\n"
+            "exit 41\n",
+            encoding="utf-8",
+        )
+        fake_cargo.chmod(0o755)
+        script = collision_root / "uninstall.sh"
         script.write_bytes(rendered)
         target = self.root / "rendered-native-uninstall-target"
         executable = target / "bin" / "agent-skills"
@@ -1481,7 +1655,8 @@ class DistributionTests(unittest.TestCase):
             "AGENT_SKILLS_PYTHON": str(self.root / "missing-python"),
             "AGENT_SKILLS_TEST_NATIVE_ARGS": str(arguments_path),
             "AGENT_SKILLS_TEST_NATIVE_EXECUTABLE": str(executed_path),
-            "PATH": "/usr/bin:/bin",
+            "AGENT_SKILLS_TEST_CARGO_CALLED": str(cargo_called),
+            "PATH": f"{collision_root}:/usr/bin:/bin",
         }
 
         completed = subprocess.run(
@@ -1523,6 +1698,7 @@ class DistributionTests(unittest.TestCase):
         copied_executable = Path(executed_path.read_text(encoding="utf-8").strip())
         self.assertNotEqual(copied_executable, executable)
         self.assertFalse(copied_executable.exists())
+        self.assertFalse(cargo_called.exists())
 
         arguments_path.unlink()
         executable.write_bytes(native_data + b"tampered")

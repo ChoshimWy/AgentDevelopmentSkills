@@ -61,6 +61,7 @@ class UninstallScriptTests(unittest.TestCase):
         return subprocess.run(
             command,
             cwd=ROOT,
+            env={**os.environ, "AGENT_SKILLS_UNINSTALL_ENGINE": "python"},
             check=check,
             capture_output=True,
             text=True,

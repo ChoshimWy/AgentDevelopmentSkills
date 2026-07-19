@@ -82,20 +82,13 @@ case "$REQUESTED_ENGINE" in
         ;;
 esac
 
-# A source checkout retains the Python compatibility path. The hosted,
-# release-rendered script has no repository sibling and can authenticate the
-# installed executable against its embedded native matrix.
-if [[ -n "$SCRIPT_SOURCE" ]]; then
+SOURCE_CHECKOUT_ROOT=''
+# Rendered signed bootstraps must use their embedded release metadata even when
+# they are saved beside a source checkout.
+if [[ -n "$SCRIPT_SOURCE" && -z "$AGENT_SKILLS_EMBEDDED_VERSION" ]]; then
     REPO_ROOT="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd -P)"
     if [[ -f "$REPO_ROOT/scripts/uninstall_local.py" ]]; then
-        if [[ "$REQUESTED_ENGINE" == "rust" ]]; then
-            printf '%s\n' \
-                "forced Rust uninstall requires a hosted, version-matched v2 uninstall.sh or the verified installed bin/agent-skills" \
-                >&2
-            exit 2
-        fi
-        resolve_selected_python
-        exec "$PYTHON_BIN" "$REPO_ROOT/scripts/uninstall_local.py" "$@"
+        SOURCE_CHECKOUT_ROOT="$REPO_ROOT"
     fi
 fi
 
@@ -107,30 +100,73 @@ else
     NATIVE_TARGET_ROOT=''
 fi
 NATIVE_ARGUMENTS=()
+NATIVE_ARGUMENTS_PRESENT=0
 NATIVE_DRY_RUN=0
 NATIVE_JSON=0
 
-parse_native_request() {
-    local argument
+validate_uninstall_target_arguments() {
+    local argument value target_root_seen=0
+    local target_root="$NATIVE_TARGET_ROOT"
     while (($#)); do
         argument="$1"
         case "$argument" in
             --target-root)
                 (($# >= 2)) || return 1
+                ((target_root_seen == 0)) || return 1
+                value="$2"
+                [[ -n "$value" && "$value" != --* ]] || return 1
+                target_root_seen=1
+                target_root="$value"
+                shift 2
+                ;;
+            --target-root=*)
+                ((target_root_seen == 0)) || return 1
+                value="${argument#*=}"
+                [[ -n "$value" ]] || return 1
+                target_root_seen=1
+                target_root="$value"
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    [[ -n "$target_root" && "$target_root" != *'~'* ]]
+}
+
+parse_native_request() {
+    local argument target_root_seen=0
+    while (($#)); do
+        argument="$1"
+        case "$argument" in
+            --target-root)
+                (($# >= 2)) || return 1
+                ((target_root_seen == 0)) || return 1
+                [[ -n "$2" && "$2" != --* ]] || return 1
+                target_root_seen=1
                 NATIVE_TARGET_ROOT="$2"
                 shift 2
                 ;;
             --target-root=*)
+                ((target_root_seen == 0)) || return 1
+                target_root_seen=1
                 NATIVE_TARGET_ROOT="${argument#*=}"
+                [[ -n "$NATIVE_TARGET_ROOT" ]] || return 1
                 shift
                 ;;
             --platform)
                 (($# >= 2)) || return 1
+                [[ -n "$2" ]] || return 1
                 NATIVE_ARGUMENTS+=(--platform "$2")
+                NATIVE_ARGUMENTS_PRESENT=1
                 shift 2
                 ;;
             --platform=*)
-                NATIVE_ARGUMENTS+=(--platform "${argument#*=}")
+                argument="${argument#*=}"
+                [[ -n "$argument" ]] || return 1
+                NATIVE_ARGUMENTS+=(--platform "$argument")
+                NATIVE_ARGUMENTS_PRESENT=1
                 shift
                 ;;
             --dry-run)
@@ -149,9 +185,11 @@ parse_native_request() {
     [[ -n "$NATIVE_TARGET_ROOT" && "$NATIVE_TARGET_ROOT" != *'~'* ]] || return 1
     if ((NATIVE_DRY_RUN)); then
         NATIVE_ARGUMENTS+=(--dry-run)
+        NATIVE_ARGUMENTS_PRESENT=1
     fi
     if ((NATIVE_JSON)); then
         NATIVE_ARGUMENTS+=(--json)
+        NATIVE_ARGUMENTS_PRESENT=1
     fi
 }
 
@@ -245,9 +283,75 @@ prepare_release_native() {
     fi
 }
 
+run_source_native_uninstall() {
+    local source_root="$1"
+    local temporary native_executable native_status=0
+    command -v cargo >/dev/null 2>&1 || {
+        printf '%s\n' "native source uninstall requires cargo" >&2
+        return 2
+    }
+    local required
+    for required in \
+        Cargo.toml \
+        Cargo.lock \
+        rust-toolchain.toml \
+        crates/agent-skills/Cargo.toml; do
+        [[ -f "$source_root/$required" && ! -L "$source_root/$required" ]] || {
+            printf '%s\n' "native source uninstall input is missing or unsafe: $required" >&2
+            return 2
+        }
+    done
+    temporary="$(mktemp -d "${TMPDIR:-/tmp}/agent-skills-source-uninstall.XXXXXX")"
+    SOURCE_NATIVE_DIR="$temporary"
+    trap 'rm -rf "${SOURCE_NATIVE_DIR:-}"' EXIT HUP INT TERM
+    (
+        cd "$source_root"
+        cargo build \
+            --locked \
+            --offline \
+            --manifest-path "$source_root/Cargo.toml" \
+            --package agent-skills-rs \
+            --bin agent-skills-rs \
+            --target-dir "$temporary/target"
+    )
+    native_executable="$temporary/target/debug/agent-skills-rs"
+    [[ -f "$native_executable" && ! -L "$native_executable" && -x "$native_executable" ]] || {
+        printf '%s\n' "cargo did not produce the expected native uninstaller" >&2
+        return 2
+    }
+    local command=("$native_executable" uninstall "$NATIVE_TARGET_ROOT")
+    if ((NATIVE_ARGUMENTS_PRESENT)); then
+        command+=("${NATIVE_ARGUMENTS[@]}")
+    fi
+    AGENT_SKILLS_UNINSTALL_ENGINE_SELECTED=rust \
+        "${command[@]}" || native_status=$?
+    return "$native_status"
+}
+
+if ! validate_uninstall_target_arguments "$@"; then
+    printf '%s\n' "uninstall target arguments are malformed or unsafe" >&2
+    exit 2
+fi
+
 NATIVE_REQUEST_ELIGIBLE=0
 if parse_native_request "$@"; then
     NATIVE_REQUEST_ELIGIBLE=1
+fi
+
+if [[ -n "$SOURCE_CHECKOUT_ROOT" ]]; then
+    if [[ "$REQUESTED_ENGINE" != "python" && "$NATIVE_REQUEST_ELIGIBLE" == "1" ]] \
+        && command -v cargo >/dev/null 2>&1; then
+        run_source_native_uninstall "$SOURCE_CHECKOUT_ROOT"
+        exit $?
+    fi
+    if [[ "$REQUESTED_ENGINE" == "rust" ]]; then
+        printf '%s\n' \
+            "forced Rust source uninstall requires cargo and compatible target/platform arguments" \
+            >&2
+        exit 2
+    fi
+    resolve_selected_python
+    exec "$PYTHON_BIN" "$SOURCE_CHECKOUT_ROOT/scripts/uninstall_local.py" "$@"
 fi
 
 if [[ "$REQUESTED_ENGINE" != "python" && "$NATIVE_REQUEST_ELIGIBLE" == "1" ]]; then
@@ -255,10 +359,13 @@ if [[ "$REQUESTED_ENGINE" != "python" && "$NATIVE_REQUEST_ELIGIBLE" == "1" ]]; t
     if [[ -n "$HOST_TARGET" ]] && agent_skills_select_native_record "$HOST_TARGET"; then
         if prepare_release_native; then
             native_status=0
+            native_command=("$NATIVE_EXECUTABLE" uninstall "$NATIVE_TARGET_ROOT")
+            if ((NATIVE_ARGUMENTS_PRESENT)); then
+                native_command+=("${NATIVE_ARGUMENTS[@]}")
+            fi
             AGENT_SKILLS_UNINSTALL_ENGINE_SELECTED=rust \
             AGENT_SKILLS_RELEASE_VERSION="$AGENT_SKILLS_EMBEDDED_VERSION" \
-                "$NATIVE_EXECUTABLE" uninstall "$NATIVE_TARGET_ROOT" \
-                    "${NATIVE_ARGUMENTS[@]}" || native_status=$?
+                "${native_command[@]}" || native_status=$?
             clear_native_copy_traps
             exit "$native_status"
         fi

@@ -168,10 +168,12 @@ curl -fsSL --proto '=https' --tlsv1.2 \
 ```
 
 Set `AGENT_SKILLS_UNINSTALL_ENGINE=python` for the compatibility route or
-`AGENT_SKILLS_UNINSTALL_ENGINE=rust` to fail closed unless the installed binary
-matches the hosted release. A source-checkout `uninstall.sh` intentionally
-remains on Python 3.11+; a selected native uninstall never falls back after
-execution begins.
+`AGENT_SKILLS_UNINSTALL_ENGINE=rust` to require native execution. From a source
+checkout, compatible target/platform requests default to a locked, offline
+Cargo build in a private temporary target; set the engine to `python` to force
+the Python 3.11+ compatibility route. A selected native uninstall never falls
+back after build or execution begins. The hosted script continues to fail
+closed unless the installed binary matches its embedded release record.
 
 ## Development
 
@@ -430,8 +432,10 @@ only. The native command now also matches the source CLI's read-only dry-run,
 human-readable success output, and canonical blocked JSON surface. The gated
 hosted `uninstall.sh` authenticates the installed executable against its
 embedded host record and defaults eligible requests to this Rust guard without
-Python. Source-checkout uninstall, release-mismatch, unsupported-host, and
-compatibility-only requests retain the verified Python route.
+Python. Source-checkout uninstall now also defaults compatible requests to an
+offline, locked private Cargo build. Release mismatch, unsupported hosts,
+compatibility-only requests, and an explicitly selected Python engine retain
+the verified Python route.
 
 The parallel `install-selection` compatibility command now resolves the
 installable source package catalog, explicit platform/discipline/runtime
