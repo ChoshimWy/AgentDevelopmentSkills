@@ -214,7 +214,7 @@ fn assert_cli_rollback_round_trip(
     );
 
     let rollback = Command::new(binary)
-        .arg("lifecycle-rollback")
+        .arg("rollback")
         .arg(target)
         .arg("--approve-current-lock")
         .arg(

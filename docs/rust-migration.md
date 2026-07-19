@@ -371,21 +371,20 @@ exact current Lock as lineage. Dry-run emits or saves a canonical Plan; apply
 requires the saved Plan, its exact explicit fingerprint, and the complete
 permission approval set. The executor then reacquires the target lock,
 regenerates the complete Plan, and rejects any candidate or target drift before
-staging. The non-default `lifecycle-rollback` command now consumes the
+staging. The public native `rollback` command now consumes the
 persistent point without accepting caller-supplied paths or content: exact
 current-Lock and rollback-point fingerprints are checked before workspace
 creation, the complete prior managed projection is rebuilt from the validated
 snapshot, the current `.system` tree is preserved, and frozen external
 preimages are restored while `PublishedInstall` can still recover both sides.
 The displaced current state becomes the next validated rollback point, making
-the transaction reversible again. Public upgrade/rollback execution remains
-behind the existing compatibility approval gate until differential and release
-gates are complete.
-Doctor,
-uninstall, and source activation already have native compatibility commands
-with differential, tamper, concurrency, rollback, and independent-review
-evidence; their remaining hosted public CLI cutovers stay separate from the
-now Python-free eligible fresh-install route.
+the transaction reversible again. `lifecycle-rollback` remains a visible
+compatibility alias. Public upgrade still waits on its separate conformance
+and release gate.
+Doctor, uninstall, rollback, and source activation now have native public or
+transaction routes with differential, tamper, concurrency, recovery, and
+independent-review evidence. Public upgrade remains the remaining hosted
+lifecycle cutover, separate from the Python-free eligible fresh-install route.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

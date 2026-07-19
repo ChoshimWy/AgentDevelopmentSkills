@@ -275,6 +275,7 @@ enum Command {
         approvals: Vec<String>,
     },
     /// Execute one exact-approval native persistent rollback transaction.
+    #[command(name = "rollback", visible_alias = "lifecycle-rollback")]
     LifecycleRollback {
         target_root: PathBuf,
         #[arg(long)]

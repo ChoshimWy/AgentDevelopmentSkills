@@ -169,6 +169,9 @@ cargo run --locked -p agent-skills-rs -- \
 cargo run --locked -p agent-skills-rs -- \
   doctor --target-root /path/to/installed-root
 cargo run --locked -p agent-skills-rs -- \
+  rollback /path/to/installed-root \
+  --approve-current-lock <sha256> --approve-rollback-point <sha256>
+cargo run --locked -p agent-skills-rs -- \
   lifecycle-uninstall /path/to/installed-root --platform all
 cargo run --locked -p agent-skills-rs -- \
   runtime-execute /path/to/workflow-plan.json \
@@ -263,9 +266,9 @@ Report v1 with an explicit `--python-version` host attestation. The public
 `doctor` command now emits runtime-neutral Doctor Report v2 instead: the Rust
 binary embeds its build-time Schema inventory and requires neither Python, a
 source checkout, a network connection, nor a caller-supplied Schema path.
-Fresh install and uninstall already use guarded native transactions, while
-native upgrade and rollback remain non-default until their separate public
-cutover gate completes. `agent-lifecycle` uses an identity-bound RAII
+Fresh install, uninstall, and rollback already use guarded native
+transactions, while native upgrade remains non-default until its separate
+public cutover gate completes. `agent-lifecycle` uses an identity-bound RAII
 directory lock with atomic exclusion, safe missing-target creation,
 crash-residue visibility, and identity-checked cleanup.
 The companion `LifecycleWorkspace` now creates a unique POSIX mode-`0700`
@@ -413,14 +416,14 @@ Plan in `--dry-run` mode, and requires both that saved Plan and its explicit
 `--approve-plan` fingerprint before execution. Apply reacquires the target
 lock, regenerates and compares the complete Plan, then delegates to the guarded
 executor; a concurrent target change therefore fails closed instead of
-silently rebasing. The non-default `lifecycle-rollback` command now requires
+silently rebasing. The public `rollback` command now requires
 the exact current Lock and persistent rollback-point fingerprints before it
 creates a workspace. It stages the validated prior projection, preserves the
 current `.system` tree, restores the frozen external preimages inside the same
 `PublishedInstall` recovery window, and persists the displaced current state
-as the next rollback point. Public `upgrade` and `rollback` CLI routing remains
-on the existing approval-bound compatibility path until differential and
-release gates pass.
+as the next rollback point. `lifecycle-rollback` remains a visible
+compatibility alias. Public `upgrade` routing remains behind its separate
+conformance and release gate.
 The installed native
 `agent-session` dispatch preserves
 the public `create`, `list`, `inspect`, `fingerprint`, `checkpoint`, and `gate`
