@@ -52,12 +52,13 @@ signature and GitHub environment approval.
 ```
 
 Interactive `./install.sh` remains on the Python compatibility path. An
-explicit fresh Apple/Desktop selection defaults to Rust when `cargo` is
-available:
+explicit fresh Apple/Desktop selection, including `--platform all` (currently
+Apple plus Desktop), defaults to Rust when `cargo` is available:
 
 ```bash
 ./install.sh --platform apple
 ./install.sh --platform desktop
+./install.sh --platform all
 ./install.sh --platform apple --discipline qa --runtime-config codex --dry-run
 ```
 
@@ -85,10 +86,12 @@ iwr -useb https://choshimwy.github.io/AgentDevelopmentSkills/install.ps1 | iex
 
 The Pages control plane is online, but the remote installer remains unavailable until a signed release has been published. Use a source checkout before that release gate is satisfied.
 
-After a v3 release is published, an explicit fresh `--platform apple` or
-`--platform desktop` install or dry-run on macOS or a supported glibc 2.39+
-Linux host defaults to the verified Rust binary. Musl and older glibc hosts
-remain on the Python compatibility route. The gated release renders exact
+After a v3 release is published, an explicit fresh `--platform apple`,
+`--platform desktop`, or `--platform all` install or dry-run on macOS or a
+supported glibc 2.39+ Linux host defaults to the verified Rust binary.
+`--platform all` expands only the source inventory entries marked ready. Musl
+and older glibc hosts remain on the Python compatibility route. The gated
+release renders exact
 source and host-binary sizes and SHA-256 identities into the POSIX bootstrap,
 so this route needs `curl`, `unzip`, and a system SHA-256 command but does not
 require Python. Set
@@ -98,8 +101,8 @@ eligible; once Rust has been selected, a native failure never silently
 downgrades to Python. A signed POSIX release bootstrap also routes an explicit
 `--upgrade` request directly to the release-matched Rust executable; this route
 has no Python fallback. Source-checkout and other compatibility-only requests
-that are not explicit fresh Apple/Desktop selections still require Python
-3.11+. The PowerShell bootstrap also remains on that compatibility path
+that are not explicit fresh Apple/Desktop/all-ready selections still require
+Python 3.11+. The PowerShell bootstrap also remains on that compatibility path
 because Windows is blocked as a production source-install target until its
 complete install contract is enabled.
 

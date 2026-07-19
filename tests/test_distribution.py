@@ -891,6 +891,58 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(forwarded[-2:], ["--json", "--dry-run"])
         self.assertFalse(target.exists())
 
+        cargo_arguments.unlink()
+        all_target = self.root / "source-native-all-target"
+        all_platforms = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "install.sh"),
+                "--target-root",
+                str(all_target),
+                "--platform",
+                "all",
+                "--json",
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(all_platforms.returncode, 0, all_platforms.stderr)
+        all_forwarded = native_arguments.read_text(encoding="utf-8").splitlines()
+        self.assertIn("--platform", all_forwarded)
+        self.assertIn("all", all_forwarded)
+        self.assertIn("--session-launcher", all_forwarded)
+        self.assertFalse(all_target.exists())
+
+        cargo_arguments.unlink()
+        mixed_all = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "install.sh"),
+                "--target-root",
+                str(all_target),
+                "--platform",
+                "all",
+                "--platform",
+                "apple",
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env={
+                **environment,
+                "AGENT_SKILLS_INSTALL_ENGINE": "rust",
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(mixed_all.returncode, 2)
+        self.assertIn("explicit fresh --platform", mixed_all.stderr)
+        self.assertFalse(cargo_arguments.exists())
+
         failing_cargo = tools / "cargo"
         failing_cargo.write_text("#!/bin/sh\nexit 37\n", encoding="utf-8")
         failing_cargo.chmod(0o755)
@@ -1274,7 +1326,7 @@ class DistributionTests(unittest.TestCase):
                 "--target-root",
                 str(dry_run_target),
                 "--platform",
-                "apple",
+                "all",
                 "--dry-run",
                 "--json",
             ],
@@ -1290,6 +1342,8 @@ class DistributionTests(unittest.TestCase):
             {"engine": "rust-shell", "status": "planned"},
         )
         dry_run_arguments = arguments_path.read_text(encoding="utf-8").splitlines()
+        self.assertIn("all", dry_run_arguments)
+        self.assertIn("--session-launcher", dry_run_arguments)
         self.assertIn("--dry-run", dry_run_arguments)
         self.assertIn("--session-launcher", dry_run_arguments)
         self.assertFalse(dry_run_target.exists())

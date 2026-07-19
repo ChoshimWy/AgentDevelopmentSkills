@@ -226,6 +226,34 @@ class RustCompatibilityTests(unittest.TestCase):
             self.assertEqual(report["status"], "planned")
             self.assertFalse(target.exists())
 
+    @unittest.skipIf(os.name == "nt", "production source install is POSIX-only")
+    def test_native_all_platform_install_expands_only_ready_platforms(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="agent-skills-native-all-platforms-"
+        ) as directory:
+            target = Path(directory).resolve() / "target"
+            completed = self.run_rust(
+                "install",
+                "--source-root",
+                str(ROOT),
+                "--target-root",
+                str(target),
+                "--platform",
+                "all",
+                "--session-launcher",
+                str(self.rust_cli),
+                "--json",
+                "--dry-run",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["selected_platforms"], ["apple", "desktop"])
+            self.assertEqual(report["selected_runtime_configs"], ["codex"])
+            self.assertNotIn("android", report["selected_packages"])
+            self.assertNotIn("web", report["selected_packages"])
+            self.assertNotIn("backend", report["selected_packages"])
+            self.assertFalse(target.exists())
+
     @unittest.skipIf(os.name == "nt", "source uninstaller is POSIX-only")
     def test_source_checkout_uninstall_uses_real_offline_rust_dry_run(self) -> None:
         with tempfile.TemporaryDirectory(

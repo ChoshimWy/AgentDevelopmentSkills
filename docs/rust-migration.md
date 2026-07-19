@@ -69,7 +69,8 @@ immutable Upgrade Source Qualification. An operator-invoked hosted upgrade
 route now performs authenticated acquisition, approval-envelope generation,
 and guarded native apply. The signed POSIX release bootstrap now routes an
 explicit `--upgrade` request through the release-matched Rust executable with
-no Python fallback. An explicit fresh Apple/Desktop source-checkout request now
+no Python fallback. An explicit fresh Apple/Desktop source-checkout request,
+including `--platform all` expanded only across ready inventory entries, now
 builds the pinned Rust CLI offline in a private target directory and executes
 that exact binary. PowerShell and other compatibility bootstrap surfaces,
 interactive selection, legacy adoption, and other routes remain pending.
@@ -277,19 +278,21 @@ For macOS and supported glibc 2.39+ Linux hosts, the gated release now renders
 the exact immutable asset base, source archive identity, and six-target native
 matrix into the POSIX bootstrap. Musl and older glibc hosts are deliberately
 ineligible and remain on the Python compatibility route. An eligible explicit
-fresh Apple/Desktop request downloads both bounded assets with HTTPS-only
-redirects, verifies their exact size and SHA-256, extracts the frozen source
-archive, and invokes the verified native installer without requiring Python.
+fresh Apple/Desktop request, including ready-only `--platform all`, downloads
+both bounded assets with HTTPS-only redirects, verifies their exact size and
+SHA-256, extracts the frozen source archive, and invokes the verified native
+installer without requiring Python.
 The Final Gate independently recomputes the rendered bootstrap from source
 SBOM materials and the verified native index. The same signed POSIX bootstrap
 routes an explicit existing-install `--upgrade` request to the exact
 release-matched host executable after checking its embedded size and SHA-256;
 it does not download the source archive, trust the installed launcher, or
-permit Python fallback. An explicit fresh Apple/Desktop source-checkout request
-now selects Rust when `cargo` is available, performs a locked offline build
-from the pinned checkout into a private temporary target, and runs that exact
-binary. It accepts explicit discipline and runtime-config selection; the same
-selection is preserved by the shared verified bootstrap compatibility core.
+permit Python fallback. An explicit fresh Apple/Desktop source-checkout request,
+including `--platform all` expanded from the ready inventory, now selects Rust
+when `cargo` is available, performs a locked offline build from the pinned
+checkout into a private temporary target, and runs that exact binary. It accepts
+explicit discipline and runtime-config selection; the same selection is
+preserved by the shared verified bootstrap compatibility core.
 Interactive, existing-install, legacy-adoption, and other
 compatibility-only source requests remain on Python. Operators may explicitly
 select that path with `AGENT_SKILLS_INSTALL_ENGINE=python`; forced Rust fails

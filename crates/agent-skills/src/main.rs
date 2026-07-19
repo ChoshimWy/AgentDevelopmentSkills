@@ -844,6 +844,33 @@ fn run_agent_session_inner(cli: AgentSessionCli) -> Result<Value, Box<dyn std::e
     }
 }
 
+fn expand_all_platforms(
+    platforms: &[String],
+    platform_options: &[Value],
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    if !platforms.iter().any(|platform| platform == "all") {
+        return Ok(platforms.to_vec());
+    }
+    if platforms.len() != 1 {
+        return Err("--platform all cannot be combined with another platform".into());
+    }
+    let selected = platform_options
+        .iter()
+        .filter(|option| option.get("selectable").and_then(Value::as_bool) == Some(true))
+        .map(|option| {
+            option
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or("source platform option has no valid id")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if selected.is_empty() {
+        return Err("no installable platform was selected".into());
+    }
+    Ok(selected)
+}
+
 #[allow(clippy::too_many_lines)]
 fn run() -> Result<i32, Box<dyn std::error::Error>> {
     if invoked_as_agent_session() {
@@ -860,18 +887,21 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             dry_run,
             json,
         } => {
-            if platforms.iter().any(|platform| platform == "apple")
+            let platform_root = source_root.join("platforms");
+            let platform_options = inspect_source_platform_options(&platform_root)?;
+            let effective_platforms = expand_all_platforms(&platforms, &platform_options)?;
+            if effective_platforms
+                .iter()
+                .any(|platform| platform == "apple")
                 && !runtime_configs.iter().any(|runtime| runtime == "codex")
             {
                 runtime_configs.push("codex".to_owned());
             }
             runtime_configs.sort();
             runtime_configs.dedup();
-            let platform_root = source_root.join("platforms");
-            let platform_options = inspect_source_platform_options(&platform_root)?;
             let selection = resolve_source_install_selection(
                 &platform_root,
-                &platforms,
+                &effective_platforms,
                 &disciplines,
                 &runtime_configs,
                 false,
@@ -883,7 +913,10 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 source_root.join("schemas"),
                 None,
             )?;
-            let launcher = if platforms.iter().any(|platform| platform == "apple") {
+            let launcher = if effective_platforms
+                .iter()
+                .any(|platform| platform == "apple")
+            {
                 let path = session_launcher
                     .as_deref()
                     .ok_or("native Apple source install requires --session-launcher")?;
@@ -2376,6 +2409,34 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_platforms_expand_only_ready_source_options() {
+        let options = vec![
+            json!({"id": "apple", "selectable": true}),
+            json!({"id": "web", "selectable": false}),
+            json!({"id": "desktop", "selectable": true}),
+        ];
+        assert_eq!(
+            expand_all_platforms(&["all".to_owned()], &options).expect("expand all"),
+            ["apple", "desktop"]
+        );
+        assert!(
+            expand_all_platforms(&["all".to_owned(), "apple".to_owned()], &options)
+                .expect_err("mixed all must fail")
+                .to_string()
+                .contains("cannot be combined")
+        );
+        assert!(
+            expand_all_platforms(
+                &["all".to_owned()],
+                &[json!({"id": "web", "selectable": false})],
+            )
+            .expect_err("empty all must fail")
+            .to_string()
+            .contains("no installable platform")
+        );
+    }
 
     #[test]
     fn hosted_upgrade_cli_exposes_only_fixed_control_plane_inputs() {

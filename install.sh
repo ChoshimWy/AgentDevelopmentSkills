@@ -191,9 +191,14 @@ parse_native_request() {
                     NATIVE_TARGET_ROOT="$value"
                 elif [[ "$argument" == "--platform" ]]; then
                     case "$value" in
-                        apple|desktop) ;;
+                        apple|desktop|all) ;;
                         *) return 1 ;;
                     esac
+                    if [[ "$value" == "all" ]]; then
+                        [[ "$NATIVE_PLATFORM_KEYS" == "|" ]] || return 1
+                    else
+                        [[ "$NATIVE_PLATFORM_KEYS" != *"|all|"* ]] || return 1
+                    fi
                     [[ "$NATIVE_PLATFORM_KEYS" != *"|$value|"* ]] || return 1
                     NATIVE_PLATFORMS+=("$value")
                     NATIVE_PLATFORM_KEYS+="$value|"
@@ -221,9 +226,14 @@ parse_native_request() {
             --platform=*)
                 value="${argument#*=}"
                 case "$value" in
-                    apple|desktop) ;;
+                    apple|desktop|all) ;;
                     *) return 1 ;;
                 esac
+                if [[ "$value" == "all" ]]; then
+                    [[ "$NATIVE_PLATFORM_KEYS" == "|" ]] || return 1
+                else
+                    [[ "$NATIVE_PLATFORM_KEYS" != *"|all|"* ]] || return 1
+                fi
                 [[ "$NATIVE_PLATFORM_KEYS" != *"|$value|"* ]] || return 1
                 NATIVE_PLATFORMS+=("$value")
                 NATIVE_PLATFORM_KEYS+="$value|"
@@ -480,7 +490,8 @@ run_native_install() {
             command+=(--runtime-config "$runtime_config_id")
         done
     fi
-    if [[ " ${NATIVE_PLATFORMS[*]} " == *" apple "* ]]; then
+    if [[ " ${NATIVE_PLATFORMS[*]} " == *" apple "* \
+        || " ${NATIVE_PLATFORMS[*]} " == *" all "* ]]; then
         command+=(--session-launcher "$native_executable")
     fi
     if ((NATIVE_JSON)); then
@@ -553,7 +564,8 @@ run_source_native_install() {
             command+=(--runtime-config "$runtime_config_id")
         done
     fi
-    if [[ " ${NATIVE_PLATFORMS[*]} " == *" apple "* ]]; then
+    if [[ " ${NATIVE_PLATFORMS[*]} " == *" apple "* \
+        || " ${NATIVE_PLATFORMS[*]} " == *" all "* ]]; then
         command+=(--session-launcher "$native_executable")
     fi
     if ((NATIVE_JSON)); then
@@ -659,7 +671,7 @@ if [[ -n "$SOURCE_CHECKOUT_ROOT" ]]; then
     fi
     if [[ "$REQUESTED_ENGINE" == "rust" ]]; then
         printf '%s\n' \
-            "forced Rust source install requires cargo, an explicit fresh --platform apple/desktop selection, and no compatibility-only arguments" \
+            "forced Rust source install requires cargo, an explicit fresh --platform apple, desktop, or all selection, and no compatibility-only arguments" \
             >&2
         exit 2
     fi
@@ -677,7 +689,7 @@ fi
 
 if [[ "$REQUESTED_ENGINE" == "rust" ]]; then
     printf '%s\n' \
-        "forced Rust install requires an embedded v2 native release, an explicit fresh --platform apple/desktop selection, and no compatibility-only arguments" \
+        "forced Rust install requires an embedded v2 native release, an explicit fresh --platform apple, desktop, or all selection, and no compatibility-only arguments" \
         >&2
     exit 2
 fi
