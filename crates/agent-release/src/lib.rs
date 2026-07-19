@@ -1,5 +1,9 @@
 //! Native release-artifact contracts for the Rust distribution matrix.
 
+mod hosted_upgrade;
+
+pub use hosted_upgrade::{HostedUpgradeSource, acquire_hosted_upgrade};
+
 use agent_contracts::{canonical_json, canonical_sha256, parse_json};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

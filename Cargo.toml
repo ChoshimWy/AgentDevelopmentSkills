@@ -32,7 +32,9 @@ sha2 = "0.10.9"
 tempfile = "3.27.0"
 thiserror = "2.0.17"
 toml = { version = "=0.8.23", features = ["preserve_order"] }
+ureq = { version = "=3.3.0", default-features = false, features = ["rustls"] }
 winx = "0.36.4"
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
