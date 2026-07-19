@@ -590,6 +590,60 @@ class DistributionTests(unittest.TestCase):
         with self.assertRaisesRegex(bootstrap.BootstrapError, "bootstrap asset"):
             bootstrap.parse_release_manifest(bootstrap._canonical_json(value))
 
+    def test_manifest_v3_binds_upgrade_source_qualification(self) -> None:
+        value = json.loads(
+            (self.release / "release-manifest.json").read_text(encoding="utf-8")
+        )
+        value["default_engine"] = "rust"
+        value["native_index_sha256"] = "9" * 64
+        value["native_artifacts"] = sorted(
+            [
+                {
+                    "arch": arch,
+                    "filename": (
+                        f"agent-skills-{value['version']}-{target}"
+                        + (".exe" if "-windows-" in target else "")
+                    ),
+                    "os": host_os,
+                    "sha256": str(index) * 64,
+                    "size": 1024,
+                    "target": target,
+                }
+                for index, ((host_os, arch), target) in enumerate(
+                    bootstrap._NATIVE_TARGETS.items(),
+                    start=1,
+                )
+            ],
+            key=lambda item: item["target"],
+        )
+        value["schema_version"] = "3.0"
+        value["channel"] = "beta"
+        value["source"]["dirty"] = False
+        value["source"]["revision"] = "1" * 40
+        value["upgrade_source_qualification"] = {
+            "filename": "upgrade-source-qualification.json",
+            "sha256": "a" * 64,
+            "size": 1024,
+        }
+        parsed = bootstrap.parse_release_manifest(bootstrap._canonical_json(value))
+        self.assertEqual(parsed, value)
+
+        value["upgrade_source_qualification"]["filename"] = "qualification.json"
+        with self.assertRaisesRegex(
+            bootstrap.BootstrapError,
+            "upgrade source qualification",
+        ):
+            bootstrap.parse_release_manifest(bootstrap._canonical_json(value))
+        value["upgrade_source_qualification"]["filename"] = (
+            "upgrade-source-qualification.json"
+        )
+        value["channel"] = "development"
+        with self.assertRaisesRegex(
+            bootstrap.BootstrapError,
+            "clean immutable source",
+        ):
+            bootstrap.parse_release_manifest(bootstrap._canonical_json(value))
+
     def test_builder_never_reuses_or_deletes_existing_or_unsafe_output(self) -> None:
         existing = self.root / "existing-output"
         existing.mkdir()

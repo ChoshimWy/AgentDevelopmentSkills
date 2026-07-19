@@ -63,9 +63,11 @@ file layout:
 ## Current state
 
 Phases 1 through 5 are complete. Phase 6 is in controlled rollout: eligible
-hosted fresh installs and dry-runs now select Rust, while upgrade, legacy
-adoption, the remaining bootstrap compatibility layer, and other routes remain
-pending.
+hosted fresh installs and dry-runs now select Rust, explicit-source native
+upgrade is public, and release qualification emits a Manifest-v3-bound
+immutable Upgrade Source Qualification. Hosted automatic upgrade acquisition,
+legacy adoption, the remaining bootstrap compatibility layer, and other routes
+remain pending.
 The repository contains:
 
 - a Rust workspace pinned to Rust 1.97.1;
@@ -244,9 +246,14 @@ The repository contains:
   provenance, exact release allowlisting, external review, and the final Gate
   cover the merged binaries.
 
-Release Manifest v2 freezes the complete native index and defaults eligible
-hosted fresh Apple/Desktop install and dry-run requests to the matching verified
-Rust executable.
+Release Manifest v3 freezes the complete native index and the qualified
+immutable upgrade source, and defaults eligible hosted fresh Apple/Desktop
+install and dry-run requests to the matching verified Rust executable. The
+release builder still emits v2 before Conformance; qualification
+deterministically adds the reviewed source qualification and promotes that
+frozen candidate to v3. The same transition promotes release provenance to v2
+and emits a canonical Release Qualification Handoff v2, while the validator
+keeps archived v1 handoffs readable.
 For macOS and supported glibc 2.39+ Linux hosts, the gated release now renders
 the exact immutable asset base, source archive identity, and six-target native
 matrix into the POSIX bootstrap. Musl and older glibc hosts are deliberately

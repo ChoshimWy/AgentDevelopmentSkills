@@ -44,6 +44,7 @@ MAX_EXTRACTED_BYTES = 256 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 10_000
 USER_AGENT = "agent-development-skills-bootstrap/1.0"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_REVISION = re.compile(r"[0-9a-f]{40}")
 _VERSION = re.compile(r"[0-9]+(?:\.[0-9]+){1,2}")
 _NATIVE_TARGETS = {
     ("darwin", "aarch64"): "aarch64-apple-darwin",
@@ -104,12 +105,14 @@ def parse_release_manifest(data: bytes) -> dict[str, Any]:
         "source",
         "version",
     }
-    if schema_version == "2.0":
+    if schema_version in {"2.0", "3.0"}:
         fields |= {"default_engine", "native_artifacts", "native_index_sha256"}
+    if schema_version == "3.0":
+        fields.add("upgrade_source_qualification")
     _exact_object(value, fields, "release manifest")
     if _canonical_json(value) != data:
         raise BootstrapError("release manifest must use canonical JSON encoding")
-    if value["schema_version"] not in {"1.0", "2.0"}:
+    if value["schema_version"] not in {"1.0", "2.0", "3.0"}:
         raise BootstrapError("unsupported release manifest schema_version")
     if value["product"] != "agent-development-skills":
         raise BootstrapError("release manifest product is invalid")
@@ -133,6 +136,12 @@ def parse_release_manifest(data: bytes) -> dict[str, Any]:
         raise BootstrapError("release manifest source is invalid")
     if source["dirty"] and value["channel"] != "development":
         raise BootstrapError("dirty release sources are allowed only on the development channel")
+    if value["schema_version"] == "3.0" and (
+        value["channel"] not in {"stable", "beta"}
+        or source["dirty"] is not False
+        or _REVISION.fullmatch(source["revision"]) is None
+    ):
+        raise BootstrapError("release manifest v3 requires a clean immutable source")
     artifacts = value["artifacts"]
     if not isinstance(artifacts, list) or not artifacts:
         raise BootstrapError("release manifest artifacts must not be empty")
@@ -207,7 +216,7 @@ def parse_release_manifest(data: bytes) -> dict[str, Any]:
         asset_filenames.append(asset["filename"])
     if asset_filenames != sorted(set(asset_filenames)):
         raise BootstrapError("release manifest bootstrap asset filenames must be sorted and unique")
-    if value["schema_version"] == "2.0":
+    if value["schema_version"] in {"2.0", "3.0"}:
         if value["default_engine"] != "rust":
             raise BootstrapError("release manifest default engine is invalid")
         if (
@@ -253,6 +262,20 @@ def parse_release_manifest(data: bytes) -> dict[str, Any]:
             raise BootstrapError("release manifest native artifact targets must be sorted and complete")
         if filenames != sorted(set(filenames)):
             raise BootstrapError("release manifest native artifact filenames must be sorted and unique")
+    if value["schema_version"] == "3.0":
+        qualification = _exact_object(
+            value["upgrade_source_qualification"],
+            {"filename", "sha256", "size"},
+            "release manifest upgrade source qualification",
+        )
+        if (
+            qualification["filename"] != "upgrade-source-qualification.json"
+            or type(qualification["size"]) is not int
+            or not 0 < qualification["size"] <= 16 * 1024 * 1024
+            or not isinstance(qualification["sha256"], str)
+            or _SHA256.fullmatch(qualification["sha256"]) is None
+        ):
+            raise BootstrapError("release manifest upgrade source qualification is invalid")
     return value
 
 
@@ -325,7 +348,7 @@ def select_native_artifact(
     host_os: Optional[str] = None,
     host_arch: Optional[str] = None,
 ) -> dict[str, Any]:
-    if manifest.get("schema_version") != "2.0":
+    if manifest.get("schema_version") not in {"2.0", "3.0"}:
         raise BootstrapError("release manifest does not provide a native artifact matrix")
     selected_os = host_os or _host_os()
     selected_arch = _normalize_host_arch(host_arch) if host_arch else _host_arch()
@@ -561,7 +584,7 @@ def bootstrap_install(
     native_request = _native_install_request(installer_arguments)
     native_artifact = None
     if requested_engine != "python":
-        if manifest["schema_version"] == "2.0" and native_request is not None:
+        if manifest["schema_version"] in {"2.0", "3.0"} and native_request is not None:
             native_artifact = select_native_artifact(manifest)
         elif requested_engine == "rust":
             raise BootstrapError(

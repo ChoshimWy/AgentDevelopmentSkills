@@ -36,7 +36,10 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from agent_workflow.canonical_json import dump, dumps, load, sha256  # noqa: E402
-from agent_workflow.contracts import validate_upgrade_conformance_evidence  # noqa: E402
+from agent_workflow.contracts import (  # noqa: E402
+    validate_upgrade_conformance_evidence,
+    validate_upgrade_source_qualification,
+)
 from agent_workflow.models import ContractError  # noqa: E402
 
 import bootstrap_install  # noqa: E402
@@ -48,7 +51,10 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _FIXED_METADATA_FILES = {
     "provenance.json", "python-artifacts.json", "release-manifest.json", "sbom.json",
 }
-_OPTIONAL_METADATA_FILES = {"native-artifacts.json"}
+_OPTIONAL_METADATA_FILES = {
+    "native-artifacts.json",
+    "upgrade-source-qualification.json",
+}
 _EXPECTED_BOOTSTRAP_FILES = {
     "bootstrap_install.py",
     "install.ps1",
@@ -443,7 +449,12 @@ def _validate_provenance(value: dict[str, Any]) -> list[dict[str, Any]]:
         "artifacts", "builder", "fingerprint", "materials_sha256", "product",
         "reproducible", "sbom_sha256", "schema_version", "source", "version",
     }
-    if set(value) != expected or value.get("schema_version") != "1.0" or value.get("product") != "agent-development-skills":
+    schema_version = value.get("schema_version")
+    if (
+        set(value) != expected
+        or schema_version not in {"1.0", "2.0"}
+        or value.get("product") != "agent-development-skills"
+    ):
         raise ContractError("provenance fields or version are invalid")
     if value.get("reproducible") is not True or not isinstance(value.get("version"), str) or not value["version"]:
         raise ContractError("provenance reproducibility/version is invalid")
@@ -471,12 +482,15 @@ def _validate_provenance(value: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(records, list) or not records:
         raise ContractError("provenance artifacts must be a non-empty array")
     filenames = []
+    qualification_count = 0
+    allowed_kinds = {"bootstrap", "native-binary", "sdist", "source-bundle", "wheel"}
+    if schema_version == "2.0":
+        allowed_kinds.add("upgrade-source-qualification")
     for record in records:
         if not isinstance(record, dict) or set(record) != {"filename", "kind", "sha256", "size"}:
             raise ContractError("provenance artifact record fields are invalid")
         if (
-            record.get("kind")
-            not in {"bootstrap", "native-binary", "sdist", "source-bundle", "wheel"}
+            record.get("kind") not in allowed_kinds
             or not _safe_filename(record.get("filename"))
             or type(record.get("size")) is not int
             or record["size"] <= 0
@@ -484,9 +498,14 @@ def _validate_provenance(value: dict[str, Any]) -> list[dict[str, Any]]:
             or _SHA256.fullmatch(record["sha256"]) is None
         ):
             raise ContractError("provenance artifact record identity is invalid")
+        qualification_count += record["kind"] == "upgrade-source-qualification"
         filenames.append(record["filename"])
     if len(filenames) != len(set(filenames)):
         raise ContractError("provenance artifact filenames must be unique")
+    if qualification_count != (1 if schema_version == "2.0" else 0):
+        raise ContractError(
+            "provenance Upgrade Source Qualification count differs from its version"
+        )
     _fingerprinted(value, "provenance")
     return records
 
@@ -933,6 +952,13 @@ def _evaluate_release_gate_snapshot(
             raise ContractError("SBOM must explicitly exclude local Xcode official export content")
         if not isinstance(manifest, dict):
             raise ContractError("release manifest is unavailable for supply-chain binding")
+        expected_provenance_version = (
+            "2.0" if manifest.get("schema_version") == "3.0" else "1.0"
+        )
+        if provenance.get("schema_version") != expected_provenance_version:
+            raise ContractError(
+                "release manifest and provenance versions are not cross-bound"
+            )
         native_index_path = release / "native-artifacts.json"
         native_index: dict[str, Any] | None = None
         native_records: list[dict[str, Any]] = []
@@ -964,7 +990,7 @@ def _evaluate_release_gate_snapshot(
                 for item in native_index["artifacts"]
             ]
             if (
-                manifest.get("schema_version") != "2.0"
+                manifest.get("schema_version") not in {"2.0", "3.0"}
                 or manifest.get("default_engine") != "rust"
                 or manifest.get("native_artifacts") != manifest_native_records
                 or manifest.get("native_index_sha256")
@@ -1039,8 +1065,26 @@ def _evaluate_release_gate_snapshot(
         bootstrap_records = [
             {**item, "kind": "bootstrap"} for item in manifest["bootstrap_assets"]
         ]
+        source_qualification: dict[str, Any] | None = None
+        qualification_records: list[dict[str, Any]] = []
+        if manifest.get("schema_version") == "3.0":
+            qualification_record = manifest["upgrade_source_qualification"]
+            qualification_path = release / qualification_record["filename"]
+            _artifact(qualification_path, qualification_record)
+            source_qualification = _canonical(qualification_path)
+            validate_upgrade_source_qualification(source_qualification)
+            qualification_records.append({
+                **qualification_record,
+                "kind": "upgrade-source-qualification",
+            })
         expected_artifacts = sorted(
-            [source_record, *native_records, *python_records, *bootstrap_records],
+            [
+                source_record,
+                *native_records,
+                *python_records,
+                *bootstrap_records,
+                *qualification_records,
+            ],
             key=lambda item: (item["kind"], item["filename"]),
         )
         if (
@@ -1111,6 +1155,20 @@ def _evaluate_release_gate_snapshot(
         runner = sbom_by_path.get("scripts/run_conformance.py")
         if builder is None or runner is None or provenance["builder"]["sha256"] != builder["sha256"]:
             raise ContractError("builder or Conformance runner is absent from the bound SBOM")
+        if source_qualification is not None and (
+            source_qualification["runner_sha256"] != runner["sha256"]
+            or source_qualification["source_materials_sha256"]
+            != provenance["materials_sha256"]
+            or source_qualification["source"] != {
+                "artifact_sha256": source_artifact["sha256"],
+                "artifact_size": source_artifact["size"],
+                "revision": manifest["source"]["revision"],
+                "root": source_artifact["root"],
+            }
+        ):
+            raise ContractError(
+                "Upgrade Source Qualification differs from the frozen source release"
+            )
         bound.update({
             "manifest": manifest,
             "frozen_artifacts": frozen_artifacts,
@@ -1120,6 +1178,7 @@ def _evaluate_release_gate_snapshot(
             "sbom_files": sbom["files"],
             "source_artifact": source_artifact,
             "source_artifact_bytes": artifact_bytes,
+            "source_qualification": source_qualification,
         })
         return {"artifact_count": len(provenance["artifacts"]), "file_count": len(sbom["files"])}
 
@@ -1231,6 +1290,27 @@ def _evaluate_release_gate_snapshot(
             or value["runner_sha256"] != bound.get("runner_sha256")
         ):
             raise ContractError("Conformance evidence is not bound to this release candidate")
+        source_qualification = bound.get("source_qualification")
+        if manifest.get("schema_version") == "3.0":
+            shared_fields = {
+                "command_results",
+                "environment",
+                "manifest_count",
+                "negative_contract_count",
+                "runner_sha256",
+                "schema_inventory_hash",
+                "status",
+                "suite",
+                "suite_definition_hash",
+                "test_count",
+            }
+            if not isinstance(source_qualification, dict) or any(
+                source_qualification.get(field) != value.get(field)
+                for field in shared_fields
+            ):
+                raise ContractError(
+                    "Upgrade Source Qualification differs from candidate Conformance"
+                )
         package_lock = execution_state.get("package_lock")
         if not isinstance(package_lock, dict):
             raise ContractError("installed release Package Lock is unavailable for Conformance")

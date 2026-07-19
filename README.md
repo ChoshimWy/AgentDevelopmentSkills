@@ -17,11 +17,14 @@ AgentDevelopmentSkills is an offline-first, fail-closed workflow core for coding
 ## Status
 
 The incremental Rust migration has reached the controlled bootstrap phase.
-Release-manifest v2 binds a complete macOS, Linux, and Windows native binary
-matrix. A hosted, explicit, fresh Apple or Desktop install or dry-run selects
-the verified Rust lifecycle transaction by default. Source-checkout installs,
-interactive or compatibility-only requests, existing installations, upgrades,
-and legacy adoption still use the documented Python compatibility path. The
+Release Manifest v3 binds a complete macOS, Linux, and Windows native binary
+matrix plus the immutable Upgrade Source Qualification produced by release
+qualification. A hosted, explicit, fresh Apple or Desktop install or dry-run
+selects the verified Rust lifecycle transaction by default. The installed
+native CLI also supports explicit-source upgrade, rollback, doctor, and
+uninstall transactions. Source-checkout installs, interactive or
+compatibility-only requests, hosted automatic upgrade acquisition, and legacy
+adoption still use separately gated compatibility paths. The
 repository carries an MIT `LICENSE`, a `NOTICE`, and verified
 migration-audit hashes. The GitHub Pages control plane is deployed; public
 release assets and remote installation remain gated on an external release
@@ -67,7 +70,7 @@ iwr -useb https://choshimwy.github.io/AgentDevelopmentSkills/install.ps1 | iex
 
 The Pages control plane is online, but the remote installer remains unavailable until a signed release has been published. Use a source checkout before that release gate is satisfied.
 
-After a v2 release is published, an explicit fresh `--platform apple` or
+After a v3 release is published, an explicit fresh `--platform apple` or
 `--platform desktop` install or dry-run on macOS or a supported glibc 2.39+
 Linux host defaults to the verified Rust binary. Musl and older glibc hosts
 remain on the Python compatibility route. The gated release renders exact
@@ -77,8 +80,8 @@ require Python. Set
 `AGENT_SKILLS_INSTALL_ENGINE=python` to request the transitional compatibility
 path. `AGENT_SKILLS_INSTALL_ENGINE=rust` fails closed if the request is not
 eligible; once Rust has been selected, a native failure never silently
-downgrades to Python. Source-checkout, existing-install, upgrade, and other
-compatibility-only requests still require Python 3.11+. The PowerShell
+downgrades to Python. Source-checkout, hosted automatic upgrade acquisition,
+and other compatibility-only requests still require Python 3.11+. The PowerShell
 bootstrap also remains on that compatibility path because Windows is blocked
 as a production source-install target until its complete install contract is
 enabled.
@@ -451,10 +454,11 @@ binary on a matching GitHub-hosted architecture, then merges only the complete
 sorted matrix into `native-artifacts.json`. Qualification copies those exact
 binaries into the release candidate; provenance, the exact release allowlist,
 the external review signature, and the final Release Gate all cover them.
-Release Manifest v2 now binds that exact matrix and makes the Rust executable
-the default engine for eligible hosted fresh installs. The thin `install.sh`
-and `install.ps1` acquisition layer and all ineligible requests still use the
-explicit Python compatibility path during this controlled phase.
+Release Manifest v3 now binds that exact matrix and the release-qualified
+immutable upgrade source, while keeping Rust as the default engine for
+eligible hosted fresh installs. The thin `install.sh` and `install.ps1`
+acquisition layer and all ineligible requests still use the explicit Python
+compatibility path during this controlled phase.
 
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path

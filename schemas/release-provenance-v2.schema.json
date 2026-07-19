@@ -1,0 +1,77 @@
+{
+  "$id": "https://agent-workflow.local/schemas/release-provenance-v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "contains": {
+        "properties": {"kind": {"const": "upgrade-source-qualification"}},
+        "required": ["kind"]
+      },
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "filename": {"type": "string"},
+          "kind": {
+            "enum": [
+              "bootstrap",
+              "native-binary",
+              "sdist",
+              "source-bundle",
+              "upgrade-source-qualification",
+              "wheel"
+            ]
+          },
+          "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+          "size": {"minimum": 1, "type": "integer"}
+        },
+        "required": ["filename", "kind", "sha256", "size"],
+        "type": "object"
+      },
+      "minContains": 1,
+      "maxContains": 1,
+      "minItems": 1,
+      "type": "array"
+    },
+    "builder": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {"const": "agent-development-skills.release-builder-v1"},
+        "sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"}
+      },
+      "required": ["id", "sha256"],
+      "type": "object"
+    },
+    "fingerprint": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "materials_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "product": {"const": "agent-development-skills"},
+    "reproducible": {"const": true},
+    "sbom_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "schema_version": {"const": "2.0"},
+    "source": {
+      "additionalProperties": false,
+      "properties": {
+        "dirty": {"type": "boolean"},
+        "repository": {"type": "string"},
+        "revision": {"type": "string"}
+      },
+      "required": ["dirty", "repository", "revision"],
+      "type": "object"
+    },
+    "version": {"type": "string"}
+  },
+  "required": [
+    "schema_version",
+    "product",
+    "version",
+    "source",
+    "builder",
+    "materials_sha256",
+    "sbom_sha256",
+    "artifacts",
+    "reproducible",
+    "fingerprint"
+  ],
+  "title": "Release Provenance v2",
+  "type": "object"
+}

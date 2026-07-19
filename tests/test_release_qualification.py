@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -120,6 +121,7 @@ class ReleaseQualificationTests(unittest.TestCase):
             result = prepare(release, candidate, evidence, compatibility, key_id, output)
 
             self.assertEqual(result["status"], "awaiting-external-signature")
+            self.assertEqual(result["schema_version"], "2.0")
             self.assertEqual(validate_handoff(output), result)
             self.assertEqual(
                 set(result["preflight_blockers"]),
@@ -134,7 +136,48 @@ class ReleaseQualificationTests(unittest.TestCase):
                 load(output / "release-review-draft.json")["signature"]["value_hex"],
                 "",
             )
+            self.assertEqual(
+                load(output / "release" / "release-manifest.json")["schema_version"],
+                "3.0",
+            )
+            self.assertEqual(
+                load(output / "release" / "provenance.json")["schema_version"],
+                "2.0",
+            )
+            qualification_path = output / "release" / "upgrade-source-qualification.json"
+            qualification_value = load(qualification_path)
+            self.assertEqual(
+                qualification_value["fingerprint"],
+                result["source_qualification_fingerprint"],
+            )
             self.assertFalse(any(path.is_symlink() for path in output.rglob("*")))
+
+            qualification_bytes = qualification_path.read_bytes()
+            qualification_path.write_bytes(qualification_bytes + b"tamper")
+            with self.assertRaisesRegex(ContractError, "files differ"):
+                validate_handoff(output)
+            qualification_path.write_bytes(qualification_bytes)
+
+            handoff_path = output / "handoff.json"
+            handoff_value = load(handoff_path)
+            handoff_path.write_text(
+                json.dumps(handoff_value, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ContractError, "canonical JSON"):
+                validate_handoff(output)
+            dump(handoff_value, handoff_path)
+
+            downgraded = dict(handoff_value)
+            downgraded["schema_version"] = "1.0"
+            downgraded.pop("source_qualification_fingerprint")
+            downgraded["fingerprint"] = sha256({
+                key: item for key, item in downgraded.items() if key != "fingerprint"
+            })
+            dump(downgraded, handoff_path)
+            with self.assertRaisesRegex(ContractError, "versions are not cross-bound"):
+                validate_handoff(output)
+            dump(handoff_value, handoff_path)
 
             payload = output / "release-review-payload.json"
             payload.write_bytes(payload.read_bytes() + b"tamper")
@@ -181,6 +224,89 @@ class ReleaseQualificationTests(unittest.TestCase):
                     review_trust_store()["keys"][0]["key_id"],
                     root / "incomplete-handoff",
                 )
+
+    def test_archived_v1_handoff_remains_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root / "release"
+            build_clean_release(release)
+            evidence, compatibility_path, _, _ = write_gate_prerequisites(root, release)
+            candidate = write_candidate_lock(root / "candidate.json")
+            key_id = review_trust_store()["keys"][0]["key_id"]
+            output = root / "handoff"
+            prepare(
+                release,
+                candidate,
+                evidence,
+                compatibility_path,
+                key_id,
+                output,
+            )
+
+            qualified_release = output / "release"
+            (qualified_release / "upgrade-source-qualification.json").unlink()
+            manifest_path = qualified_release / "release-manifest.json"
+            manifest = load(manifest_path)
+            manifest.pop("upgrade_source_qualification")
+            manifest["schema_version"] = "2.0"
+            dump(manifest, manifest_path)
+            provenance_path = qualified_release / "provenance.json"
+            provenance = load(provenance_path)
+            provenance["artifacts"] = [
+                item
+                for item in provenance["artifacts"]
+                if item["kind"] != "upgrade-source-qualification"
+            ]
+            provenance["schema_version"] = "1.0"
+            provenance["fingerprint"] = sha256({
+                key: item for key, item in provenance.items() if key != "fingerprint"
+            })
+            dump(provenance, provenance_path)
+
+            preflight = qualification.gate.evaluate_release_gate(
+                qualified_release,
+                conformance_evidence=output / "conformance-evidence.json",
+                python_compatibility_evidence_path=(
+                    output / "python-compatibility-evidence.json"
+                ),
+            )
+            dump(preflight, output / "release-gate-preflight.json")
+            draft_path = output / "release-review-draft.json"
+            payload_path = output / "release-review-payload.json"
+            draft_path.unlink()
+            payload_path.unlink()
+            review = qualification.review_tool.prepare(
+                qualified_release,
+                output / "python-compatibility-evidence.json",
+                key_id,
+                draft_path,
+                payload_path,
+            )
+            conformance = load(output / "conformance-evidence.json")
+            compatibility = load(output / "python-compatibility-evidence.json")
+            legacy = {
+                "candidate_package_lock_hash": conformance[
+                    "candidate_package_lock_hash"
+                ],
+                "conformance_evidence_fingerprint": conformance["fingerprint"],
+                "files": qualification._records(output),
+                "preflight_blockers": preflight["blockers"],
+                "preflight_gate_fingerprint": preflight["fingerprint"],
+                "python_compatibility_evidence_fingerprint": compatibility[
+                    "fingerprint"
+                ],
+                "release_identity_sha256": review["release_identity_sha256"],
+                "release_manifest_sha256": qualification._digest(manifest_path),
+                "review_key_id": key_id,
+                "review_payload_sha256": review["payload_sha256"],
+                "schema_version": "1.0",
+                "source_revision": manifest["source"]["revision"],
+                "status": "awaiting-external-signature",
+            }
+            legacy["fingerprint"] = sha256(legacy)
+            dump(legacy, output / "handoff.json")
+
+            self.assertEqual(validate_handoff(output), legacy)
 
     def test_output_must_be_new_and_unexpected_supply_blocker_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

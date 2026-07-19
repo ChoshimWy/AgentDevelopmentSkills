@@ -21,10 +21,14 @@ for entry in (ROOT, ROOT / "src", ROOT / "scripts"):
         sys.path.insert(0, str(entry))
 
 from agent_workflow.canonical_json import dump, dumps, load, sha256  # noqa: E402
-from agent_workflow.contracts import validate_upgrade_conformance_evidence  # noqa: E402
+from agent_workflow.contracts import (  # noqa: E402
+    validate_upgrade_conformance_evidence,
+    validate_upgrade_source_qualification,
+)
 from agent_workflow.installation import build_install_bundle  # noqa: E402
 from agent_workflow.models import ContractError  # noqa: E402
 from agent_workflow.package_lock import validate_package_lock  # noqa: E402
+from agent_workflow.upgrade import make_upgrade_source_qualification  # noqa: E402
 import prepare_release_review as review_tool  # noqa: E402
 import python_compatibility_evidence  # noqa: E402
 import run_release_gate as gate  # noqa: E402
@@ -96,6 +100,57 @@ def _records(root: Path) -> list[dict[str, Any]]:
     return result
 
 
+def _qualify_release_source(
+    release: Path,
+    conformance: dict[str, Any],
+) -> dict[str, Any]:
+    manifest_path = release / "release-manifest.json"
+    provenance_path = release / "provenance.json"
+    manifest = gate._canonical(manifest_path)
+    provenance = gate._canonical(provenance_path)
+    if manifest.get("schema_version") != "2.0":
+        raise ContractError("source qualification requires a native Release Manifest v2 candidate")
+    source_artifacts = manifest.get("artifacts")
+    if not isinstance(source_artifacts, list) or len(source_artifacts) != 1:
+        raise ContractError("source qualification requires one immutable source artifact")
+    source_artifact = source_artifacts[0]
+    qualification = make_upgrade_source_qualification(
+        conformance,
+        source_revision=manifest["source"]["revision"],
+        source_artifact_sha256=source_artifact["sha256"],
+        source_artifact_size=source_artifact["size"],
+        source_root=source_artifact["root"],
+        source_materials_sha256=provenance["materials_sha256"],
+    )
+    qualification_path = release / "upgrade-source-qualification.json"
+    dump(qualification, qualification_path)
+    qualification_bytes = qualification_path.read_bytes()
+    record = {
+        "filename": qualification_path.name,
+        "sha256": hashlib.sha256(qualification_bytes).hexdigest(),
+        "size": len(qualification_bytes),
+    }
+    provenance["artifacts"].append({
+        **record,
+        "kind": "upgrade-source-qualification",
+    })
+    provenance["artifacts"] = sorted(
+        provenance["artifacts"],
+        key=lambda item: (item["kind"], item["filename"]),
+    )
+    provenance["schema_version"] = "2.0"
+    provenance["fingerprint"] = sha256({
+        key: item for key, item in provenance.items() if key != "fingerprint"
+    })
+    dump(provenance, provenance_path)
+    manifest["schema_version"] = "3.0"
+    manifest["upgrade_source_qualification"] = record
+    dump(manifest, manifest_path)
+    gate.bootstrap_install.parse_release_manifest(manifest_path.read_bytes())
+    validate_upgrade_source_qualification(qualification)
+    return qualification
+
+
 def validate_handoff(root: Path, value: dict[str, Any] | None = None) -> dict[str, Any]:
     root = Path(os.path.abspath(root.expanduser()))
     if root.is_symlink() or not root.is_dir():
@@ -103,10 +158,13 @@ def validate_handoff(root: Path, value: dict[str, Any] | None = None) -> dict[st
     handoff_path = root / "handoff.json"
     if handoff_path.is_symlink() or not handoff_path.is_file():
         raise ContractError("release qualification handoff manifest is missing or unsafe")
+    handoff_bytes = handoff_path.read_bytes()
     stored_document = load(handoff_path)
     if value is not None and stored_document != value:
         raise ContractError("release qualification handoff manifest differs from prepared value")
     document = stored_document
+    schema_version = document.get("schema_version") if isinstance(document, dict) else None
+    is_v2 = schema_version == "2.0"
     expected = {
         "candidate_package_lock_hash", "conformance_evidence_fingerprint", "files",
         "fingerprint", "preflight_blockers", "preflight_gate_fingerprint",
@@ -114,6 +172,8 @@ def validate_handoff(root: Path, value: dict[str, Any] | None = None) -> dict[st
         "release_manifest_sha256", "review_key_id", "review_payload_sha256",
         "schema_version", "source_revision", "status",
     }
+    if is_v2:
+        expected.add("source_qualification_fingerprint")
     hashes = (
         expected
         - {"files", "preflight_blockers", "schema_version", "source_revision", "status"}
@@ -121,7 +181,7 @@ def validate_handoff(root: Path, value: dict[str, Any] | None = None) -> dict[st
     if (
         not isinstance(document, dict)
         or set(document) != expected
-        or document.get("schema_version") != "1.0"
+        or schema_version not in {"1.0", "2.0"}
         or document.get("status") != "awaiting-external-signature"
         or not isinstance(document.get("source_revision"), str)
         or _REVISION.fullmatch(document["source_revision"]) is None
@@ -132,6 +192,8 @@ def validate_handoff(root: Path, value: dict[str, Any] | None = None) -> dict[st
         )
     ):
         raise ContractError("release qualification handoff contract is invalid")
+    if is_v2 and handoff_bytes != dumps(document).encode("utf-8"):
+        raise ContractError("release qualification handoff must use canonical JSON encoding")
     blockers = document.get("preflight_blockers")
     if (
         not isinstance(blockers, list)
@@ -182,6 +244,10 @@ def validate_handoff(root: Path, value: dict[str, Any] | None = None) -> dict[st
 
     conformance = load(root / "conformance-evidence.json")
     validate_upgrade_conformance_evidence(conformance)
+    qualification: dict[str, Any] | None = None
+    if is_v2:
+        qualification = load(root / "release" / "upgrade-source-qualification.json")
+        validate_upgrade_source_qualification(qualification)
     candidate_lock = load(root / "candidate-package-lock.json")
     validate_package_lock(candidate_lock)
     compatibility = python_compatibility_evidence.validate_evidence(
@@ -218,6 +284,11 @@ def validate_handoff(root: Path, value: dict[str, Any] | None = None) -> dict[st
         raise ContractError("release qualification review payload differs from its draft")
     manifest_path = root / "release" / "release-manifest.json"
     manifest = gate._canonical(manifest_path)
+    expected_manifest_version = "3.0" if is_v2 else "2.0"
+    if manifest.get("schema_version") != expected_manifest_version:
+        raise ContractError(
+            "release qualification handoff and manifest versions are not cross-bound"
+        )
     python_index = gate._canonical(root / "release" / "python-artifacts.json")
     python_records = sorted(
         gate._validate_python_artifacts(python_index),
@@ -233,6 +304,14 @@ def validate_handoff(root: Path, value: dict[str, Any] | None = None) -> dict[st
         raise ContractError("release qualification handoff exact file allowlist differs")
     if (
         conformance["fingerprint"] != document["conformance_evidence_fingerprint"]
+        or (
+            is_v2
+            and (
+                qualification is None
+                or qualification["fingerprint"]
+                != document["source_qualification_fingerprint"]
+            )
+        )
         or conformance["candidate_package_lock_hash"]
         != document["candidate_package_lock_hash"]
         or candidate_lock["fingerprint"] != document["candidate_package_lock_hash"]
@@ -249,6 +328,11 @@ def validate_handoff(root: Path, value: dict[str, Any] | None = None) -> dict[st
         != compatibility["fingerprint"]
         or draft.get("signature", {}).get("key_id") != document["review_key_id"]
         or manifest.get("source", {}).get("revision") != document["source_revision"]
+        or (
+            is_v2
+            and manifest.get("upgrade_source_qualification", {}).get("sha256")
+            != _digest(root / "release" / "upgrade-source-qualification.json")
+        )
         or _digest(manifest_path) != document["release_manifest_sha256"]
         or _digest(payload_path)
         != document["review_payload_sha256"]
@@ -284,8 +368,29 @@ def validate_handoff(root: Path, value: dict[str, Any] | None = None) -> dict[st
         conformance["schema_inventory_hash"]
         != candidate_lock["schema_inventory"]["content_sha256"]
         or conformance["runner_sha256"] != runner_sha256
+        or (
+            is_v2
+            and (
+                qualification is None
+                or qualification["schema_inventory_hash"]
+                != conformance["schema_inventory_hash"]
+                or qualification["runner_sha256"] != conformance["runner_sha256"]
+                or qualification["suite_definition_hash"]
+                != conformance["suite_definition_hash"]
+                or qualification["source"] != {
+                    "artifact_sha256": source_contract["sha256"],
+                    "artifact_size": source_contract["size"],
+                    "revision": manifest["source"]["revision"],
+                    "root": source_contract["root"],
+                }
+                or qualification["source_materials_sha256"]
+                != gate._canonical(root / "release" / "provenance.json")[
+                    "materials_sha256"
+                ]
+            )
+        )
     ):
-        raise ContractError("Conformance evidence differs from the frozen release source")
+        raise ContractError("source qualification differs from Conformance or the frozen release")
     if any(
         sorted(environment["artifacts"], key=lambda item: (item["kind"], item["filename"]))
         != python_records
@@ -349,6 +454,8 @@ def prepare(
             raise ContractError("release qualification requires a clean beta/stable candidate")
         if compatibility["source_revision"] != source["revision"]:
             raise ContractError("Python compatibility evidence source differs from release")
+        qualification = _qualify_release_source(release_snapshot, conformance)
+        manifest = gate._canonical(manifest_path)
 
         preflight = gate.evaluate_release_gate(
             release_snapshot,
@@ -384,7 +491,8 @@ def prepare(
             "release_manifest_sha256": _digest(manifest_path),
             "review_key_id": key_id,
             "review_payload_sha256": report["payload_sha256"],
-            "schema_version": "1.0",
+            "schema_version": "2.0",
+            "source_qualification_fingerprint": qualification["fingerprint"],
             "source_revision": source["revision"],
             "status": "awaiting-external-signature",
         }
