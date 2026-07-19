@@ -25,19 +25,21 @@ native CLI also supports explicit-source upgrade, rollback, doctor, and
 uninstall transactions. It now also provides an operator-invoked
 `hosted-upgrade` route that authenticates the fixed Pages control plane,
 qualified source archive, and current-host executable before issuing a
-release-provenance-bound approval envelope. Source-checkout installs,
-interactive or compatibility-only requests, PowerShell bootstrap upgrades, and
-legacy adoption still use separately gated compatibility paths. The signed
-POSIX release bootstrap now routes an explicit `--upgrade` request through the
-release-matched Rust executable without Python fallback. The repository
-carries an MIT `LICENSE`, a `NOTICE`, and verified
+release-provenance-bound approval envelope. Explicit fresh Apple/Desktop
+source-checkout installs now build and execute the pinned Rust installer
+offline; interactive or compatibility-only requests, PowerShell bootstrap
+upgrades, and legacy adoption still use separately gated compatibility paths.
+The signed POSIX release bootstrap routes an explicit `--upgrade` request
+through the release-matched Rust executable without Python fallback. The
+repository carries an MIT `LICENSE`, a `NOTICE`, and verified
 migration-audit hashes. The GitHub Pages control plane is deployed; public
 release assets and remote installation remain gated on an external release
 signature and GitHub environment approval.
 
 ## Requirements
 
-- Python 3.11 or newer for source-checkout install and compatibility fallback
+- Python 3.11 or newer for interactive source-checkout selection and
+  compatibility fallback
 - Rust 1.97.1 for native development; hosted v2 releases download a qualified
   target binary
 - macOS, Linux, or WSL2 for the production bootstrap path
@@ -49,13 +51,22 @@ signature and GitHub environment approval.
 ./install.sh
 ```
 
-For a dry run or an explicit platform selection:
+Interactive `./install.sh` remains on the Python compatibility path. An
+explicit fresh Apple/Desktop selection defaults to Rust when `cargo` is
+available:
 
 ```bash
-./install.sh --dry-run
 ./install.sh --platform apple
 ./install.sh --platform desktop
+./install.sh --platform apple --discipline qa --runtime-config codex --dry-run
 ```
+
+The source bootstrap runs `cargo build --locked --offline` in a private
+temporary target directory and then executes that exact binary. Dependencies
+must already exist in the local Cargo cache; after native build starts, failure
+never falls back to Python. Set `AGENT_SKILLS_INSTALL_ENGINE=python` for the
+compatibility implementation or `AGENT_SKILLS_INSTALL_ENGINE=rust` to require
+the native route.
 
 ## Remote release installation
 
@@ -87,9 +98,10 @@ eligible; once Rust has been selected, a native failure never silently
 downgrades to Python. A signed POSIX release bootstrap also routes an explicit
 `--upgrade` request directly to the release-matched Rust executable; this route
 has no Python fallback. Source-checkout and other compatibility-only requests
-still require Python 3.11+. The PowerShell bootstrap also remains on that
-compatibility path because Windows is blocked as a production source-install
-target until its complete install contract is enabled.
+that are not explicit fresh Apple/Desktop selections still require Python
+3.11+. The PowerShell bootstrap also remains on that compatibility path
+because Windows is blocked as a production source-install target until its
+complete install contract is enabled.
 
 An Apple native install publishes the verified executable as both
 `~/.codex/bin/agent-session` and `~/.codex/bin/agent-skills`. The latter exposes
@@ -418,7 +430,7 @@ only. The native command now also matches the source CLI's read-only dry-run,
 human-readable success output, and canonical blocked JSON surface. The gated
 hosted `uninstall.sh` authenticates the installed executable against its
 embedded host record and defaults eligible requests to this Rust guard without
-Python. Source-checkout, release-mismatch, unsupported-host, and
+Python. Source-checkout uninstall, release-mismatch, unsupported-host, and
 compatibility-only requests retain the verified Python route.
 
 The parallel `install-selection` compatibility command now resolves the
@@ -510,9 +522,11 @@ binaries into the release candidate; provenance, the exact release allowlist,
 the external review signature, and the final Release Gate all cover them.
 Release Manifest v3 now binds that exact matrix and the release-qualified
 immutable upgrade source, while keeping Rust as the default engine for
-eligible hosted fresh installs. The thin `install.sh` and `install.ps1`
-acquisition layer and all ineligible requests still use the explicit Python
-compatibility path during this controlled phase.
+eligible hosted fresh installs. Explicit fresh source-checkout installs now
+build the pinned Rust CLI offline in a private target directory. The
+PowerShell acquisition layer, interactive selection, and all other ineligible
+requests still use the explicit Python compatibility path during this
+controlled phase.
 
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path

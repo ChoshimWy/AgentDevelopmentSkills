@@ -59,6 +59,7 @@ class InstallScriptTests(unittest.TestCase):
         return subprocess.run(
             command,
             cwd=ROOT,
+            env={**os.environ, "AGENT_SKILLS_INSTALL_ENGINE": "python"},
             check=check,
             capture_output=True,
             text=True,
@@ -90,6 +91,7 @@ class InstallScriptTests(unittest.TestCase):
                 cwd=ROOT,
                 env={
                     **os.environ,
+                    "AGENT_SKILLS_INSTALL_ENGINE": "python",
                     "AGENT_SKILLS_PYTHON": str(explicit_python),
                     "AGENT_SKILLS_TEST_MARKER": str(marker),
                 },
@@ -128,6 +130,7 @@ class InstallScriptTests(unittest.TestCase):
                 if key != "AGENT_SKILLS_PYTHON"
             }
             environment.update({
+                "AGENT_SKILLS_INSTALL_ENGINE": "python",
                 "AGENT_SKILLS_TEST_MARKER": str(marker),
                 "PATH": f"{root}:/usr/bin:/bin",
             })
@@ -163,6 +166,7 @@ class InstallScriptTests(unittest.TestCase):
                 cwd=ROOT,
                 env={
                     **os.environ,
+                    "AGENT_SKILLS_INSTALL_ENGINE": "python",
                     "AGENT_SKILLS_PYTHON": str(old_python),
                     "AGENT_SKILLS_TEST_MARKER": str(marker),
                 },

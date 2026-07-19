@@ -191,6 +191,41 @@ class RustCompatibilityTests(unittest.TestCase):
             check=False,
         )
 
+    @unittest.skipIf(os.name == "nt", "source bootstrap is POSIX-only")
+    def test_source_checkout_bootstrap_uses_real_offline_rust_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="agent-skills-real-source-bootstrap-"
+        ) as directory:
+            target = Path(directory).resolve() / "target"
+            completed = subprocess.run(
+                [
+                    "/bin/bash",
+                    str(ROOT / "install.sh"),
+                    "--target-root",
+                    str(target),
+                    "--platform",
+                    "desktop",
+                    "--discipline",
+                    "qa",
+                    "--json",
+                    "--dry-run",
+                ],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "AGENT_SKILLS_INSTALL_ENGINE": "rust",
+                    "CARGO_TERM_COLOR": "never",
+                },
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            report = json.loads(completed.stdout)
+            self.assertEqual(report["engine"], "rust")
+            self.assertEqual(report["status"], "planned")
+            self.assertFalse(target.exists())
+
     def test_canonical_json_and_hash_match_python(self) -> None:
         value = {
             "z": [3, 2, 1],

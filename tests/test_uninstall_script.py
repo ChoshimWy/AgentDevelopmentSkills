@@ -41,6 +41,7 @@ class UninstallScriptTests(unittest.TestCase):
                 "--json",
             ],
             cwd=ROOT,
+            env={**os.environ, "AGENT_SKILLS_INSTALL_ENGINE": "python"},
             check=True,
             capture_output=True,
             text=True,

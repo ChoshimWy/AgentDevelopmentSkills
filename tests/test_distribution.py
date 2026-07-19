@@ -297,19 +297,123 @@ class DistributionTests(unittest.TestCase):
             target,
             "--platform",
             "apple",
+            "--discipline",
+            "qa",
+            "--runtime-config=codex",
             "--json",
+            "--dry-run",
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         report = json.loads(completed.stdout)
         self.assertEqual(report["engine"], "rust-fixture")
         self.assertEqual(report["arguments"][0], "install")
         self.assertIn("--source-root", report["arguments"])
+        self.assertIn("--discipline", report["arguments"])
+        self.assertIn("qa", report["arguments"])
+        self.assertIn("--runtime-config", report["arguments"])
+        self.assertIn("codex", report["arguments"])
         self.assertIn("--session-launcher", report["arguments"])
-        self.assertEqual(report["arguments"][-1], "--json")
+        self.assertEqual(report["arguments"][-2:], ["--json", "--dry-run"])
         launcher_index = report["arguments"].index("--session-launcher")
         self.assertTrue(
             Path(report["arguments"][launcher_index + 1]).name.startswith("agent-skills-")
         )
+
+        duplicate_target = self.run_bootstrap(
+            release,
+            target,
+            f"--target-root={target}",
+            "--platform",
+            "desktop",
+            "--dry-run",
+        )
+        self.assertEqual(duplicate_target.returncode, 2)
+        self.assertIn("expanded and provided once", duplicate_target.stderr)
+
+        unsafe_tilde = self.run_bootstrap(
+            release,
+            Path("~/.codex"),
+            "--platform",
+            "desktop",
+            "--dry-run",
+        )
+        self.assertEqual(unsafe_tilde.returncode, 2)
+        self.assertIn("expanded and provided once", unsafe_tilde.stderr)
+
+        safe_override = self.root / "safe-explicit-override"
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_HOME": "~/.codex"},
+            clear=False,
+        ):
+            request = bootstrap._native_install_request([
+                "--target-root",
+                str(safe_override),
+                "--platform",
+                "desktop",
+            ])
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertEqual(request[0], Path(os.path.abspath(safe_override)))
+
+        default_home = self.root / "empty-codex-home-default"
+        with mock.patch.dict(
+            os.environ,
+            {"CODEX_HOME": "", "HOME": str(default_home)},
+            clear=False,
+        ):
+            request = bootstrap._native_install_request([
+                "--platform",
+                "desktop",
+            ])
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertEqual(
+            request[0],
+            Path(os.path.abspath(default_home / ".codex")),
+        )
+
+        compatibility_unsafe_target = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/bootstrap_install.py"),
+                "--manifest-url",
+                (release / "release-manifest.json").as_uri(),
+                "--artifact-base-url",
+                release.as_uri() + "/",
+                "--platform",
+                "all",
+            ],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "AGENT_SKILLS_ALLOW_FILE_URL": "1",
+                "CODEX_HOME": "~/.codex",
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(compatibility_unsafe_target.returncode, 2)
+        self.assertIn(
+            "expanded and provided once",
+            compatibility_unsafe_target.stderr,
+        )
+
+        for compatibility_arguments in (
+            ["--platform", "apple", "--json", "--json"],
+            ["--help"],
+        ):
+            with self.subTest(compatibility_arguments=compatibility_arguments):
+                with mock.patch.dict(
+                    os.environ,
+                    {"CODEX_HOME": "~/.codex"},
+                    clear=False,
+                ), self.assertRaisesRegex(
+                    bootstrap.BootstrapError,
+                    "expanded and provided once",
+                ):
+                    bootstrap._native_install_request(compatibility_arguments)
 
         fallback = subprocess.run(
             [
@@ -678,10 +782,11 @@ class DistributionTests(unittest.TestCase):
             with self.assertRaisesRegex(bootstrap.BootstrapError, "insecure download URL"):
                 bootstrap.fetch_bytes((self.release / "release-manifest.json").as_uri(), maximum=1024 * 1024)
 
-    def test_platform_bootstraps_are_thin_and_share_python_core(self) -> None:
+    def test_platform_bootstraps_keep_verified_python_compatibility_core(self) -> None:
         shell = (ROOT / "install.sh").read_text(encoding="utf-8")
         powershell = (ROOT / "install.ps1").read_text(encoding="utf-8")
         self.assertIn("scripts/install_local.py", shell)
+        self.assertIn("cargo build", shell)
         self.assertIn("bootstrap_install.py", shell)
         self.assertIn("resolve_python", shell)
         self.assertIn("sys.version_info >= (3, 11)", shell)
@@ -692,6 +797,198 @@ class DistributionTests(unittest.TestCase):
         self.assertNotIn("return $LASTEXITCODE", powershell)
         self.assertNotIn("build_install_bundle", shell)
         self.assertNotIn("build_install_bundle", powershell)
+
+    @unittest.skipIf(os.name == "nt", "POSIX source bootstrap is covered on macOS/Linux")
+    def test_source_checkout_fresh_install_builds_and_routes_rust_without_python(self) -> None:
+        tools = self.root / "source-native-tools"
+        tools.mkdir()
+        cargo_arguments = self.root / "source-native-cargo-arguments.txt"
+        native_arguments = self.root / "source-native-arguments.txt"
+        cargo = tools / "cargo"
+        cargo.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "printf '%s\\n' \"$@\" > \"$AGENT_SKILLS_TEST_CARGO_ARGS\"\n"
+            "target_dir=\n"
+            "while [ \"$#\" -gt 0 ]; do\n"
+            "  if [ \"$1\" = '--target-dir' ]; then\n"
+            "    target_dir=$2\n"
+            "    shift 2\n"
+            "  else\n"
+            "    shift\n"
+            "  fi\n"
+            "done\n"
+            "mkdir -p \"$target_dir/debug\"\n"
+            "cat > \"$target_dir/debug/agent-skills-rs\" <<'NATIVE'\n"
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$@\" > \"$AGENT_SKILLS_TEST_NATIVE_ARGS\"\n"
+            "printf '%s\\n' \"{\\\"engine\\\":\\\"$AGENT_SKILLS_INSTALL_ENGINE_SELECTED\\\","
+            "\\\"status\\\":\\\"planned\\\"}\"\n"
+            "NATIVE\n"
+            "chmod 700 \"$target_dir/debug/agent-skills-rs\"\n",
+            encoding="utf-8",
+        )
+        cargo.chmod(0o755)
+        target = self.root / "source-native-target"
+        environment = {
+            **os.environ,
+            "AGENT_SKILLS_PYTHON": str(self.root / "missing-python"),
+            "AGENT_SKILLS_TEST_CARGO_ARGS": str(cargo_arguments),
+            "AGENT_SKILLS_TEST_NATIVE_ARGS": str(native_arguments),
+            "PATH": f"{tools}:/usr/bin:/bin",
+        }
+        completed = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "install.sh"),
+                "--target-root",
+                str(target),
+                "--platform",
+                "apple",
+                "--discipline",
+                "qa",
+                "--runtime-config=codex",
+                "--json",
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {"engine": "rust", "status": "planned"},
+        )
+        build_arguments = cargo_arguments.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(build_arguments[0], "build")
+        self.assertIn("--locked", build_arguments)
+        self.assertIn("--offline", build_arguments)
+        self.assertIn(str(ROOT / "Cargo.toml"), build_arguments)
+        self.assertIn("--package", build_arguments)
+        self.assertIn("agent-skills-rs", build_arguments)
+        self.assertIn("--target-dir", build_arguments)
+        forwarded = native_arguments.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(forwarded[:5], [
+            "install",
+            "--source-root",
+            str(ROOT),
+            "--target-root",
+            str(target),
+        ])
+        self.assertIn("--platform", forwarded)
+        self.assertIn("apple", forwarded)
+        self.assertIn("--discipline", forwarded)
+        self.assertIn("qa", forwarded)
+        self.assertIn("--runtime-config", forwarded)
+        self.assertIn("codex", forwarded)
+        launcher_index = forwarded.index("--session-launcher")
+        launcher = Path(forwarded[launcher_index + 1])
+        self.assertTrue(str(launcher).endswith("/target/debug/agent-skills-rs"))
+        self.assertFalse(launcher.parents[2].exists())
+        self.assertEqual(forwarded[-2:], ["--json", "--dry-run"])
+        self.assertFalse(target.exists())
+
+        failing_cargo = tools / "cargo"
+        failing_cargo.write_text("#!/bin/sh\nexit 37\n", encoding="utf-8")
+        failing_cargo.chmod(0o755)
+        failed = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "install.sh"),
+                "--target-root",
+                str(target),
+                "--platform",
+                "desktop",
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(failed.returncode, 37)
+        self.assertNotIn("Python", failed.stderr)
+
+        cargo_called = self.root / "malformed-source-cargo-called"
+        failing_cargo.write_text(
+            "#!/bin/sh\n"
+            "printf called > \"$AGENT_SKILLS_TEST_CARGO_CALLED\"\n"
+            "exit 38\n",
+            encoding="utf-8",
+        )
+        failing_cargo.chmod(0o755)
+        malformed = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "install.sh"),
+                "--target-root",
+                str(target),
+                f"--target-root={target}",
+                "--platform",
+                "desktop",
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env={
+                **environment,
+                "AGENT_SKILLS_TEST_CARGO_CALLED": str(cargo_called),
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(malformed.returncode, 2)
+        self.assertIn("target arguments are malformed or unsafe", malformed.stderr)
+        self.assertFalse(cargo_called.exists())
+
+        unsafe_tilde = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "install.sh"),
+                "--target-root=~/.codex",
+                "--platform",
+                "desktop",
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env={
+                **environment,
+                "AGENT_SKILLS_TEST_CARGO_CALLED": str(cargo_called),
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(unsafe_tilde.returncode, 2)
+        self.assertIn("target arguments are malformed or unsafe", unsafe_tilde.stderr)
+        self.assertFalse(cargo_called.exists())
+
+        no_cargo = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "install.sh"),
+                "--target-root",
+                str(target),
+                "--platform",
+                "desktop",
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env={
+                **environment,
+                "AGENT_SKILLS_INSTALL_ENGINE": "rust",
+                "PATH": "/usr/bin:/bin",
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(no_cargo.returncode, 2)
+        self.assertIn("requires cargo", no_cargo.stderr)
 
     @unittest.skipIf(os.name == "nt", "POSIX native bootstrap is covered on macOS/Linux")
     def test_rendered_posix_bootstrap_installs_without_python(self) -> None:
@@ -743,7 +1040,24 @@ class DistributionTests(unittest.TestCase):
             native_records=native_records,
             version="1.0.0",
         )
-        script = self.root / "rendered-install.sh"
+        collision_root = self.root / "rendered-bootstrap-source-collision"
+        (collision_root / "scripts").mkdir(parents=True)
+        (collision_root / "scripts/install_local.py").write_text(
+            "raise SystemExit('rendered bootstrap must not use sibling source')\n",
+            encoding="utf-8",
+        )
+        cargo_called = collision_root / "cargo-called"
+        tools = collision_root / "tools"
+        tools.mkdir()
+        cargo = tools / "cargo"
+        cargo.write_text(
+            "#!/bin/sh\n"
+            "printf called > \"$AGENT_SKILLS_TEST_CARGO_CALLED\"\n"
+            "exit 41\n",
+            encoding="utf-8",
+        )
+        cargo.chmod(0o755)
+        script = collision_root / "rendered-install.sh"
         script.write_bytes(rendered)
         arguments_path = self.root / "rendered-native-arguments.txt"
         target = self.root / "rendered-native-target"
@@ -754,14 +1068,18 @@ class DistributionTests(unittest.TestCase):
             str(target),
             "--platform",
             "apple",
+            "--discipline",
+            "qa",
+            "--runtime-config=codex",
             "--json",
         ]
         environment = {
             **os.environ,
             "AGENT_SKILLS_ALLOW_FILE_URL": "1",
             "AGENT_SKILLS_PYTHON": str(self.root / "missing-python"),
+            "AGENT_SKILLS_TEST_CARGO_CALLED": str(cargo_called),
             "AGENT_SKILLS_TEST_NATIVE_ARGS": str(arguments_path),
-            "PATH": "/usr/bin:/bin",
+            "PATH": f"{tools}:/usr/bin:/bin",
         }
         completed = subprocess.run(
             command,
@@ -776,11 +1094,16 @@ class DistributionTests(unittest.TestCase):
             json.loads(completed.stdout),
             {"engine": "rust-shell", "status": "installed"},
         )
+        self.assertFalse(cargo_called.exists())
         native_arguments = arguments_path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(native_arguments[0], "install")
         self.assertIn("--source-root", native_arguments)
         self.assertIn("--target-root", native_arguments)
         self.assertIn("--platform", native_arguments)
+        self.assertIn("--discipline", native_arguments)
+        self.assertIn("qa", native_arguments)
+        self.assertIn("--runtime-config", native_arguments)
+        self.assertIn("codex", native_arguments)
         self.assertIn("--session-launcher", native_arguments)
         self.assertEqual(native_arguments[-1], "--json")
 

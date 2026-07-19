@@ -96,24 +96,19 @@ for argument in "$@"; do
     fi
 done
 
-# Source-checkout compatibility path. The hosted/piped script has no repository sibling.
-if [[ -n "$SCRIPT_SOURCE" ]]; then
+SOURCE_CHECKOUT_ROOT=''
+# Rendered signed bootstraps must use their embedded release metadata even when
+# they are saved beside a source checkout.
+if [[ -n "$SCRIPT_SOURCE" && -z "$AGENT_SKILLS_EMBEDDED_VERSION" ]]; then
     REPO_ROOT="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd -P)"
     if [[ -f "$REPO_ROOT/scripts/install_local.py" ]]; then
+        SOURCE_CHECKOUT_ROOT="$REPO_ROOT"
         if ((NATIVE_UPGRADE_REQUESTED)); then
             printf '%s\n' \
                 "hosted upgrade requires the signed release bootstrap, not a source checkout" \
                 >&2
             exit 2
         fi
-        if [[ "$REQUESTED_ENGINE" == "rust" ]]; then
-            printf '%s\n' \
-                "forced Rust install requires a hosted v2 release and an explicit fresh platform selection" \
-                >&2
-            exit 2
-        fi
-        resolve_selected_python
-        exec "$PYTHON_BIN" "$REPO_ROOT/scripts/install_local.py" "$@"
     fi
 fi
 
@@ -126,6 +121,10 @@ else
 fi
 NATIVE_PLATFORMS=()
 NATIVE_PLATFORM_KEYS='|'
+NATIVE_DISCIPLINES=()
+NATIVE_DISCIPLINE_KEYS='|'
+NATIVE_RUNTIME_CONFIGS=()
+NATIVE_RUNTIME_CONFIG_KEYS='|'
 NATIVE_JSON=0
 NATIVE_DRY_RUN=0
 NATIVE_UPGRADE_DRY_RUN=0
@@ -134,25 +133,63 @@ NATIVE_UPGRADE_PLAN=''
 NATIVE_UPGRADE_APPROVE_PLAN=''
 NATIVE_UPGRADE_APPROVALS=()
 
+validate_install_target_arguments() {
+    local argument value target_root_seen=0
+    local target_root="$NATIVE_TARGET_ROOT"
+    while (($#)); do
+        argument="$1"
+        case "$argument" in
+            --target-root)
+                (($# >= 2)) || return 1
+                ((target_root_seen == 0)) || return 1
+                value="$2"
+                [[ -n "$value" && "$value" != --* ]] || return 1
+                target_root_seen=1
+                target_root="$value"
+                shift 2
+                ;;
+            --target-root=*)
+                ((target_root_seen == 0)) || return 1
+                value="${argument#*=}"
+                [[ -n "$value" ]] || return 1
+                target_root_seen=1
+                target_root="$value"
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    [[ -n "$target_root" && "$target_root" != *'~'* ]]
+}
+
 parse_native_request() {
-    local argument value
+    local argument value target_root_seen=0 json_seen=0 dry_run_seen=0
     while (($#)); do
         argument="$1"
         case "$argument" in
             --json)
+                ((json_seen == 0)) || return 1
+                json_seen=1
                 NATIVE_JSON=1
                 shift
                 ;;
             --dry-run)
+                ((dry_run_seen == 0)) || return 1
+                dry_run_seen=1
                 NATIVE_DRY_RUN=1
                 shift
                 ;;
-            --target-root|--platform)
+            --target-root|--platform|--discipline|--runtime-config)
                 (($# >= 2)) || return 1
                 value="$2"
+                [[ -n "$value" ]] || return 1
                 if [[ "$argument" == "--target-root" ]]; then
+                    ((target_root_seen == 0)) || return 1
+                    target_root_seen=1
                     NATIVE_TARGET_ROOT="$value"
-                else
+                elif [[ "$argument" == "--platform" ]]; then
                     case "$value" in
                         apple|desktop) ;;
                         *) return 1 ;;
@@ -160,11 +197,25 @@ parse_native_request() {
                     [[ "$NATIVE_PLATFORM_KEYS" != *"|$value|"* ]] || return 1
                     NATIVE_PLATFORMS+=("$value")
                     NATIVE_PLATFORM_KEYS+="$value|"
+                elif [[ "$argument" == "--discipline" ]]; then
+                    [[ "$value" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+                    [[ "$NATIVE_DISCIPLINE_KEYS" != *"|$value|"* ]] || return 1
+                    NATIVE_DISCIPLINES+=("$value")
+                    NATIVE_DISCIPLINE_KEYS+="$value|"
+                else
+                    [[ "$value" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+                    [[ "$NATIVE_RUNTIME_CONFIG_KEYS" != *"|$value|"* ]] || return 1
+                    NATIVE_RUNTIME_CONFIGS+=("$value")
+                    NATIVE_RUNTIME_CONFIG_KEYS+="$value|"
                 fi
                 shift 2
                 ;;
             --target-root=*)
-                NATIVE_TARGET_ROOT="${argument#*=}"
+                ((target_root_seen == 0)) || return 1
+                target_root_seen=1
+                value="${argument#*=}"
+                [[ -n "$value" ]] || return 1
+                NATIVE_TARGET_ROOT="$value"
                 shift
                 ;;
             --platform=*)
@@ -176,6 +227,22 @@ parse_native_request() {
                 [[ "$NATIVE_PLATFORM_KEYS" != *"|$value|"* ]] || return 1
                 NATIVE_PLATFORMS+=("$value")
                 NATIVE_PLATFORM_KEYS+="$value|"
+                shift
+                ;;
+            --discipline=*)
+                value="${argument#*=}"
+                [[ "$value" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+                [[ "$NATIVE_DISCIPLINE_KEYS" != *"|$value|"* ]] || return 1
+                NATIVE_DISCIPLINES+=("$value")
+                NATIVE_DISCIPLINE_KEYS+="$value|"
+                shift
+                ;;
+            --runtime-config=*)
+                value="${argument#*=}"
+                [[ "$value" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+                [[ "$NATIVE_RUNTIME_CONFIG_KEYS" != *"|$value|"* ]] || return 1
+                NATIVE_RUNTIME_CONFIGS+=("$value")
+                NATIVE_RUNTIME_CONFIG_KEYS+="$value|"
                 shift
                 ;;
             *)
@@ -401,6 +468,18 @@ run_native_install() {
     for platform_id in "${NATIVE_PLATFORMS[@]}"; do
         command+=(--platform "$platform_id")
     done
+    if [[ "$NATIVE_DISCIPLINE_KEYS" != "|" ]]; then
+        local discipline_id
+        for discipline_id in "${NATIVE_DISCIPLINES[@]}"; do
+            command+=(--discipline "$discipline_id")
+        done
+    fi
+    if [[ "$NATIVE_RUNTIME_CONFIG_KEYS" != "|" ]]; then
+        local runtime_config_id
+        for runtime_config_id in "${NATIVE_RUNTIME_CONFIGS[@]}"; do
+            command+=(--runtime-config "$runtime_config_id")
+        done
+    fi
     if [[ " ${NATIVE_PLATFORMS[*]} " == *" apple "* ]]; then
         command+=(--session-launcher "$native_executable")
     fi
@@ -414,6 +493,76 @@ run_native_install() {
     AGENT_SKILLS_RELEASE_SHA256="$AGENT_SKILLS_EMBEDDED_SOURCE_SHA256" \
     AGENT_SKILLS_RELEASE_VERSION="$AGENT_SKILLS_EMBEDDED_VERSION" \
         "${command[@]}"
+}
+
+run_source_native_install() {
+    local source_root="$1"
+    local temporary native_executable
+    command -v cargo >/dev/null 2>&1 || {
+        printf '%s\n' "native source install requires cargo" >&2
+        return 2
+    }
+    local required
+    for required in \
+        Cargo.toml \
+        Cargo.lock \
+        rust-toolchain.toml \
+        crates/agent-skills/Cargo.toml; do
+        [[ -f "$source_root/$required" && ! -L "$source_root/$required" ]] || {
+            printf '%s\n' "native source install input is missing or unsafe: $required" >&2
+            return 2
+        }
+    done
+    temporary="$(mktemp -d "${TMPDIR:-/tmp}/agent-skills-source-native.XXXXXX")"
+    NATIVE_BOOTSTRAP_DIR="$temporary"
+    trap 'rm -rf "${NATIVE_BOOTSTRAP_DIR:-}"' EXIT HUP INT TERM
+    (
+        cd "$source_root"
+        cargo build \
+            --locked \
+            --offline \
+            --manifest-path "$source_root/Cargo.toml" \
+            --package agent-skills-rs \
+            --bin agent-skills-rs \
+            --target-dir "$temporary/target"
+    )
+    native_executable="$temporary/target/debug/agent-skills-rs"
+    [[ -f "$native_executable" && ! -L "$native_executable" && -x "$native_executable" ]] || {
+        printf '%s\n' "cargo did not produce the expected native installer" >&2
+        return 2
+    }
+    local command=(
+        "$native_executable"
+        install
+        --source-root "$source_root"
+        --target-root "$NATIVE_TARGET_ROOT"
+    )
+    local platform_id
+    for platform_id in "${NATIVE_PLATFORMS[@]}"; do
+        command+=(--platform "$platform_id")
+    done
+    if [[ "$NATIVE_DISCIPLINE_KEYS" != "|" ]]; then
+        local discipline_id
+        for discipline_id in "${NATIVE_DISCIPLINES[@]}"; do
+            command+=(--discipline "$discipline_id")
+        done
+    fi
+    if [[ "$NATIVE_RUNTIME_CONFIG_KEYS" != "|" ]]; then
+        local runtime_config_id
+        for runtime_config_id in "${NATIVE_RUNTIME_CONFIGS[@]}"; do
+            command+=(--runtime-config "$runtime_config_id")
+        done
+    fi
+    if [[ " ${NATIVE_PLATFORMS[*]} " == *" apple "* ]]; then
+        command+=(--session-launcher "$native_executable")
+    fi
+    if ((NATIVE_JSON)); then
+        command+=(--json)
+    fi
+    if ((NATIVE_DRY_RUN)); then
+        command+=(--dry-run)
+    fi
+    AGENT_SKILLS_INSTALL_ENGINE_SELECTED=rust "${command[@]}"
 }
 
 run_native_upgrade() {
@@ -459,10 +608,12 @@ run_native_upgrade() {
             --plan "$NATIVE_UPGRADE_PLAN"
             --approve-plan "$NATIVE_UPGRADE_APPROVE_PLAN"
         )
-        local approval
-        for approval in "${NATIVE_UPGRADE_APPROVALS[@]}"; do
-            command+=(--approve "$approval")
-        done
+        if ((${#NATIVE_UPGRADE_APPROVALS[@]})); then
+            local approval
+            for approval in "${NATIVE_UPGRADE_APPROVALS[@]}"; do
+                command+=(--approve "$approval")
+            done
+        fi
     fi
     AGENT_SKILLS_INSTALL_ENGINE_SELECTED=rust \
     AGENT_SKILLS_RELEASE_SHA256="$AGENT_SKILLS_EMBEDDED_SOURCE_SHA256" \
@@ -490,9 +641,30 @@ if ((NATIVE_UPGRADE_REQUESTED)); then
     exit $?
 fi
 
+if ! validate_install_target_arguments "$@"; then
+    printf '%s\n' "install target arguments are malformed or unsafe" >&2
+    exit 2
+fi
+
 NATIVE_REQUEST_ELIGIBLE=0
 if parse_native_request "$@"; then
     NATIVE_REQUEST_ELIGIBLE=1
+fi
+
+if [[ -n "$SOURCE_CHECKOUT_ROOT" ]]; then
+    if [[ "$REQUESTED_ENGINE" != "python" && "$NATIVE_REQUEST_ELIGIBLE" == "1" ]] \
+        && command -v cargo >/dev/null 2>&1; then
+        run_source_native_install "$SOURCE_CHECKOUT_ROOT"
+        exit $?
+    fi
+    if [[ "$REQUESTED_ENGINE" == "rust" ]]; then
+        printf '%s\n' \
+            "forced Rust source install requires cargo, an explicit fresh --platform apple/desktop selection, and no compatibility-only arguments" \
+            >&2
+        exit 2
+    fi
+    resolve_selected_python
+    exec "$PYTHON_BIN" "$SOURCE_CHECKOUT_ROOT/scripts/install_local.py" "$@"
 fi
 
 if [[ "$REQUESTED_ENGINE" != "python" && "$NATIVE_REQUEST_ELIGIBLE" == "1" ]]; then

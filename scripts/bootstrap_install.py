@@ -479,35 +479,119 @@ def _requested_install_engine() -> str:
     return value
 
 
+def _validated_install_target(installer_arguments: list[str]) -> Path:
+    target_text = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
+    target_root_seen = False
+    index = 0
+    while index < len(installer_arguments):
+        argument = installer_arguments[index]
+        if argument == "--target-root":
+            if target_root_seen or index + 1 >= len(installer_arguments):
+                raise BootstrapError(
+                    "native install target must be expanded and provided once"
+                )
+            value = installer_arguments[index + 1]
+            if not value or value.startswith("--"):
+                raise BootstrapError(
+                    "native install target must be expanded and provided once"
+                )
+            target_root_seen = True
+            target_text = value
+            index += 2
+            continue
+        if argument.startswith("--target-root="):
+            if target_root_seen:
+                raise BootstrapError(
+                    "native install target must be expanded and provided once"
+                )
+            target_root_seen = True
+            target_text = argument.split("=", 1)[1]
+        index += 1
+    if not target_text or "~" in target_text:
+        raise BootstrapError("native install target must be expanded and provided once")
+    return Path(os.path.abspath(target_text))
+
+
 def _native_install_request(
     installer_arguments: list[str],
-) -> tuple[Path, list[str], bool] | None:
-    target = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+) -> tuple[Path, list[str], list[str], list[str], bool, bool] | None:
+    target = _validated_install_target(installer_arguments)
     platforms: list[str] = []
+    disciplines: list[str] = []
+    runtime_configs: list[str] = []
     json_output = False
+    dry_run = False
+    target_root_seen = False
     index = 0
     while index < len(installer_arguments):
         argument = installer_arguments[index]
         if argument == "--json":
+            if json_output:
+                return None
             json_output = True
             index += 1
             continue
-        if argument in {"--target-root", "--platform"}:
+        if argument == "--dry-run":
+            if dry_run:
+                return None
+            dry_run = True
+            index += 1
+            continue
+        if argument in {"--target-root", "--platform", "--discipline", "--runtime-config"}:
             if index + 1 >= len(installer_arguments):
+                if argument == "--target-root":
+                    raise BootstrapError(
+                        "native install target must be expanded and provided once"
+                    )
                 return None
             value = installer_arguments[index + 1]
+            if not value:
+                if argument == "--target-root":
+                    raise BootstrapError(
+                        "native install target must be expanded and provided once"
+                    )
+                return None
             if argument == "--target-root":
-                target = Path(value).expanduser()
-            else:
+                if target_root_seen:
+                    raise BootstrapError(
+                        "native install target must be expanded and provided once"
+                    )
+                if value.startswith("--") or "~" in value:
+                    raise BootstrapError(
+                        "native install target must be expanded and provided once"
+                    )
+                target_root_seen = True
+            elif argument == "--platform":
                 platforms.append(value)
+            elif argument == "--discipline":
+                disciplines.append(value)
+            else:
+                runtime_configs.append(value)
             index += 2
             continue
         if argument.startswith("--target-root="):
-            target = Path(argument.split("=", 1)[1]).expanduser()
+            if target_root_seen:
+                raise BootstrapError(
+                    "native install target must be expanded and provided once"
+                )
+            target_root_seen = True
+            value = argument.split("=", 1)[1]
+            if not value or "~" in value:
+                raise BootstrapError(
+                    "native install target must be expanded and provided once"
+                )
             index += 1
             continue
         if argument.startswith("--platform="):
             platforms.append(argument.split("=", 1)[1])
+            index += 1
+            continue
+        if argument.startswith("--discipline="):
+            disciplines.append(argument.split("=", 1)[1])
+            index += 1
+            continue
+        if argument.startswith("--runtime-config="):
+            runtime_configs.append(argument.split("=", 1)[1])
             index += 1
             continue
         return None
@@ -516,9 +600,12 @@ def _native_install_request(
         or "all" in platforms
         or len(platforms) != len(set(platforms))
         or not set(platforms) <= {"apple", "desktop"}
+        or len(disciplines) != len(set(disciplines))
+        or len(runtime_configs) != len(set(runtime_configs))
+        or any(re.fullmatch(r"[a-z0-9][a-z0-9-]*", value) is None for value in disciplines)
+        or any(re.fullmatch(r"[a-z0-9][a-z0-9-]*", value) is None for value in runtime_configs)
     ):
         return None
-    target = Path(os.path.abspath(target))
     if target.is_symlink() or (target.exists() and not target.is_dir()):
         raise BootstrapError("native install target must be a regular directory path")
     if any((target / name).exists() or (target / name).is_symlink() for name in (
@@ -527,15 +614,15 @@ def _native_install_request(
         ".agent-skills",
     )):
         return None
-    return target, platforms, json_output
+    return target, platforms, disciplines, runtime_configs, json_output, dry_run
 
 
 def _native_command(
     source_root: Path,
     executable: Path,
-    request: tuple[Path, list[str], bool],
+    request: tuple[Path, list[str], list[str], list[str], bool, bool],
 ) -> list[str]:
-    target, platforms, json_output = request
+    target, platforms, disciplines, runtime_configs, json_output, dry_run = request
     command = [
         str(executable),
         "install",
@@ -546,10 +633,16 @@ def _native_command(
     ]
     for platform_id in platforms:
         command.extend(["--platform", platform_id])
+    for discipline_id in disciplines:
+        command.extend(["--discipline", discipline_id])
+    for runtime_config_id in runtime_configs:
+        command.extend(["--runtime-config", runtime_config_id])
     if "apple" in platforms:
         command.extend(["--session-launcher", str(executable)])
     if json_output:
         command.append("--json")
+    if dry_run:
+        command.append("--dry-run")
     return command
 
 
