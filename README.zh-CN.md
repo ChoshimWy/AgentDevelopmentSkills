@@ -166,6 +166,10 @@ cargo run --locked -p agent-skills-rs -- \
   rollback /path/to/installed-root \
   --approve-current-lock <sha256> --approve-rollback-point <sha256>
 cargo run --locked -p agent-skills-rs -- \
+  upgrade /path/to/source/platforms /path/to/installed-root \
+  /path/to/upgrade-conformance-evidence.json --dry-run \
+  --output /path/to/upgrade-plan.json
+cargo run --locked -p agent-skills-rs -- \
   runtime-execute /path/to/workflow-plan.json \
   --behaviors /path/to/fake-behaviors.json
 cargo run --locked -p agent-skills-rs -- \
@@ -213,7 +217,11 @@ cargo run --locked -p agent-skills-rs -- \
 若计划包含 `package_lock_hash`，`invocation-prepare` 必须追加
 `--lock /path/to/agent-skills.lock`，消费时也必须提供同一份已验证 Lockfile。
 
-迁移顺序和切换门禁见 [Rust 迁移计划](docs/rust-migration.md)。当前原生路径已覆盖 canonical contracts、只读 Manifest Registry、仓库发现、策略解析、计划编译，以及 Package Lock 的解析、验证、差异、解释与锁定计划绑定检查。Phase 4 已迁移确定性 fake-adapter Runtime、Adapter Request/Result v1 冻结与验证合同、Recorded Result 消费，以及带输出上限的 Git Worktree 检查、`repository-patch-v1`、`session-source-v1`、Session Context、精确 Worktree 创建/失败补偿、checkpoint、带文件锁的持久化 Session Registry、基于受信 Manifest 的平台/Provider 能力闭包编译与 Session 创建，以及 Final Gate 证据复验/持久化。新增的 Provider Invocation v1 文件交接会冻结权限、副作用、资源、Provider provenance 与 hard timeout，以单次 claim token 的 hash 保护认领，并且只接受与请求 identity 完全一致的 Adapter Result；Runtime 消费必须提供 Provider Invocation Selection v1，显式把每个节点绑定到准确的 submitted request ID，不会按时间静默选择重试结果。真正的 Provider 调用仍由外部宿主负责，Core 不发现或读取 Provider 凭据、不执行 binding/package code 也不联网，只读取调用方显式提供、仅 owner 可读且应来自高熵随机源的 transport claim token；若进程在发布结果附近异常退出，应先 inspect 再重试 claim/submit。原生 Lifecycle 的只读 Doctor 覆盖安全目标、恢复残留、受管布局、Install/Persistent Lock 双锚、Core 运行时 identity、Schema inventory、受管 Activation 文件完整性，以及 Package、Skill、全局 `AGENTS.md`、Binding、权限与持久 rollback point 的完整语义和内容锚。兼容命令 `doctor-report` 继续生成 Doctor Report v1 并要求显式 `--python-version`；公开 `doctor` 命令现生成运行时中立的 Doctor Report v2，直接使用构建时嵌入原生二进制的精确 Schema inventory，因此不依赖 Python、源码 checkout、网络或调用方提供的 Schema 路径。首次安装、卸载与回滚已进入受保护的公开原生事务；upgrade 已有非默认原生执行器，公开切换仍由独立门禁控制。`agent-lifecycle` 的 identity-bound RAII 目录锁覆盖原子互斥、安全创建缺失目标、crash residue 可见性和 identity-checked 清理。跨平台按名称释放要求目标父目录在释放期间保持受信，调用方也必须预先展开 `~`。只读 Doctor 实现会持有目录 capability，并以 no-follow 方式打开合同文件；它不会修复、安装、升级、回滚、卸载或写入目标。任一检查失败时仍在 stdout 输出 canonical JSON，并以退出码 2 返回。Activation 与安装包树的 mode 差分目前都属于 POSIX 合同；Windows 原生 Doctor 仍验证 Lock 结构、路径、no-follow 遍历与内容 hash，但不会把 POSIX mode 位解释为 Windows ACL 保证。
+迁移顺序与门禁见 [Rust 迁移计划](docs/rust-migration.md)。原生路径已覆盖 canonical contracts、Manifest Registry、发现与策略、计划和 Package Lock、受控 Runtime、Worktree Session、Provider Invocation，以及事务化 Lifecycle。
+
+公开 `doctor` 生成运行时中立的 Doctor Report v2，并使用构建时嵌入二进制的精确 Schema inventory，不依赖 Python、源码 checkout、网络或外部 Schema 路径。兼容命令 `doctor-report` 继续保留 Doctor Report v1 与显式 `--python-version` 差分门禁。Doctor 全程只读；失败检查仍输出 canonical JSON 并返回退出码 2。
+
+首次安装、卸载与回滚已使用公开原生事务。公开原生 `upgrade` 要求显式提供已验证源码、Conformance evidence、保存的 Plan、精确 Plan fingerprint 与完整权限批准；`lifecycle-upgrade` 保留为可见别名。托管自动获取升级源码与证据仍由独立发布门禁控制。
 
 原生 `LifecycleWorkspace` 会在同一生命周期锁下创建私有 stage/backup，持有目录 capability，并以 no-follow、identity-bound 和 canonical-contract 门禁组装与验证 `AGENTS.md`、双 Lock、Package、Skill、`skills/.system` 及 Activation 状态。持久化 rollback point 会冻结受管树、外部文件、缺失状态、mode 与父目录预像；原子 no-replace rename 在 Unix 使用 `renameat2`/`renamex_np`，在 Windows 使用不带 replace flag 的 `MoveFileExW`。任何 identity、内容、alias 或父目录 symlink 漂移都会 fail-closed，并在必要时保留 stage/backup 作为恢复证据。
 
@@ -223,7 +231,13 @@ cargo run --locked -p agent-skills-rs -- \
 
 非默认的 `lifecycle-uninstall` 兼容别名与公开 `uninstall` 命令均已接入原生卸载 guard：缺失目标不会被创建，执行与只读 dry-run 的 JSON、默认人类可读输出、canonical blocked report 及最终文件系统状态均已对照 Python 路径验证。托管 `uninstall.sh` 只在已安装二进制与内嵌 host artifact 的大小和 SHA-256 完全一致时默认进入该路径，原生一旦选中不静默降级。
 
-并行的 `install-selection` 兼容命令现已覆盖可安装源包目录、显式平台/Discipline/Runtime Config 选择、必需与可选依赖闭包、版本约束、确定性拓扑顺序和选择原因。后续的 `install-source-snapshot` 命令会通过有界、no-follow 遍历冻结声明的 Package 资产、Package/Provider Manifest、Instruction Fragment 与可安装 Skill 树，并复读源包检查并发变化；两者均已与 Python 完成差分验证。新增的 `install-bundle` 命令会在冻结快照上独立重建 Manifest Registry、依赖能力、Instruction/rule、Skill、资产、Binding、权限、副作用、Install Plan v2 与持久化 Package Lockfile identity；core-only、Apple、QA、Codex Runtime Config 及 previous-Lock lineage 输出已与 Python 做逐字节差分。原生生命周期现同时提供只读 `lifecycle-install` 兼容命令，以及面向合格首次安装的 production `install` 命令；它会执行 staging、语义复验、原子发布、发布后复验、失败回滚与清理。Apple 安装还会冻结同一份 launcher 字节，并在同一受保护事务中完成 source activation。安装后的原生 `agent-session` 保留公开的 `create`、`list`、`inspect`、`fingerprint`、`checkpoint` 与 `gate` 命令面。core-only 和 Apple 投影继续与 Python 做差分。作为 upgrade 切换的第一道门禁，Rust 现已严格验证 Upgrade Conformance Evidence v1 与 Upgrade Plan v1，覆盖稳定 attestation、精确选择/移除、权限审批、external handler identity、迁移顺序、rollback identity 及自洽篡改。非默认 `upgrade-plan-build` 现在只接受候选 Plan/Lock、Conformance evidence、目标与移除请求；保留 source Activation 时还要求冻结的原生 launcher。Lifecycle 在持有目标事务锁期间通过目录 capability 自行读取并复验当前双 Lock，推导 Activation ownership，选择唯一允许的 activate/deactivate/preserve handler，冻结并二次复验精确外部路径与 rollback state，再签发 opaque 收据供同 crate 编译器消费。收据同时绑定本地 Rust 源码闭包、Cargo lock、目标与固定 toolchain build identity；CLI 不再接受可伪造的当前 Lock、rollback point、migration、handler 或外部路径。Activation Lock v1 migration 会由可信收据规划；Apple changed、preserve 与 deactivation 计划改为在 ownership/scope 漂移时 fail-closed，而不是一律拒绝。external-free 输出继续与 Python 做逐字节差分；原生 Activation 因额外管理 `bin/agent-skills` 且 handler build identity 不同，采用字段级语义差分。`upgrade-evidence-validate` / `upgrade-plan-validate` 继续覆盖负向合同。`agent-lifecycle` 现也提供首个会写入目标的原生 executor：它在同一目标锁下重新编译并逐值比较已批准 Plan 与权限批准，组装候选和持久 rollback point，通过 `PublishedInstall` 发布，并且只执行 opaque 收据绑定的 activate/deactivate/preserve handler。Apple activation 在任何外部写入前，还必须让新发布安装通过原生 installed-registry smoke，覆盖 discovery、policy、Package-Lock-bound ready Plan、Skill Binding、Recorded Adapter Runtime、独立 review 与 delivery report；smoke 或 handler 失败仍处于 managed/external 统一回滚窗口。非默认 `lifecycle-upgrade` 命令现会依据首次持锁读取的已安装 lineage 编译源码候选：`--dry-run` 输出或保存精确 Plan，执行时必须同时提供该 Plan 和显式 `--approve-plan` fingerprint。Apply 会重新取得目标锁、完整重建并逐值比较 Plan 后才交给受保护 executor；若目标在两次快照之间变化则 fail-closed，不会静默 rebase。公开 `upgrade` 仍保留在现有审批兼容路径，直到其独立差分与发布门禁全部通过。
+原生安装流水线由 `install-selection`、`install-source-snapshot` 与 `install-bundle` 分层完成：先解析显式平台、Discipline、Runtime Config 和依赖闭包，再通过有界 no-follow 遍历冻结声明资产，最后重建 Manifest Registry、能力、规则、Skill、Binding、权限、Install Plan v2 与 Package Lockfile。core-only、Apple、QA、Codex Runtime Config 和 previous-Lock lineage 均保留 Python 差分证据。
+
+公开 `install` 会执行 staging、语义复验、原子发布、发布后复验、失败回滚与清理；`lifecycle-install` 作为只读兼容命令保留。Apple 安装还会冻结同一份原生 launcher，并在受保护事务中完成 source activation。安装后的 `agent-session` 继续提供 `create`、`list`、`inspect`、`fingerprint`、`checkpoint` 与 `gate`。
+
+升级门禁严格验证 Upgrade Conformance Evidence v1 与 Upgrade Plan v1，覆盖 attestation、精确选择和移除、权限审批、external handler identity、迁移顺序、rollback identity 与自洽篡改。Lifecycle 在目标事务锁下复验双 Lock 和 Activation ownership，冻结外部作用域与 rollback state，并签发绑定 Rust 源码闭包、Cargo Lock、目标和固定 toolchain build identity 的 opaque 收据；调用方不能伪造当前 Lock、rollback point、迁移、handler 或外部路径。
+
+公开 `upgrade` 会根据首次持锁读取的安装 lineage 编译候选。`--dry-run` 输出或保存精确 Plan；执行时必须提供该 Plan、对应的 `--approve-plan` fingerprint 和完整权限批准。Apply 会重新取得目标锁、重建并逐值比较 Plan，再交给受保护 executor；候选或目标发生并发漂移时 fail-closed。Apple activation 在任何外部写入前还必须通过原生 installed-registry smoke，覆盖 discovery、policy、Package-Lock-bound ready Plan、Skill Binding、Recorded Adapter Runtime、独立 review 与 delivery report。`lifecycle-upgrade` 仅作为可见兼容别名；托管自动获取源码与 Conformance evidence 仍受独立发布门禁控制。
 
 公开 `rollback` 会在创建 workspace 前校验精确的当前 Lock 与持久 rollback-point fingerprint；随后从已验证快照重建旧 managed projection、保留当前 `.system`、在同一 `PublishedInstall` 恢复窗口内还原冻结的外部预像，并把被替换的当前状态持久化为下一 rollback point。`lifecycle-rollback` 作为可见兼容别名继续保留。
 

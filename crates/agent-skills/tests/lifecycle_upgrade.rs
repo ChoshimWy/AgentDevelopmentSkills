@@ -82,9 +82,27 @@ fn upgrade_command(
     evidence_path: &Path,
     schemas: &Path,
 ) -> Command {
+    upgrade_command_named(
+        binary,
+        "upgrade",
+        platform_root,
+        target,
+        evidence_path,
+        schemas,
+    )
+}
+
+fn upgrade_command_named(
+    binary: &Path,
+    command_name: &str,
+    platform_root: &Path,
+    target: &Path,
+    evidence_path: &Path,
+    schemas: &Path,
+) -> Command {
     let mut command = Command::new(binary);
     command
-        .arg("lifecycle-upgrade")
+        .arg(command_name)
         .arg(platform_root)
         .arg(target)
         .arg(evidence_path)
@@ -296,12 +314,18 @@ fn lifecycle_upgrade_cli_requires_saved_plan_and_exact_fingerprint() {
         preview.stdout
     );
 
-    let missing_approval =
-        upgrade_command(&binary, &platform_root, &target, &evidence_path, &schemas)
-            .arg("--plan")
-            .arg(&plan_path)
-            .output()
-            .expect("reject missing Plan fingerprint");
+    let missing_approval = upgrade_command_named(
+        &binary,
+        "lifecycle-upgrade",
+        &platform_root,
+        &target,
+        &evidence_path,
+        &schemas,
+    )
+    .arg("--plan")
+    .arg(&plan_path)
+    .output()
+    .expect("reject missing Plan fingerprint through compatibility alias");
     assert!(!missing_approval.status.success());
     assert!(
         String::from_utf8_lossy(&missing_approval.stderr)

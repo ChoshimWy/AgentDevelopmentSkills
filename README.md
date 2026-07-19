@@ -172,6 +172,10 @@ cargo run --locked -p agent-skills-rs -- \
   rollback /path/to/installed-root \
   --approve-current-lock <sha256> --approve-rollback-point <sha256>
 cargo run --locked -p agent-skills-rs -- \
+  upgrade /path/to/source/platforms /path/to/installed-root \
+  /path/to/upgrade-conformance-evidence.json --dry-run \
+  --output /path/to/upgrade-plan.json
+cargo run --locked -p agent-skills-rs -- \
   lifecycle-uninstall /path/to/installed-root --platform all
 cargo run --locked -p agent-skills-rs -- \
   runtime-execute /path/to/workflow-plan.json \
@@ -267,8 +271,9 @@ Report v1 with an explicit `--python-version` host attestation. The public
 binary embeds its build-time Schema inventory and requires neither Python, a
 source checkout, a network connection, nor a caller-supplied Schema path.
 Fresh install, uninstall, and rollback already use guarded native
-transactions, while native upgrade remains non-default until its separate
-public cutover gate completes. `agent-lifecycle` uses an identity-bound RAII
+transactions. The public native `upgrade` command requires explicit verified
+source and Conformance evidence; hosted automatic acquisition remains behind
+its separate release gate. `agent-lifecycle` uses an identity-bound RAII
 directory lock with atomic exclusion, safe missing-target creation,
 crash-residue visibility, and identity-checked cleanup.
 The companion `LifecycleWorkspace` now creates a unique POSIX mode-`0700`
@@ -409,8 +414,8 @@ Before an Apple activation can write external state, the newly published
 installation must pass a native installed-registry smoke covering discovery,
 policy, a package-Lock-bound ready Plan, Skill bindings, Recorded Adapter
 execution, independent review, and delivery reporting. Any smoke or handler
-failure remains inside the managed/external rollback window. The non-default
-`lifecycle-upgrade` command now compiles a source candidate against an
+failure remains inside the managed/external rollback window. The public
+`upgrade` command now compiles a source candidate against an
 initially locked snapshot of the installed lineage, emits or saves the exact
 Plan in `--dry-run` mode, and requires both that saved Plan and its explicit
 `--approve-plan` fingerprint before execution. Apply reacquires the target
@@ -422,8 +427,8 @@ creates a workspace. It stages the validated prior projection, preserves the
 current `.system` tree, restores the frozen external preimages inside the same
 `PublishedInstall` recovery window, and persists the displaced current state
 as the next rollback point. `lifecycle-rollback` remains a visible
-compatibility alias. Public `upgrade` routing remains behind its separate
-conformance and release gate.
+compatibility alias. `lifecycle-upgrade` likewise remains a visible alias;
+hosted automatic upgrade acquisition remains behind its separate release gate.
 The installed native
 `agent-session` dispatch preserves
 the public `create`, `list`, `inspect`, `fingerprint`, `checkpoint`, and `gate`

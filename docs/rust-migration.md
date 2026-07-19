@@ -363,8 +363,10 @@ Adapter execution, independent review, and delivery reporting while
 `PublishedInstall` can still restore both managed and external preimages.
 No-change, partial removal, legacy Activation migration, approval rejection,
 activate/deactivate/preserve dispatch, smoke-failure compensation, and
-post-write handler compensation have native transaction tests. The non-default
-`lifecycle-upgrade` CLI now connects source selection to that executor. It
+post-write handler compensation have native transaction tests. The public
+native `upgrade` CLI now connects explicit verified source selection and
+Conformance evidence to that executor; `lifecycle-upgrade` remains a visible
+compatibility alias. It
 compiles a no-lineage candidate, loads and cross-validates the installed Lock
 pair under an initial target lock, and recompiles changed candidates with the
 exact current Lock as lineage. Dry-run emits or saves a canonical Plan; apply
@@ -379,12 +381,13 @@ snapshot, the current `.system` tree is preserved, and frozen external
 preimages are restored while `PublishedInstall` can still recover both sides.
 The displaced current state becomes the next validated rollback point, making
 the transaction reversible again. `lifecycle-rollback` remains a visible
-compatibility alias. Public upgrade still waits on its separate conformance
-and release gate.
+compatibility alias. Hosted automatic source and evidence acquisition remains
+behind its separate release gate.
 Doctor, uninstall, rollback, and source activation now have native public or
 transaction routes with differential, tamper, concurrency, recovery, and
-independent-review evidence. Public upgrade remains the remaining hosted
-lifecycle cutover, separate from the Python-free eligible fresh-install route.
+independent-review evidence. The remaining hosted lifecycle cutover is
+automatic upgrade acquisition, separate from both the explicit-input native
+upgrade route and the Python-free eligible fresh-install route.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

@@ -241,6 +241,7 @@ enum Command {
         dry_run: bool,
     },
     /// Plan or execute one approval-bound native source upgrade transaction.
+    #[command(name = "upgrade", visible_alias = "lifecycle-upgrade")]
     LifecycleUpgrade {
         root: PathBuf,
         target_root: PathBuf,
@@ -1089,7 +1090,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             )?;
             if dry_run {
                 if plan.is_some() || approve_plan.is_some() || !approvals.is_empty() {
-                    return Err("lifecycle-upgrade --dry-run does not accept approvals".into());
+                    return Err("upgrade --dry-run does not accept approvals".into());
                 }
                 let encoded = canonical_json(&generated)?;
                 if let Some(output) = output {
@@ -1098,24 +1099,20 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 print!("{}", String::from_utf8(encoded)?);
             } else {
                 if output.is_some() {
-                    return Err("lifecycle-upgrade apply does not accept --output".into());
+                    return Err("upgrade apply does not accept --output".into());
                 }
-                let approved = load_json(
-                    plan.ok_or("lifecycle-upgrade apply requires --plan and --approve-plan")?,
-                )?;
-                let approve_plan = approve_plan
-                    .ok_or("lifecycle-upgrade apply requires --plan and --approve-plan")?;
+                let approved =
+                    load_json(plan.ok_or("upgrade apply requires --plan and --approve-plan")?)?;
+                let approve_plan =
+                    approve_plan.ok_or("upgrade apply requires --plan and --approve-plan")?;
                 if approved.get("fingerprint").and_then(Value::as_str)
                     != Some(approve_plan.as_str())
                 {
-                    return Err(
-                        "lifecycle-upgrade apply requires the exact planned fingerprint".into(),
-                    );
+                    return Err("upgrade apply requires the exact planned fingerprint".into());
                 }
                 if approved != generated {
                     return Err(
-                        "saved lifecycle-upgrade Plan is stale or differs from the current candidate"
-                            .into(),
+                        "saved upgrade Plan is stale or differs from the current candidate".into(),
                     );
                 }
                 let mut result = upgrade_source_bundle(
