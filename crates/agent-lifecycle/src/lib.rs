@@ -53,9 +53,10 @@ pub use source_install::{
     SourceInstallSelection, inspect_source_platform_options, resolve_source_install_selection,
 };
 pub use source_lifecycle::{
-    compile_source_upgrade_bundle, inspect_source_install, inspect_source_install_with_activation,
-    inspect_source_upgrade, install_source_bundle, install_source_bundle_with_activation,
-    upgrade_source_bundle,
+    InstalledSourceSelection, compile_source_upgrade_bundle, compile_source_upgrade_bundle_bound,
+    inspect_installed_source_selection, inspect_source_install,
+    inspect_source_install_with_activation, inspect_source_upgrade, inspect_source_upgrade_bound,
+    install_source_bundle, install_source_bundle_with_activation, upgrade_source_bundle,
 };
 pub use source_packages::{SourcePackageSet, snapshot_source_packages};
 pub use source_rollback::rollback_source_install;

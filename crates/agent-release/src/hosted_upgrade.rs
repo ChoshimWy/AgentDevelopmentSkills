@@ -1,5 +1,10 @@
-use agent_contracts::{canonical_json, parse_json};
-use agent_engine::validate_upgrade_source_qualification;
+use agent_contracts::{canonical_json, canonical_sha256, parse_json};
+use agent_engine::{validate_upgrade_conformance_evidence, validate_upgrade_source_qualification};
+use agent_lifecycle::{
+    InstalledSourceSelection, SourceInstallBundle, SourceInstallSelection, SourcePackageSet,
+    compile_source_upgrade_bundle_bound, inspect_installed_source_selection,
+    inspect_source_upgrade_bound, resolve_source_install_selection, snapshot_source_packages,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -45,7 +50,7 @@ struct ReleaseManifest {
     version: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SourceArtifact {
     entrypoint: String,
@@ -93,7 +98,26 @@ struct SourceIdentity {
 pub struct HostedUpgradeSource {
     manifest: Value,
     qualification: Value,
+    source_archive: Vec<u8>,
+    source_artifact: SourceArtifact,
+    source_root: PathBuf,
     _workspace: TempDir,
+}
+
+/// One candidate compiled only from an authenticated hosted source.
+///
+/// Source paths and mutable compilation inputs remain private. The exact
+/// installed selection, package snapshot, candidate Lock, and release
+/// qualification stay alive together so callers cannot bind arbitrary hashes.
+pub struct HostedUpgradeCandidate {
+    _source: HostedUpgradeSource,
+    selection: SourceInstallSelection,
+    packages: SourcePackageSet,
+    bundle: SourceInstallBundle,
+    evidence: Value,
+    installed: InstalledSourceSelection,
+    package_lock_hash: String,
+    source_qualification_fingerprint: String,
 }
 
 impl HostedUpgradeSource {
@@ -107,6 +131,142 @@ impl HostedUpgradeSource {
     #[must_use]
     pub const fn qualification(&self) -> &Value {
         &self.qualification
+    }
+
+    /// Compile one candidate from this exact qualified source and the installed selection.
+    ///
+    /// The source archive is independently extracted and compiled a second time.
+    /// Both candidate projections must match before Conformance evidence is
+    /// bound to the candidate Package Lock.
+    ///
+    /// # Errors
+    /// Returns a fail-closed error for invalid installed state, source drift,
+    /// nondeterministic compilation, Schema disagreement, or invalid evidence.
+    pub fn compile_candidate(
+        self,
+        target_root: impl AsRef<Path>,
+    ) -> Result<HostedUpgradeCandidate, ReleaseError> {
+        let target_root = target_root.as_ref();
+        let installed = inspect_installed_source_selection(target_root)?;
+        let selection = resolve_source_install_selection(
+            self.source_root.join("platforms"),
+            installed.platforms(),
+            installed.disciplines(),
+            installed.runtime_configs(),
+            installed.core_only(),
+        )?;
+        let packages = snapshot_source_packages(&selection)?;
+        let bundle = compile_source_upgrade_bundle_bound(
+            &selection,
+            &packages,
+            self.source_root.join("schemas"),
+            target_root,
+            &installed,
+        )?;
+
+        let (verification_workspace, verification_root) =
+            extract_archive_workspace(&self.source_archive, &self.source_artifact)?;
+        let verification_selection = resolve_source_install_selection(
+            verification_root.join("platforms"),
+            installed.platforms(),
+            installed.disciplines(),
+            installed.runtime_configs(),
+            installed.core_only(),
+        )?;
+        let verification_packages = snapshot_source_packages(&verification_selection)?;
+        let verification_bundle = compile_source_upgrade_bundle_bound(
+            &verification_selection,
+            &verification_packages,
+            verification_root.join("schemas"),
+            target_root,
+            &installed,
+        )?;
+        if bundle.compatibility_projection() != verification_bundle.compatibility_projection()
+            || packages.compatibility_projection()
+                != verification_packages.compatibility_projection()
+        {
+            return contract(
+                "hosted upgrade candidate is not reproducible from its source archive",
+            );
+        }
+        drop(verification_workspace);
+
+        let evidence = derive_candidate_evidence(&self.qualification, bundle.package_lock())?;
+        let package_lock_hash = bundle
+            .package_lock()
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ReleaseError::Contract(
+                    "compiled candidate Package Lock fingerprint is invalid".to_owned(),
+                )
+            })?
+            .to_owned();
+        let source_qualification_fingerprint = self
+            .qualification
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ReleaseError::Contract(
+                    "hosted source qualification fingerprint is invalid".to_owned(),
+                )
+            })?
+            .to_owned();
+        Ok(HostedUpgradeCandidate {
+            _source: self,
+            selection,
+            packages,
+            bundle,
+            evidence,
+            installed,
+            package_lock_hash,
+            source_qualification_fingerprint,
+        })
+    }
+}
+
+impl HostedUpgradeCandidate {
+    /// Exact Package Lock hash compiled from the qualified source.
+    #[must_use]
+    pub fn package_lock_hash(&self) -> &str {
+        &self.package_lock_hash
+    }
+
+    /// Source Qualification fingerprint retained with this candidate.
+    #[must_use]
+    pub fn source_qualification_fingerprint(&self) -> &str {
+        &self.source_qualification_fingerprint
+    }
+
+    /// Build one approval-bound Upgrade Plan without exposing source paths or evidence.
+    ///
+    /// The selected package snapshot is refreshed immediately before planning
+    /// and must remain byte-identical to the compiled candidate.
+    ///
+    /// # Errors
+    /// Returns a fail-closed error for source or target drift, a missing Apple
+    /// session launcher, invalid lifecycle scope, or stale candidate evidence.
+    pub fn inspect_upgrade(
+        &self,
+        target_root: impl AsRef<Path>,
+        session_launcher: Option<&[u8]>,
+    ) -> Result<Value, ReleaseError> {
+        let refreshed = snapshot_source_packages(&self.selection)?;
+        if refreshed.compatibility_projection() != self.packages.compatibility_projection() {
+            return contract("hosted upgrade source changed after candidate compilation");
+        }
+        inspect_source_upgrade_bound(
+            &self.bundle,
+            &self.packages,
+            target_root,
+            &self.evidence,
+            "upgrade",
+            &[],
+            &[],
+            session_launcher,
+            &self.installed,
+        )
+        .map_err(ReleaseError::from)
     }
 }
 
@@ -311,12 +471,27 @@ fn acquire_with_fetch(
         MAX_SOURCE_BYTES,
         "source archive",
     )?;
+    let (workspace, source_root) = extract_archive_workspace(&source_bytes, artifact)?;
+    Ok(HostedUpgradeSource {
+        manifest: manifest_value,
+        qualification,
+        source_archive: source_bytes,
+        source_artifact: artifact.clone(),
+        source_root,
+        _workspace: workspace,
+    })
+}
+
+fn extract_archive_workspace(
+    source_bytes: &[u8],
+    artifact: &SourceArtifact,
+) -> Result<(TempDir, PathBuf), ReleaseError> {
     let workspace = tempfile::Builder::new()
         .prefix("agent-hosted-upgrade-")
         .tempdir()?;
     let extracted = workspace.path().join("source");
     std::fs::create_dir(&extracted)?;
-    extract_source(&source_bytes, &extracted)?;
+    extract_source(source_bytes, &extracted)?;
     let source_root = extracted.join(&artifact.root);
     let entrypoint = source_root.join(&artifact.entrypoint);
     let source_metadata = source_root
@@ -332,11 +507,7 @@ fn acquire_with_fetch(
     {
         return contract("hosted upgrade source root or entrypoint is missing");
     }
-    Ok(HostedUpgradeSource {
-        manifest: manifest_value,
-        qualification,
-        _workspace: workspace,
-    })
+    Ok((workspace, source_root))
 }
 
 fn validate_manifest(manifest: &ReleaseManifest) -> Result<(), ReleaseError> {
@@ -508,6 +679,92 @@ fn canonical_value(bytes: &[u8], label: &str) -> Result<Value, ReleaseError> {
         return contract(&format!("{label} must use canonical JSON encoding"));
     }
     Ok(value)
+}
+
+fn derive_candidate_evidence(
+    qualification: &Value,
+    package_lock: &Value,
+) -> Result<Value, ReleaseError> {
+    validate_upgrade_source_qualification(qualification)
+        .map_err(|error| ReleaseError::Contract(error.to_string()))?;
+    let candidate_hash = package_lock
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ReleaseError::Contract("candidate Package Lock fingerprint is invalid".to_owned())
+        })?;
+    let schema_inventory_hash = package_lock
+        .get("schema_inventory")
+        .and_then(|value| value.get("content_sha256"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ReleaseError::Contract("candidate Schema inventory hash is invalid".to_owned())
+        })?;
+    if qualification
+        .get("schema_inventory_hash")
+        .and_then(Value::as_str)
+        != Some(schema_inventory_hash)
+    {
+        return contract(
+            "qualified source Schema inventory differs from the candidate Package Lock",
+        );
+    }
+    let source = qualification.as_object().ok_or_else(|| {
+        ReleaseError::Contract("Upgrade Source Qualification is invalid".to_owned())
+    })?;
+    let mut evidence = serde_json::Map::new();
+    for field in [
+        "command_results",
+        "environment",
+        "manifest_count",
+        "negative_contract_count",
+        "runner_sha256",
+        "schema_inventory_hash",
+        "schema_version",
+        "status",
+        "suite",
+        "suite_definition_hash",
+        "test_count",
+    ] {
+        evidence.insert(
+            field.to_owned(),
+            source.get(field).cloned().ok_or_else(|| {
+                ReleaseError::Contract(format!("Upgrade Source Qualification {field} is missing"))
+            })?,
+        );
+    }
+    evidence.insert(
+        "candidate_package_lock_hash".to_owned(),
+        Value::String(candidate_hash.to_owned()),
+    );
+    let stable_results = evidence
+        .get("command_results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ReleaseError::Contract(
+                "Upgrade Source Qualification command results are invalid".to_owned(),
+            )
+        })?
+        .iter()
+        .map(|result| {
+            serde_json::json!({
+                "command": result.get("command").cloned().unwrap_or(Value::Null),
+                "exit_code": result.get("exit_code").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut stable = evidence.clone();
+    stable.insert("command_results".to_owned(), Value::Array(stable_results));
+    evidence.insert(
+        "attestation_key".to_owned(),
+        Value::String(canonical_sha256(&Value::Object(stable))?),
+    );
+    let fingerprint = canonical_sha256(&Value::Object(evidence.clone()))?;
+    evidence.insert("fingerprint".to_owned(), Value::String(fingerprint));
+    let evidence = Value::Object(evidence);
+    validate_upgrade_conformance_evidence(&evidence)
+        .map_err(|error| ReleaseError::Contract(error.to_string()))?;
+    Ok(evidence)
 }
 
 fn secure_url(value: &str, directory: bool) -> Result<String, ReleaseError> {
@@ -699,6 +956,7 @@ mod tests {
     use agent_contracts::{canonical_json, canonical_sha256};
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::path::Path;
     use zip::write::SimpleFileOptions;
 
     fn source_archive(root: &str) -> Vec<u8> {
@@ -726,6 +984,80 @@ mod tests {
             .unwrap();
         writer.write_all(b"print('fixture')\n").unwrap();
         writer.finish().unwrap().into_inner()
+    }
+
+    fn repository_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root")
+            .to_path_buf()
+    }
+
+    fn repository_source_archive(root: &str) -> Vec<u8> {
+        let repository = repository_root();
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .add_directory(
+                format!("{root}/"),
+                SimpleFileOptions::default().unix_permissions(0o755),
+            )
+            .unwrap();
+        for relative in ["disciplines", "platforms", "runtime-configs", "schemas"] {
+            append_repository_tree(&mut writer, &repository, Path::new(relative), root);
+        }
+        append_repository_tree(
+            &mut writer,
+            &repository,
+            Path::new("scripts/install_local.py"),
+            root,
+        );
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn append_repository_tree(
+        writer: &mut zip::ZipWriter<Cursor<Vec<u8>>>,
+        repository: &Path,
+        relative: &Path,
+        archive_root: &str,
+    ) {
+        let path = repository.join(relative);
+        let metadata = path.symlink_metadata().unwrap();
+        assert!(!metadata.file_type().is_symlink());
+        let archive_path = format!("{archive_root}/{}", relative.to_string_lossy());
+        if metadata.is_dir() {
+            writer
+                .add_directory(
+                    format!("{archive_path}/"),
+                    SimpleFileOptions::default().unix_permissions(0o755),
+                )
+                .unwrap();
+            let mut children = path
+                .read_dir()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            children.sort_by_key(std::fs::DirEntry::file_name);
+            for child in children {
+                append_repository_tree(
+                    writer,
+                    repository,
+                    &relative.join(child.file_name()),
+                    archive_root,
+                );
+            }
+        } else {
+            writer
+                .start_file(
+                    archive_path,
+                    SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Deflated)
+                        .unix_permissions(0o644),
+                )
+                .unwrap();
+            writer.write_all(&std::fs::read(path).unwrap()).unwrap();
+        }
     }
 
     fn qualification(source: &[u8], root: &str) -> Value {
@@ -762,6 +1094,23 @@ mod tests {
         value["attestation_key"] = Value::String(canonical_sha256(&Value::Object(stable)).unwrap());
         value["fingerprint"] = Value::String(canonical_sha256(&value).unwrap());
         value
+    }
+
+    fn bind_qualification_schema(qualification: &mut Value, schema_hash: &str) {
+        qualification["schema_inventory_hash"] = Value::String(schema_hash.to_owned());
+        qualification
+            .as_object_mut()
+            .unwrap()
+            .remove("attestation_key");
+        qualification.as_object_mut().unwrap().remove("fingerprint");
+        let mut stable = qualification.as_object().unwrap().clone();
+        stable.insert(
+            "command_results".to_owned(),
+            json!([{"command": "compatibility-suite", "exit_code": 0}]),
+        );
+        qualification["attestation_key"] =
+            Value::String(canonical_sha256(&Value::Object(stable)).unwrap());
+        qualification["fingerprint"] = Value::String(canonical_sha256(qualification).unwrap());
     }
 
     fn fixture() -> (Vec<u8>, BTreeMap<String, Vec<u8>>, String) {
@@ -957,6 +1306,115 @@ mod tests {
             Value::String("agent-skills-0.2.0-aarch64-pc-windows-msvc".to_owned());
         let manifest: ReleaseManifest = serde_json::from_value(value).unwrap();
         assert!(validate_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn qualification_binds_only_the_compiled_candidate_and_schema_inventory() {
+        let source = source_archive("agent-development-skills-0.2.0");
+        let qualification = qualification(&source, "agent-development-skills-0.2.0");
+        let package_lock = json!({
+            "fingerprint": "d".repeat(64),
+            "schema_inventory": {"content_sha256": "5".repeat(64)},
+        });
+        let evidence = derive_candidate_evidence(&qualification, &package_lock).unwrap();
+        assert_eq!(
+            evidence["candidate_package_lock_hash"],
+            package_lock["fingerprint"]
+        );
+        assert_eq!(
+            evidence["schema_inventory_hash"],
+            package_lock["schema_inventory"]["content_sha256"]
+        );
+        validate_upgrade_conformance_evidence(&evidence).unwrap();
+
+        let mut mismatched = package_lock;
+        mismatched["schema_inventory"]["content_sha256"] = Value::String("e".repeat(64));
+        assert!(derive_candidate_evidence(&qualification, &mismatched).is_err());
+    }
+
+    #[test]
+    fn hosted_candidate_infers_installed_selection_and_compiles_twice() {
+        let repository = repository_root();
+        let current_selection =
+            resolve_source_install_selection(repository.join("platforms"), &[], &[], &[], true)
+                .unwrap();
+        let current_packages = snapshot_source_packages(&current_selection).unwrap();
+        let current_bundle = agent_lifecycle::compile_source_install_bundle(
+            &current_selection,
+            &current_packages,
+            repository.join("schemas"),
+            None,
+        )
+        .unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let installed_root = target.path().join("installed");
+        agent_lifecycle::install_source_bundle(&current_bundle, &current_packages, &installed_root)
+            .unwrap();
+
+        let root = "agent-development-skills-0.2.0";
+        let source_archive = repository_source_archive(root);
+        let source_artifact = SourceArtifact {
+            entrypoint: "scripts/install_local.py".to_owned(),
+            filename: "agent-development-skills-0.2.0.zip".to_owned(),
+            format: "zip".to_owned(),
+            host_os: vec![release_host_os().to_owned()],
+            id: "universal-source-bundle".to_owned(),
+            root: root.to_owned(),
+            sha256: sha256(&source_archive),
+            size: source_archive.len() as u64,
+        };
+        let (workspace, source_root) =
+            extract_archive_workspace(&source_archive, &source_artifact).unwrap();
+        let mut qualification = qualification(&source_archive, root);
+        let schema_hash = current_bundle.package_lock()["schema_inventory"]["content_sha256"]
+            .as_str()
+            .unwrap();
+        bind_qualification_schema(&mut qualification, schema_hash);
+        let hosted = HostedUpgradeSource {
+            manifest: json!({"schema_version": "3.0"}),
+            qualification,
+            source_archive,
+            source_artifact,
+            source_root,
+            _workspace: workspace,
+        };
+
+        let candidate = hosted.compile_candidate(&installed_root).unwrap();
+        assert_eq!(
+            candidate.package_lock_hash(),
+            current_bundle.package_lock()["fingerprint"]
+                .as_str()
+                .unwrap()
+        );
+        let plan = candidate.inspect_upgrade(&installed_root, None).unwrap();
+        assert_eq!(plan["status"], "no-change");
+        assert_eq!(
+            plan["candidate"]["package_lock_hash"],
+            current_bundle.package_lock()["fingerprint"]
+        );
+
+        let replacement = target.path().join("replacement");
+        let desktop_selection = resolve_source_install_selection(
+            repository.join("platforms"),
+            &["desktop".to_owned()],
+            &[],
+            &[],
+            false,
+        )
+        .unwrap();
+        let desktop_packages = snapshot_source_packages(&desktop_selection).unwrap();
+        let desktop_bundle = agent_lifecycle::compile_source_install_bundle(
+            &desktop_selection,
+            &desktop_packages,
+            repository.join("schemas"),
+            None,
+        )
+        .unwrap();
+        agent_lifecycle::install_source_bundle(&desktop_bundle, &desktop_packages, &replacement)
+            .unwrap();
+        std::fs::rename(&installed_root, target.path().join("retired")).unwrap();
+        std::fs::rename(&replacement, &installed_root).unwrap();
+        assert!(candidate.inspect_upgrade(&installed_root, None).is_err());
     }
 
     #[test]

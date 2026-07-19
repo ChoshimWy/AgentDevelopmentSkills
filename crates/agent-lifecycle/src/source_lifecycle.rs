@@ -14,6 +14,95 @@ use std::path::Path;
 
 const MANAGED_ROOTS: [&str; 3] = ["AGENTS.md", "skills", ".agent-skills"];
 
+/// Exact package selection persisted by one valid installed Lock pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledSourceSelection {
+    platforms: Vec<String>,
+    disciplines: Vec<String>,
+    runtime_configs: Vec<String>,
+    install_plan_fingerprint: String,
+    package_lock_hash: String,
+}
+
+impl InstalledSourceSelection {
+    /// Installed platform package IDs.
+    #[must_use]
+    pub fn platforms(&self) -> &[String] {
+        &self.platforms
+    }
+
+    /// Installed discipline package IDs.
+    #[must_use]
+    pub fn disciplines(&self) -> &[String] {
+        &self.disciplines
+    }
+
+    /// Installed runtime configuration package IDs.
+    #[must_use]
+    pub fn runtime_configs(&self) -> &[String] {
+        &self.runtime_configs
+    }
+
+    /// Whether the persisted selection contains only Core.
+    #[must_use]
+    pub const fn core_only(&self) -> bool {
+        self.platforms.is_empty() && self.disciplines.is_empty() && self.runtime_configs.is_empty()
+    }
+
+    fn validate_lock_pair(
+        &self,
+        install_plan: &Value,
+        package_lock: &Value,
+    ) -> Result<(), LifecycleError> {
+        let current = installed_source_selection(install_plan, package_lock)?;
+        if &current != self {
+            return invalid("installed Lock pair changed after source selection was inferred");
+        }
+        Ok(())
+    }
+}
+
+/// Read the exact package selection from one valid installed Lock pair.
+///
+/// The target lifecycle lock is held while both Lockfiles are loaded,
+/// cross-validated, and projected. No source checkout or candidate Schema is
+/// consulted, so the result remains valid when an upgrade changes Schemas.
+///
+/// # Errors
+/// Returns a fail-closed error for an unsafe target, recovery/lock conflict,
+/// malformed or unanchored Lock pair, invalid selection, or target drift.
+pub fn inspect_installed_source_selection(
+    target_root: impl AsRef<Path>,
+) -> Result<InstalledSourceSelection, LifecycleError> {
+    let lock = LifecycleLock::acquire_existing(target_root)?;
+    let target = lock.target_directory()?;
+    let managed = open_child_directory(
+        &target,
+        ".agent-skills",
+        Some(crate::MANAGED_DIRECTORY_MODE),
+        "managed metadata directory",
+    )?;
+    let install_plan = load_json_file(
+        &managed,
+        "install-lock.json",
+        crate::MANAGED_FILE_MODE,
+        "current Install Lock",
+    )?;
+    let package_lock = load_json_file(
+        &managed,
+        crate::PERSISTENT_PACKAGE_LOCK,
+        crate::MANAGED_FILE_MODE,
+        "current package Lockfile",
+    )?;
+    if install_plan.get("status").and_then(Value::as_str) != Some("installed") {
+        return invalid("source selection requires an installed Install Lock");
+    }
+    ValidatedInstallPlan::new(install_plan.clone(), package_lock.clone())?;
+    let selection = installed_source_selection(&install_plan, &package_lock)?;
+    lock.validate()?;
+    Ok(selection)
+}
+
 /// Validate a fresh native source installation without writing the target.
 ///
 /// The returned value is the existing planned Install Plan projection, matching
@@ -219,7 +308,45 @@ pub fn compile_source_upgrade_bundle(
     schema_root: impl AsRef<Path>,
     target_root: impl AsRef<Path>,
 ) -> Result<SourceInstallBundle, LifecycleError> {
-    let schema_root = schema_root.as_ref();
+    compile_source_upgrade_bundle_with_selection_identity(
+        selection,
+        package_set,
+        schema_root.as_ref(),
+        target_root.as_ref(),
+        None,
+    )
+}
+
+/// Compile a source candidate only while the installed Lock pair still matches
+/// the identity that supplied its package selection.
+///
+/// # Errors
+/// Returns the same fail-closed errors as [`compile_source_upgrade_bundle`],
+/// and additionally rejects any selection or Lock identity drift since
+/// [`inspect_installed_source_selection`] returned.
+pub fn compile_source_upgrade_bundle_bound(
+    selection: &SourceInstallSelection,
+    package_set: &SourcePackageSet,
+    schema_root: impl AsRef<Path>,
+    target_root: impl AsRef<Path>,
+    expected_installed: &InstalledSourceSelection,
+) -> Result<SourceInstallBundle, LifecycleError> {
+    compile_source_upgrade_bundle_with_selection_identity(
+        selection,
+        package_set,
+        schema_root.as_ref(),
+        target_root.as_ref(),
+        Some(expected_installed),
+    )
+}
+
+fn compile_source_upgrade_bundle_with_selection_identity(
+    selection: &SourceInstallSelection,
+    package_set: &SourcePackageSet,
+    schema_root: &Path,
+    target_root: &Path,
+    expected_installed: Option<&InstalledSourceSelection>,
+) -> Result<SourceInstallBundle, LifecycleError> {
     let base = compile_source_install_bundle(selection, package_set, schema_root, None)?;
     let lock = LifecycleLock::acquire_existing(target_root)?;
     let target = lock.target_directory()?;
@@ -245,6 +372,9 @@ pub fn compile_source_upgrade_bundle(
         return invalid("source upgrade requires an installed Install Lock");
     }
     ValidatedInstallPlan::new(current_install_plan.clone(), current_package_lock.clone())?;
+    if let Some(expected) = expected_installed {
+        expected.validate_lock_pair(&current_install_plan, &current_package_lock)?;
+    }
     lock.validate()?;
     if semantic_lock_identity(base.package_lock())?
         == semantic_lock_identity(&current_package_lock)?
@@ -276,6 +406,49 @@ pub fn compile_source_upgrade_bundle(
     }
     lock.validate()?;
     Ok(candidate)
+}
+
+/// Compile a source Upgrade Plan only if the current Lock pair still matches
+/// the identity that supplied the candidate selection.
+///
+/// # Errors
+/// Returns the same fail-closed errors as [`inspect_source_upgrade`], and
+/// additionally rejects installed selection or Lock identity drift.
+#[allow(clippy::too_many_arguments)]
+pub fn inspect_source_upgrade_bound(
+    bundle: &SourceInstallBundle,
+    package_set: &SourcePackageSet,
+    target_root: impl AsRef<Path>,
+    conformance_evidence: &Value,
+    action: &str,
+    removed_platforms: &[String],
+    removed_runtime_configs: &[String],
+    session_launcher: Option<&[u8]>,
+    expected_installed: &InstalledSourceSelection,
+) -> Result<Value, LifecycleError> {
+    validate_source_install_inputs(bundle, package_set)?;
+    let snapshot = inspect_upgrade_planning_snapshot(
+        target_root,
+        bundle.plan(),
+        bundle.package_lock(),
+        action,
+        removed_platforms,
+        removed_runtime_configs,
+        session_launcher,
+    )?;
+    expected_installed.validate_lock_pair(
+        &snapshot.current_install_plan,
+        &snapshot.current_package_lock,
+    )?;
+    compile_upgrade_plan(
+        &snapshot,
+        action,
+        bundle.plan(),
+        bundle.package_lock(),
+        conformance_evidence,
+        removed_platforms,
+        removed_runtime_configs,
+    )
 }
 
 /// Compile a native source Upgrade Plan without mutating the installed target.
@@ -664,6 +837,51 @@ fn validate_source_install_inputs(
         return invalid("source package snapshots differ from compiled Install Bundle closure");
     }
     Ok(())
+}
+
+fn installed_selection_strings(plan: &Value, field: &str) -> Result<Vec<String>, LifecycleError> {
+    let values = plan
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| LifecycleError::Invalid(format!("{field} is invalid")))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| LifecycleError::Invalid(format!("{field} is invalid")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return invalid(format!("{field} must be sorted and unique"));
+    }
+    Ok(values)
+}
+
+fn installed_source_selection(
+    install_plan: &Value,
+    package_lock: &Value,
+) -> Result<InstalledSourceSelection, LifecycleError> {
+    let install_plan_fingerprint = install_plan
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| LifecycleError::Invalid("Install Lock fingerprint is invalid".to_owned()))?
+        .to_owned();
+    let package_lock_hash = package_lock
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            LifecycleError::Invalid("current package Lock fingerprint is invalid".to_owned())
+        })?
+        .to_owned();
+    Ok(InstalledSourceSelection {
+        platforms: installed_selection_strings(install_plan, "selected_platforms")?,
+        disciplines: installed_selection_strings(install_plan, "selected_disciplines")?,
+        runtime_configs: installed_selection_strings(install_plan, "selected_runtime_configs")?,
+        install_plan_fingerprint,
+        package_lock_hash,
+    })
 }
 
 fn inspect_fresh_target(target_root: &Path) -> Result<(), LifecycleError> {
@@ -1075,6 +1293,68 @@ mod tests {
                         && !name.starts_with(INSTALL_BACKUP_PREFIX)
                         && name != LIFECYCLE_LOCK_DIRECTORY
                 })
+        );
+    }
+
+    #[test]
+    fn installed_selection_is_read_from_the_validated_lock_pair() {
+        let fixture = Fixture::new();
+        let target = fixture.target();
+        let (bundle, packages) = core_bundle();
+        install_source_bundle(&bundle, &packages, &target).expect("install core fixture");
+
+        let selection =
+            inspect_installed_source_selection(&target).expect("inspect installed selection");
+        assert!(selection.core_only());
+        assert!(selection.platforms().is_empty());
+        assert!(selection.disciplines().is_empty());
+        assert!(selection.runtime_configs().is_empty());
+
+        let mut lock =
+            load_json(target.join(".agent-skills/install-lock.json")).expect("load installed Lock");
+        lock["selected_platforms"] = json!(["apple", "apple"]);
+        std::fs::write(
+            target.join(".agent-skills/install-lock.json"),
+            canonical_json(&lock).expect("encode tampered Lock"),
+        )
+        .expect("tamper installed selection");
+        assert!(inspect_installed_source_selection(&target).is_err());
+    }
+
+    #[test]
+    fn selection_bound_candidate_rejects_a_valid_cross_lock_replacement() {
+        let fixture = Fixture::new();
+        let target = fixture.target();
+        let (core, core_packages) = core_bundle();
+        install_source_bundle(&core, &core_packages, &target).expect("install core fixture");
+        let expected =
+            inspect_installed_source_selection(&target).expect("freeze installed selection");
+
+        let replacement = fixture.root.join("replacement");
+        let (desktop, desktop_packages) = desktop_bundle(None);
+        install_source_bundle(&desktop, &desktop_packages, &replacement)
+            .expect("install replacement fixture");
+        let retired = fixture.root.join("retired");
+        std::fs::rename(&target, &retired).expect("retire original target");
+        std::fs::rename(&replacement, &target).expect("publish replacement target");
+
+        let root = repository_root();
+        let selection =
+            resolve_source_install_selection(root.join("platforms"), &[], &[], &[], true)
+                .expect("resolve stale Core selection");
+        let packages = snapshot_source_packages(&selection).expect("snapshot stale Core");
+        let error = compile_source_upgrade_bundle_bound(
+            &selection,
+            &packages,
+            root.join("schemas"),
+            &target,
+            &expected,
+        )
+        .expect_err("cross-lock selection drift must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("changed after source selection was inferred")
         );
     }
 

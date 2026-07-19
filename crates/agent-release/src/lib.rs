@@ -2,7 +2,7 @@
 
 mod hosted_upgrade;
 
-pub use hosted_upgrade::{HostedUpgradeSource, acquire_hosted_upgrade};
+pub use hosted_upgrade::{HostedUpgradeCandidate, HostedUpgradeSource, acquire_hosted_upgrade};
 
 use agent_contracts::{canonical_json, canonical_sha256, parse_json};
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,8 @@ pub enum ReleaseError {
     Json(#[from] serde_json::Error),
     #[error("native release canonical JSON failed: {0}")]
     Canonical(#[from] agent_contracts::ContractError),
+    #[error("native release lifecycle candidate is invalid: {0}")]
+    Lifecycle(#[from] agent_lifecycle::LifecycleError),
 }
 
 /// Freeze a target-specific executable and its canonical record into a new directory.

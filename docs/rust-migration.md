@@ -255,10 +255,12 @@ frozen candidate to v3. The same transition promotes release provenance to v2
 and emits a canonical Release Qualification Handoff v2, while the validator
 keeps archived v1 handoffs readable.
 The native release crate now provides the bounded HTTPS acquisition and
-fail-closed ZIP extraction substrate for that v3 source. This is not yet the
-public automatic-upgrade command: controlled Package Lock compilation and
-qualification binding, selection inference, self-binary replacement, approval
-UX, and end-to-end transaction wiring remain required before that route is
+fail-closed ZIP extraction substrate for that v3 source. It infers the exact
+installed selection from the validated Lock pair, compiles the candidate twice
+from independent extractions, and privately binds the qualified Conformance
+result to the exact Package Lock before issuing an Upgrade Plan. This is not
+yet the public automatic-upgrade command: self-binary replacement, approval UX,
+and end-to-end transaction wiring remain required before that route is
 declared available.
 For macOS and supported glibc 2.39+ Linux hosts, the gated release now renders
 the exact immutable asset base, source archive identity, and six-target native

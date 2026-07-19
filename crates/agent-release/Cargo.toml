@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 agent-contracts = { path = "../agent-contracts" }
 agent-engine = { path = "../agent-engine" }
+agent-lifecycle = { path = "../agent-lifecycle" }
 clap.workspace = true
 hex.workspace = true
 libc.workspace = true
