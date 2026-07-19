@@ -1582,6 +1582,75 @@ mod tests {
     }
 
     #[test]
+    fn activation_only_upgrade_replaces_the_frozen_native_launcher() {
+        let fixture = Fixture::new();
+        let target = fixture.target();
+        let (installed, installed_packages) = apple_bundle();
+        let old_launcher = b"old native launcher\n";
+        install_source_bundle_with_activation(
+            &installed,
+            &installed_packages,
+            &target,
+            old_launcher,
+        )
+        .expect("install activated Apple fixture");
+        remove_optional_rollback_point(&target);
+
+        let root = repository_root();
+        let selection = resolve_source_install_selection(
+            root.join("platforms"),
+            &["apple".to_owned()],
+            &[],
+            &["codex".to_owned()],
+            false,
+        )
+        .expect("resolve Apple candidate");
+        let packages = snapshot_source_packages(&selection).expect("snapshot Apple candidate");
+        let candidate =
+            compile_source_upgrade_bundle(&selection, &packages, root.join("schemas"), &target)
+                .expect("compile no-package-change candidate");
+        let evidence = upgrade_evidence(candidate.package_lock());
+        let new_launcher = b"new native launcher\n";
+        let plan = inspect_source_upgrade(
+            &candidate,
+            &packages,
+            &target,
+            &evidence,
+            "upgrade",
+            &[],
+            &[],
+            Some(new_launcher),
+        )
+        .expect("inspect activation-only upgrade");
+        assert_eq!(plan["status"], "planned");
+        assert_eq!(plan["changes"]["status"], "changed");
+        assert_eq!(plan["migrations"][0]["artifact"], "source-activation-state");
+
+        let result = upgrade_source_bundle(
+            &candidate,
+            &packages,
+            &target,
+            &evidence,
+            &plan,
+            &[],
+            "upgrade",
+            &[],
+            &[],
+            Some(new_launcher),
+        )
+        .expect("apply activation-only upgrade");
+        assert_eq!(result["status"], "upgraded");
+        assert_eq!(
+            std::fs::read(target.join("bin/agent-skills")).expect("read upgraded CLI"),
+            new_launcher
+        );
+        assert_eq!(
+            std::fs::read(target.join("bin/agent-session")).expect("read upgraded session CLI"),
+            new_launcher
+        );
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn activation_upgrade_smoke_failure_restores_managed_and_external_preimages() {
         let fixture = Fixture::new();

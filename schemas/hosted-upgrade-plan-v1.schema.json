@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://choshimwy.github.io/AgentDevelopmentSkills/schemas/hosted-upgrade-plan-v1.schema.json",
+  "additionalProperties": false,
+  "description": "Approval envelope binding a hosted release source and installation-specific native Upgrade Plan.",
+  "properties": {
+    "candidate_package_lock_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "source_qualification_fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source_revision": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "upgrade_plan": {
+      "$ref": "https://agent-workflow.local/schemas/upgrade-plan-v1.schema.json"
+    }
+  },
+  "required": [
+    "schema_version",
+    "manifest_sha256",
+    "source_revision",
+    "source_qualification_fingerprint",
+    "candidate_package_lock_hash",
+    "upgrade_plan",
+    "fingerprint"
+  ],
+  "title": "Hosted Upgrade Plan v1",
+  "type": "object"
+}

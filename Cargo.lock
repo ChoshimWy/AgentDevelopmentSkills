@@ -109,6 +109,7 @@ dependencies = [
  "agent-engine",
  "agent-lifecycle",
  "agent-registry",
+ "agent-release",
  "agent-runtime",
  "clap",
  "libc",

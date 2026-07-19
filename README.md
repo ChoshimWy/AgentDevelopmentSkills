@@ -22,9 +22,12 @@ matrix plus the immutable Upgrade Source Qualification produced by release
 qualification. A hosted, explicit, fresh Apple or Desktop install or dry-run
 selects the verified Rust lifecycle transaction by default. The installed
 native CLI also supports explicit-source upgrade, rollback, doctor, and
-uninstall transactions. Source-checkout installs, interactive or
-compatibility-only requests, hosted automatic upgrade acquisition, and legacy
-adoption still use separately gated compatibility paths. The
+uninstall transactions. It now also provides an operator-invoked
+`hosted-upgrade` route that authenticates the fixed Pages control plane,
+qualified source archive, and current-host executable before issuing a
+release-provenance-bound approval envelope. Source-checkout installs,
+interactive or compatibility-only requests, automatic bootstrap-driven
+upgrades, and legacy adoption still use separately gated compatibility paths. The
 repository carries an MIT `LICENSE`, a `NOTICE`, and verified
 migration-audit hashes. The GitHub Pages control plane is deployed; public
 release assets and remote installation remain gated on an external release
@@ -80,7 +83,7 @@ require Python. Set
 `AGENT_SKILLS_INSTALL_ENGINE=python` to request the transitional compatibility
 path. `AGENT_SKILLS_INSTALL_ENGINE=rust` fails closed if the request is not
 eligible; once Rust has been selected, a native failure never silently
-downgrades to Python. Source-checkout, hosted automatic upgrade acquisition,
+downgrades to Python. Source-checkout, automatic bootstrap-driven upgrades,
 and other compatibility-only requests still require Python 3.11+. The PowerShell
 bootstrap also remains on that compatibility path because Windows is blocked
 as a production source-install target until its complete install contract is
@@ -95,6 +98,28 @@ installation:
 ~/.codex/bin/agent-skills uninstall ~/.codex --platform all --dry-run
 ~/.codex/bin/agent-skills uninstall ~/.codex --platform all
 ```
+
+After a signed Manifest v3 release is available, an existing native
+installation can explicitly preview and approve the hosted upgrade. The
+manifest URL and asset origin are fixed in the binary and cannot be supplied by
+the caller:
+
+```bash
+~/.codex/bin/agent-skills hosted-upgrade \
+  --target-root ~/.codex --dry-run \
+  --output /path/to/hosted-upgrade-plan.json
+
+~/.codex/bin/agent-skills hosted-upgrade \
+  --target-root ~/.codex \
+  --plan /path/to/hosted-upgrade-plan.json \
+  --approve-plan <envelope-fingerprint> \
+  --approve <each-required-permission-approval>
+```
+
+The apply command reacquires and reauthenticates the release, recompiles the
+candidate twice, compares the complete saved envelope, and replaces both
+installed launcher names with the verified current-host executable inside the
+guarded lifecycle transaction. It is never an unattended background update.
 
 The gated hosted uninstaller authenticates that installed executable against
 its embedded release matrix before selecting Rust:
@@ -278,8 +303,10 @@ binary embeds its build-time Schema inventory and requires neither Python, a
 source checkout, a network connection, nor a caller-supplied Schema path.
 Fresh install, uninstall, and rollback already use guarded native
 transactions. The public native `upgrade` command requires explicit verified
-source and Conformance evidence; hosted automatic acquisition remains behind
-its separate release gate. `agent-lifecycle` uses an identity-bound RAII
+source and Conformance evidence. The operator-invoked `hosted-upgrade` command
+now acquires only the fixed repository control plane and release assets, then
+binds their provenance and the installation-specific candidate to a separate
+approval envelope. `agent-lifecycle` uses an identity-bound RAII
 directory lock with atomic exclusion, safe missing-target creation,
 crash-residue visibility, and identity-checked cleanup.
 The companion `LifecycleWorkspace` now creates a unique POSIX mode-`0700`
@@ -433,8 +460,9 @@ creates a workspace. It stages the validated prior projection, preserves the
 current `.system` tree, restores the frozen external preimages inside the same
 `PublishedInstall` recovery window, and persists the displaced current state
 as the next rollback point. `lifecycle-rollback` remains a visible
-compatibility alias. `lifecycle-upgrade` likewise remains a visible alias;
-hosted automatic upgrade acquisition remains behind its separate release gate.
+compatibility alias. `lifecycle-upgrade` likewise remains a visible alias.
+Automatic invocation from compatibility bootstraps remains a separate release
+gate.
 Upgrade Source Qualification v1 now provides the next release boundary: it
 binds the completed repository Conformance suite to one immutable source
 archive, source revision, complete SBOM material identity, Schema inventory,

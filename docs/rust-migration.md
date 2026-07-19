@@ -65,7 +65,9 @@ file layout:
 Phases 1 through 5 are complete. Phase 6 is in controlled rollout: eligible
 hosted fresh installs and dry-runs now select Rust, explicit-source native
 upgrade is public, and release qualification emits a Manifest-v3-bound
-immutable Upgrade Source Qualification. Hosted automatic upgrade acquisition,
+immutable Upgrade Source Qualification. An operator-invoked hosted upgrade
+route now performs authenticated acquisition, approval-envelope generation,
+and guarded native apply. Automatic invocation from compatibility bootstraps,
 legacy adoption, the remaining bootstrap compatibility layer, and other routes
 remain pending.
 The repository contains:
@@ -259,9 +261,13 @@ fail-closed ZIP extraction substrate for that v3 source. It infers the exact
 installed selection from the validated Lock pair, compiles the candidate twice
 from independent extractions, and privately binds the qualified Conformance
 result to the exact Package Lock before issuing an Upgrade Plan. This is not
-yet the public automatic-upgrade command: self-binary replacement, approval UX,
-and end-to-end transaction wiring remain required before that route is
-declared available.
+an unattended updater: the public `hosted-upgrade` command now additionally
+downloads and authenticates the exact current-host executable, binds Manifest,
+source revision, Source Qualification, candidate Lock, and lifecycle Plan into
+one canonical approval envelope, and applies only that exact envelope through
+the guarded executor. Source Activation treats a changed native launcher as a
+planned state migration even when package semantics are unchanged, so both
+installed command names are replaced transactionally.
 For macOS and supported glibc 2.39+ Linux hosts, the gated release now renders
 the exact immutable asset base, source archive identity, and six-target native
 matrix into the POSIX bootstrap. Musl and older glibc hosts are deliberately
@@ -396,13 +402,18 @@ snapshot, the current `.system` tree is preserved, and frozen external
 preimages are restored while `PublishedInstall` can still recover both sides.
 The displaced current state becomes the next validated rollback point, making
 the transaction reversible again. `lifecycle-rollback` remains a visible
-compatibility alias. Hosted automatic source and evidence acquisition remains
-behind its separate release gate.
+compatibility alias. The operator-invoked `hosted-upgrade` command now fixes
+the repository Pages URL in the binary, bounds HTTPS redirects and payloads,
+authenticates the canonical Manifest v3, Source Qualification, source archive,
+and matching host executable, compiles the candidate twice, and issues a
+release-provenance-bound approval envelope. Apply reacquires the same materials
+and rejects any source, candidate, target, Plan, or approval drift.
 Doctor, uninstall, rollback, and source activation now have native public or
 transaction routes with differential, tamper, concurrency, recovery, and
 independent-review evidence. The remaining hosted lifecycle cutover is
-automatic upgrade acquisition, separate from both the explicit-input native
-upgrade route and the Python-free eligible fresh-install route.
+automatic invocation from the compatibility bootstrap, separate from both the
+explicit operator-invoked native routes and the Python-free eligible
+fresh-install route.
 Upgrade Source Qualification v1 establishes the release-side input for that
 cutover. It binds the completed repository Conformance suite to the immutable
 source archive hash and size, source revision, complete SBOM material identity,

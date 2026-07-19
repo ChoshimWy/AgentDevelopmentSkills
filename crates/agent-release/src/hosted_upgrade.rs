@@ -4,6 +4,7 @@ use agent_lifecycle::{
     InstalledSourceSelection, SourceInstallBundle, SourceInstallSelection, SourcePackageSet,
     compile_source_upgrade_bundle_bound, inspect_installed_source_selection,
     inspect_source_upgrade_bound, resolve_source_install_selection, snapshot_source_packages,
+    upgrade_source_bundle,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -71,7 +72,7 @@ struct FileRecord {
     size: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NativeArtifact {
     arch: String,
@@ -101,6 +102,7 @@ pub struct HostedUpgradeSource {
     source_archive: Vec<u8>,
     source_artifact: SourceArtifact,
     source_root: PathBuf,
+    native_launcher: Vec<u8>,
     _workspace: TempDir,
 }
 
@@ -110,7 +112,7 @@ pub struct HostedUpgradeSource {
 /// installed selection, package snapshot, candidate Lock, and release
 /// qualification stay alive together so callers cannot bind arbitrary hashes.
 pub struct HostedUpgradeCandidate {
-    _source: HostedUpgradeSource,
+    source: HostedUpgradeSource,
     selection: SourceInstallSelection,
     packages: SourcePackageSet,
     bundle: SourceInstallBundle,
@@ -213,7 +215,7 @@ impl HostedUpgradeSource {
             })?
             .to_owned();
         Ok(HostedUpgradeCandidate {
-            _source: self,
+            source: self,
             selection,
             packages,
             bundle,
@@ -238,24 +240,21 @@ impl HostedUpgradeCandidate {
         &self.source_qualification_fingerprint
     }
 
-    /// Build one approval-bound Upgrade Plan without exposing source paths or evidence.
+    /// Build one hosted approval envelope without exposing source paths or evidence.
     ///
     /// The selected package snapshot is refreshed immediately before planning
     /// and must remain byte-identical to the compiled candidate.
     ///
     /// # Errors
-    /// Returns a fail-closed error for source or target drift, a missing Apple
-    /// session launcher, invalid lifecycle scope, or stale candidate evidence.
-    pub fn inspect_upgrade(
-        &self,
-        target_root: impl AsRef<Path>,
-        session_launcher: Option<&[u8]>,
-    ) -> Result<Value, ReleaseError> {
+    /// Returns a fail-closed error for source or target drift, invalid
+    /// lifecycle scope, or stale candidate evidence.
+    pub fn inspect_upgrade(&self, target_root: impl AsRef<Path>) -> Result<Value, ReleaseError> {
+        let target_root = target_root.as_ref();
         let refreshed = snapshot_source_packages(&self.selection)?;
         if refreshed.compatibility_projection() != self.packages.compatibility_projection() {
             return contract("hosted upgrade source changed after candidate compilation");
         }
-        inspect_source_upgrade_bound(
+        let upgrade_plan = inspect_source_upgrade_bound(
             &self.bundle,
             &self.packages,
             target_root,
@@ -263,11 +262,181 @@ impl HostedUpgradeCandidate {
             "upgrade",
             &[],
             &[],
-            session_launcher,
+            Some(&self.source.native_launcher),
             &self.installed,
+        )?;
+        hosted_upgrade_plan(
+            &self.source.manifest,
+            &self.source.qualification,
+            &self.package_lock_hash,
+            upgrade_plan,
+        )
+    }
+
+    /// Apply one exact hosted approval envelope through the native lifecycle.
+    ///
+    /// The saved envelope, its fingerprint, release source identity, candidate
+    /// Package Lock, installed Lock pair, source snapshot, and lifecycle Plan
+    /// are all revalidated before publication. The authenticated current-host
+    /// executable is supplied to the trusted source Activation handler.
+    ///
+    /// # Errors
+    /// Returns a fail-closed error for stale approval, source/target drift,
+    /// altered provenance, incomplete approvals, or lifecycle publication
+    /// failure.
+    pub fn apply_upgrade(
+        &self,
+        target_root: impl AsRef<Path>,
+        approved_plan: &Value,
+        approved_fingerprint: &str,
+        approvals: &[String],
+    ) -> Result<Value, ReleaseError> {
+        validate_hosted_upgrade_plan(approved_plan)?;
+        if approved_plan.get("fingerprint").and_then(Value::as_str) != Some(approved_fingerprint) {
+            return contract("hosted upgrade apply requires the exact envelope fingerprint");
+        }
+        let target_root = target_root.as_ref();
+        let generated = self.inspect_upgrade(target_root)?;
+        if &generated != approved_plan {
+            return contract("saved hosted Upgrade Plan is stale or differs from the candidate");
+        }
+        let current = inspect_installed_source_selection(target_root)?;
+        if current != self.installed {
+            return contract("installed Lock pair changed after hosted candidate compilation");
+        }
+        let upgrade_plan = approved_plan.get("upgrade_plan").ok_or_else(|| {
+            ReleaseError::Contract("hosted Upgrade Plan payload is missing".to_owned())
+        })?;
+        upgrade_source_bundle(
+            &self.bundle,
+            &self.packages,
+            target_root,
+            &self.evidence,
+            upgrade_plan,
+            approvals,
+            "upgrade",
+            &[],
+            &[],
+            Some(&self.source.native_launcher),
         )
         .map_err(ReleaseError::from)
     }
+}
+
+/// Validate the release-provenance envelope used by hosted upgrade approval.
+///
+/// # Errors
+/// Returns a fail-closed error for unknown/missing fields, invalid identities,
+/// a malformed lifecycle Plan, or a mismatched envelope fingerprint.
+pub fn validate_hosted_upgrade_plan(value: &Value) -> Result<(), ReleaseError> {
+    let object = value.as_object().ok_or_else(|| {
+        ReleaseError::Contract("hosted Upgrade Plan must be a JSON object".to_owned())
+    })?;
+    let expected = [
+        "candidate_package_lock_hash",
+        "fingerprint",
+        "manifest_sha256",
+        "schema_version",
+        "source_qualification_fingerprint",
+        "source_revision",
+        "upgrade_plan",
+    ];
+    if object.len() != expected.len() || !expected.iter().all(|field| object.contains_key(*field)) {
+        return contract("hosted Upgrade Plan fields are invalid");
+    }
+    if object.get("schema_version").and_then(Value::as_str) != Some("1.0")
+        || ![
+            "candidate_package_lock_hash",
+            "fingerprint",
+            "manifest_sha256",
+            "source_qualification_fingerprint",
+        ]
+        .iter()
+        .all(|field| {
+            object
+                .get(*field)
+                .and_then(Value::as_str)
+                .is_some_and(is_hash)
+        })
+        || !object
+            .get("source_revision")
+            .and_then(Value::as_str)
+            .is_some_and(is_revision)
+    {
+        return contract("hosted Upgrade Plan identity is invalid");
+    }
+    let upgrade_plan = object.get("upgrade_plan").ok_or_else(|| {
+        ReleaseError::Contract("hosted Upgrade Plan payload is missing".to_owned())
+    })?;
+    agent_engine::validate_upgrade_plan(upgrade_plan)
+        .map_err(|error| ReleaseError::Contract(error.to_string()))?;
+    if upgrade_plan
+        .pointer("/candidate/package_lock_hash")
+        .and_then(Value::as_str)
+        != object
+            .get("candidate_package_lock_hash")
+            .and_then(Value::as_str)
+    {
+        return contract("hosted Upgrade Plan candidate Lock identity mismatch");
+    }
+    let mut stable = object.clone();
+    let fingerprint = stable
+        .remove("fingerprint")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or_else(|| {
+            ReleaseError::Contract("hosted Upgrade Plan fingerprint is invalid".to_owned())
+        })?;
+    if canonical_sha256(&Value::Object(stable))? != fingerprint {
+        return contract("hosted Upgrade Plan fingerprint mismatch");
+    }
+    Ok(())
+}
+
+fn hosted_upgrade_plan(
+    manifest: &Value,
+    qualification: &Value,
+    package_lock_hash: &str,
+    upgrade_plan: Value,
+) -> Result<Value, ReleaseError> {
+    agent_engine::validate_upgrade_plan(&upgrade_plan)
+        .map_err(|error| ReleaseError::Contract(error.to_string()))?;
+    let source_revision = manifest
+        .pointer("/source/revision")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ReleaseError::Contract("hosted release source revision is invalid".to_owned())
+        })?;
+    let qualification_fingerprint = qualification
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ReleaseError::Contract("hosted source qualification fingerprint is invalid".to_owned())
+        })?;
+    let mut object = serde_json::Map::from_iter([
+        (
+            "candidate_package_lock_hash".to_owned(),
+            Value::String(package_lock_hash.to_owned()),
+        ),
+        (
+            "manifest_sha256".to_owned(),
+            Value::String(canonical_sha256(manifest)?),
+        ),
+        ("schema_version".to_owned(), Value::String("1.0".to_owned())),
+        (
+            "source_qualification_fingerprint".to_owned(),
+            Value::String(qualification_fingerprint.to_owned()),
+        ),
+        (
+            "source_revision".to_owned(),
+            Value::String(source_revision.to_owned()),
+        ),
+        ("upgrade_plan".to_owned(), upgrade_plan),
+    ]);
+    let fingerprint = canonical_sha256(&Value::Object(object.clone()))?;
+    object.insert("fingerprint".to_owned(), Value::String(fingerprint));
+    let value = Value::Object(object);
+    validate_hosted_upgrade_plan(&value)?;
+    Ok(value)
 }
 
 /// Download, authenticate, and safely extract one hosted Release Manifest v3 source.
@@ -471,6 +640,30 @@ fn acquire_with_fetch(
         MAX_SOURCE_BYTES,
         "source archive",
     )?;
+    let native_target = host_native_target()?;
+    let native = manifest
+        .native_artifacts
+        .iter()
+        .find(|artifact| artifact.target == native_target)
+        .ok_or_else(|| {
+            ReleaseError::Contract(
+                "hosted release has no native executable for the current host".to_owned(),
+            )
+        })?;
+    let native_url = asset_url(&asset_base, &native.filename)?;
+    let native_record = FileRecord {
+        filename: native.filename.clone(),
+        sha256: native.sha256.clone(),
+        size: native.size,
+    };
+    let native_launcher = fetch_exact(
+        &mut fetch,
+        &native_url,
+        &native_record,
+        MAX_SOURCE_BYTES,
+        "native executable",
+    )?;
+    crate::validate_binary_header(&native_launcher, crate::target_descriptor(native_target)?)?;
     let (workspace, source_root) = extract_archive_workspace(&source_bytes, artifact)?;
     Ok(HostedUpgradeSource {
         manifest: manifest_value,
@@ -478,6 +671,7 @@ fn acquire_with_fetch(
         source_archive: source_bytes,
         source_artifact: artifact.clone(),
         source_root,
+        native_launcher,
         _workspace: workspace,
     })
 }
@@ -594,6 +788,20 @@ fn release_host_os() -> &'static str {
         "darwin"
     } else {
         std::env::consts::OS
+    }
+}
+
+fn host_native_target() -> Result<&'static str, ReleaseError> {
+    match (std::env::consts::ARCH, std::env::consts::OS) {
+        ("aarch64", "macos") => Ok("aarch64-apple-darwin"),
+        ("x86_64", "macos") => Ok("x86_64-apple-darwin"),
+        ("aarch64", "linux") => Ok("aarch64-unknown-linux-gnu"),
+        ("x86_64", "linux") => Ok("x86_64-unknown-linux-gnu"),
+        ("aarch64", "windows") => Ok("aarch64-pc-windows-msvc"),
+        ("x86_64", "windows") => Ok("x86_64-pc-windows-msvc"),
+        (arch, os) => contract(&format!(
+            "hosted release does not support current native target {arch}-{os}"
+        )),
     }
 }
 
@@ -986,6 +1194,48 @@ mod tests {
         writer.finish().unwrap().into_inner()
     }
 
+    fn fake_native_binary(target: &str) -> Vec<u8> {
+        match target {
+            "aarch64-apple-darwin" => [
+                vec![0xcf, 0xfa, 0xed, 0xfe],
+                0x0100_000cu32.to_le_bytes().to_vec(),
+            ]
+            .concat(),
+            "x86_64-apple-darwin" => [
+                vec![0xcf, 0xfa, 0xed, 0xfe],
+                0x0100_0007u32.to_le_bytes().to_vec(),
+            ]
+            .concat(),
+            "aarch64-unknown-linux-gnu" | "x86_64-unknown-linux-gnu" => {
+                let mut bytes = vec![0_u8; 20];
+                bytes[..4].copy_from_slice(b"\x7fELF");
+                bytes[4] = 2;
+                bytes[5] = 1;
+                let machine = if target.starts_with("aarch64") {
+                    183_u16
+                } else {
+                    62_u16
+                };
+                bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+                bytes
+            }
+            "aarch64-pc-windows-msvc" | "x86_64-pc-windows-msvc" => {
+                let mut bytes = vec![0_u8; 70];
+                bytes[..2].copy_from_slice(b"MZ");
+                bytes[60..64].copy_from_slice(&64_u32.to_le_bytes());
+                bytes[64..68].copy_from_slice(b"PE\0\0");
+                let machine = if target.starts_with("aarch64") {
+                    0xaa64_u16
+                } else {
+                    0x8664_u16
+                };
+                bytes[68..70].copy_from_slice(&machine.to_le_bytes());
+                bytes
+            }
+            _ => panic!("unsupported test target"),
+        }
+    }
+
     fn repository_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1130,15 +1380,22 @@ mod tests {
             ("x86_64", "windows", "x86_64-pc-windows-msvc"),
             ("x86_64", "linux", "x86_64-unknown-linux-gnu"),
         ];
+        let current_target = host_native_target().unwrap();
+        let current_native = fake_native_binary(current_target);
         let native = targets
             .iter()
             .map(|(arch, os, target)| {
+                let (sha256, size) = if *target == current_target {
+                    (sha256(&current_native), current_native.len() as u64)
+                } else {
+                    ("7".repeat(64), 1024)
+                };
                 json!({
                     "arch": arch,
                     "filename": native_filename("0.2.0", target),
                     "os": os,
-                    "sha256": "7".repeat(64),
-                    "size": 1024,
+                    "sha256": sha256,
+                    "size": size,
                     "target": target,
                 })
             })
@@ -1184,6 +1441,13 @@ mod tests {
         assets.insert(
             "https://github.com/ChoshimWy/AgentDevelopmentSkills/releases/download/v0.2.0/agent-development-skills-0.2.0.zip".to_owned(),
             source,
+        );
+        assets.insert(
+            format!(
+                "https://github.com/ChoshimWy/AgentDevelopmentSkills/releases/download/v0.2.0/{}",
+                native_filename("0.2.0", current_target)
+            ),
+            current_native,
         );
         (manifest, assets, HOSTED_UPGRADE_MANIFEST_URL.to_owned())
     }
@@ -1371,11 +1635,15 @@ mod tests {
             .unwrap();
         bind_qualification_schema(&mut qualification, schema_hash);
         let hosted = HostedUpgradeSource {
-            manifest: json!({"schema_version": "3.0"}),
+            manifest: json!({
+                "schema_version": "3.0",
+                "source": {"revision": "b".repeat(40)},
+            }),
             qualification,
             source_archive,
             source_artifact,
             source_root,
+            native_launcher: fake_native_binary(host_native_target().unwrap()),
             _workspace: workspace,
         };
 
@@ -1386,12 +1654,31 @@ mod tests {
                 .as_str()
                 .unwrap()
         );
-        let plan = candidate.inspect_upgrade(&installed_root, None).unwrap();
-        assert_eq!(plan["status"], "no-change");
+        let plan = candidate.inspect_upgrade(&installed_root).unwrap();
+        assert_eq!(plan["upgrade_plan"]["status"], "no-change");
         assert_eq!(
-            plan["candidate"]["package_lock_hash"],
+            plan["upgrade_plan"]["candidate"]["package_lock_hash"],
             current_bundle.package_lock()["fingerprint"]
         );
+        validate_hosted_upgrade_plan(&plan).unwrap();
+        let fingerprint = plan["fingerprint"].as_str().unwrap();
+        let result = candidate
+            .apply_upgrade(&installed_root, &plan, fingerprint, &[])
+            .unwrap();
+        assert_eq!(result["status"], "no-change");
+
+        let mut tampered = plan.clone();
+        tampered["source_revision"] = Value::String("c".repeat(40));
+        assert!(
+            candidate
+                .apply_upgrade(&installed_root, &tampered, fingerprint, &[])
+                .is_err()
+        );
+        let mut cross_bound = plan.clone();
+        cross_bound["candidate_package_lock_hash"] = Value::String("e".repeat(64));
+        cross_bound.as_object_mut().unwrap().remove("fingerprint");
+        cross_bound["fingerprint"] = Value::String(canonical_sha256(&cross_bound).unwrap());
+        assert!(validate_hosted_upgrade_plan(&cross_bound).is_err());
 
         let replacement = target.path().join("replacement");
         let desktop_selection = resolve_source_install_selection(
@@ -1414,7 +1701,44 @@ mod tests {
             .unwrap();
         std::fs::rename(&installed_root, target.path().join("retired")).unwrap();
         std::fs::rename(&replacement, &installed_root).unwrap();
-        assert!(candidate.inspect_upgrade(&installed_root, None).is_err());
+        assert!(candidate.inspect_upgrade(&installed_root).is_err());
+    }
+
+    #[test]
+    fn hosted_source_rejects_native_executable_tamper() {
+        let (manifest, mut assets, manifest_url) = fixture();
+        assets.insert(manifest_url.clone(), manifest);
+        let native_url = format!(
+            "https://github.com/ChoshimWy/AgentDevelopmentSkills/releases/download/v0.2.0/{}",
+            native_filename("0.2.0", host_native_target().unwrap())
+        );
+        assets.get_mut(&native_url).unwrap().push(0);
+        assert!(acquire_with_fetch(&manifest_url, |url, _| Ok(assets[url].clone())).is_err());
+    }
+
+    #[test]
+    fn hosted_plan_schema_reuses_upgrade_plan_and_runtime_rejects_malformed_inner_plan() {
+        let schema = parse_json(
+            &std::fs::read(repository_root().join("schemas/hosted-upgrade-plan-v1.schema.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            schema.pointer("/properties/upgrade_plan/$ref"),
+            Some(&Value::String(
+                "https://agent-workflow.local/schemas/upgrade-plan-v1.schema.json".to_owned()
+            ))
+        );
+        let mut malformed = json!({
+            "candidate_package_lock_hash": "1".repeat(64),
+            "manifest_sha256": "2".repeat(64),
+            "schema_version": "1.0",
+            "source_qualification_fingerprint": "3".repeat(64),
+            "source_revision": "4".repeat(40),
+            "upgrade_plan": {},
+        });
+        malformed["fingerprint"] = Value::String(canonical_sha256(&malformed).unwrap());
+        assert!(validate_hosted_upgrade_plan(&malformed).is_err());
     }
 
     #[test]

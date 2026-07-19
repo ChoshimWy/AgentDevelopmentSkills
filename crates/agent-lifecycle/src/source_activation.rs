@@ -282,6 +282,13 @@ impl SourceActivation {
         retired.sort_by(|left, right| left.path.cmp(&right.path));
         created_profile_paths.sort();
         let candidate_lock = encode_activation_lock(&candidates)?;
+        let migration = match (migration, activation_lock.as_ref()) {
+            (Some(migration), _) => Some(migration),
+            (None, Some(current)) if current.bytes != candidate_lock => Some(
+                activation_state_migration_report(&current.bytes, &candidate_lock)?,
+            ),
+            (None, _) => None,
+        };
         let scope = activation_scope(&candidates, &profiles, &retired, &config);
         let prepared = Self {
             activation_lock,
@@ -1421,6 +1428,33 @@ fn activation_migration_report(source: &Value) -> Result<Value, LifecycleError> 
             "to_version": "2.0",
         }],
         "to_version": "2.0",
+    });
+    let fingerprint = canonical_sha256(&report)?;
+    report["fingerprint"] = Value::String(fingerprint);
+    Ok(report)
+}
+
+fn activation_state_migration_report(before: &[u8], after: &[u8]) -> Result<Value, LifecycleError> {
+    let before_sha256 = bytes_sha256(before);
+    let after_sha256 = bytes_sha256(after);
+    if before_sha256 == after_sha256 {
+        return invalid("source activation state migration requires a changed candidate");
+    }
+    let mut report = json!({
+        "after_sha256": after_sha256,
+        "artifact": "source-activation-state",
+        "before_sha256": before_sha256,
+        "from_version": before_sha256,
+        "lossless": true,
+        "schema_version": "1.0",
+        "status": "applied",
+        "steps": [{
+            "changes": ["replace:/records"],
+            "from_version": before_sha256,
+            "lossless": true,
+            "to_version": after_sha256,
+        }],
+        "to_version": after_sha256,
     });
     let fingerprint = canonical_sha256(&report)?;
     report["fingerprint"] = Value::String(fingerprint);

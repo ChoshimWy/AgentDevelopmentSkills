@@ -2,7 +2,10 @@
 
 mod hosted_upgrade;
 
-pub use hosted_upgrade::{HostedUpgradeCandidate, HostedUpgradeSource, acquire_hosted_upgrade};
+pub use hosted_upgrade::{
+    HOSTED_UPGRADE_MANIFEST_URL, HostedUpgradeCandidate, HostedUpgradeSource,
+    acquire_hosted_upgrade, validate_hosted_upgrade_plan,
+};
 
 use agent_contracts::{canonical_json, canonical_sha256, parse_json};
 use serde::{Deserialize, Serialize};

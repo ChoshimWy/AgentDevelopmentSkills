@@ -20,6 +20,9 @@ use agent_lifecycle::{
     upgrade_source_bundle,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
+use agent_release::{
+    HOSTED_UPGRADE_MANIFEST_URL, acquire_hosted_upgrade, validate_hosted_upgrade_plan,
+};
 use agent_runtime::{
     attach_adapter_result, build_adapter_request, claim_provider_invocation,
     collect_submitted_results, compile_session_manifest_selection, create_session_worktree,
@@ -35,6 +38,7 @@ use agent_runtime::{
 use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -265,6 +269,21 @@ enum Command {
         removed_runtime_configs: Vec<String>,
         #[arg(long)]
         session_launcher: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        plan: Option<PathBuf>,
+        #[arg(long)]
+        approve_plan: Option<String>,
+        #[arg(long = "approve")]
+        approvals: Vec<String>,
+    },
+    /// Plan or apply an authenticated repository-hosted native upgrade.
+    HostedUpgrade {
+        #[arg(long)]
+        target_root: PathBuf,
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
@@ -1138,6 +1157,51 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 print!("{}", String::from_utf8(canonical_json(&result)?)?);
             }
         }
+        Command::HostedUpgrade {
+            target_root,
+            dry_run,
+            output,
+            plan,
+            approve_plan,
+            approvals,
+        } => {
+            if dry_run {
+                if plan.is_some() || approve_plan.is_some() || !approvals.is_empty() {
+                    return Err("hosted-upgrade --dry-run does not accept approvals".into());
+                }
+                let source = acquire_hosted_upgrade(HOSTED_UPGRADE_MANIFEST_URL)?;
+                let candidate = source.compile_candidate(&target_root)?;
+                let generated = candidate.inspect_upgrade(&target_root)?;
+                validate_hosted_upgrade_plan(&generated)?;
+                let encoded = canonical_json(&generated)?;
+                if let Some(output) = output {
+                    write_new_contract(&output, &encoded)?;
+                }
+                print!("{}", String::from_utf8(encoded)?);
+            } else {
+                if output.is_some() {
+                    return Err("hosted-upgrade apply does not accept --output".into());
+                }
+                let approved = load_json(
+                    plan.ok_or("hosted-upgrade apply requires --plan and --approve-plan")?,
+                )?;
+                let approve_plan = approve_plan
+                    .ok_or("hosted-upgrade apply requires --plan and --approve-plan")?;
+                validate_hosted_upgrade_plan(&approved)?;
+                if approved.get("fingerprint").and_then(Value::as_str)
+                    != Some(approve_plan.as_str())
+                {
+                    return Err(
+                        "hosted-upgrade apply requires the exact envelope fingerprint".into(),
+                    );
+                }
+                let source = acquire_hosted_upgrade(HOSTED_UPGRADE_MANIFEST_URL)?;
+                let candidate = source.compile_candidate(&target_root)?;
+                let result =
+                    candidate.apply_upgrade(&target_root, &approved, &approve_plan, &approvals)?;
+                print!("{}", String::from_utf8(canonical_json(&result)?)?);
+            }
+        }
         Command::LifecycleRollback {
             target_root,
             approve_current_lock,
@@ -1865,6 +1929,13 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     Ok(0)
 }
 
+fn write_new_contract(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 fn write_uninstall_report(
     report: &Value,
     json_output: bool,
@@ -2305,6 +2376,49 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hosted_upgrade_cli_exposes_only_fixed_control_plane_inputs() {
+        let cli = Cli::try_parse_from([
+            "agent-skills-rs",
+            "hosted-upgrade",
+            "--target-root",
+            "/tmp/installed",
+            "--dry-run",
+            "--output",
+            "/tmp/hosted-plan.json",
+        ])
+        .expect("parse hosted upgrade");
+        match cli.command {
+            Command::HostedUpgrade {
+                target_root,
+                dry_run,
+                output,
+                plan,
+                approve_plan,
+                approvals,
+            } => {
+                assert_eq!(target_root, PathBuf::from("/tmp/installed"));
+                assert!(dry_run);
+                assert_eq!(output, Some(PathBuf::from("/tmp/hosted-plan.json")));
+                assert!(plan.is_none());
+                assert!(approve_plan.is_none());
+                assert!(approvals.is_empty());
+            }
+            _ => panic!("unexpected command"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "agent-skills-rs",
+                "hosted-upgrade",
+                "--target-root",
+                "/tmp/installed",
+                "--manifest-url",
+                "https://example.invalid/release-manifest.json",
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn uninstall_human_output_matches_source_cli_for_preview_and_success() {

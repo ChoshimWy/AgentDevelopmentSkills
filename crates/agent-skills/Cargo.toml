@@ -10,6 +10,7 @@ rust-version.workspace = true
 agent-contracts = { path = "../agent-contracts" }
 agent-engine = { path = "../agent-engine" }
 agent-lifecycle = { path = "../agent-lifecycle" }
+agent-release = { path = "../agent-release" }
 agent-registry = { path = "../agent-registry" }
 agent-runtime = { path = "../agent-runtime" }
 clap.workspace = true
