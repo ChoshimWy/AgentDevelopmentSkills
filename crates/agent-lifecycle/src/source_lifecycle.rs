@@ -1,9 +1,11 @@
 use crate::{
     INSTALL_BACKUP_PREFIX, INSTALL_STAGE_PREFIX, LIFECYCLE_LOCK_DIRECTORY, LifecycleError,
     LifecycleLock, LifecycleWorkspace, UNINSTALL_BACKUP_PREFIX, ValidatedInstallPlan,
-    compile_upgrade_plan, ignored_os_metadata, inspect_upgrade_planning_snapshot,
-    open_root_directory, source_activation, source_bundle::SourceInstallBundle,
+    compile_source_install_bundle, compile_upgrade_plan, ignored_os_metadata,
+    inspect_upgrade_planning_snapshot, load_json_file, open_child_directory, open_root_directory,
+    source_activation, source_bundle::SourceInstallBundle, source_install::SourceInstallSelection,
     source_packages::SourcePackageSet, staged_install, transaction_lock,
+    upgrade_plan::semantic_lock_identity,
 };
 use agent_engine::validate_install_plan;
 use cap_std::fs::Dir;
@@ -196,6 +198,84 @@ pub fn install_source_bundle_with_activation(
         "install_plan": outcome.install_plan,
         "target_root": outcome.target_root,
     }))
+}
+
+/// Compile a source candidate with lineage anchored to the installed Lockfile.
+///
+/// A lineage-free candidate is compiled first. The current Install Lock and
+/// persistent package Lockfile are then loaded and cross-validated under the
+/// target lifecycle lock. Only a semantic change causes a second compilation
+/// with the current Lockfile as `previous_lock`; no-change candidates retain
+/// the required null lineage. The eventual Plan/apply path reacquires the lock
+/// and rejects any target drift after this preparation snapshot.
+///
+/// # Errors
+/// Returns a fail-closed error for invalid source snapshots, unsafe current
+/// installation state, broken Lock anchors, target drift, or candidate
+/// compilation failure.
+pub fn compile_source_upgrade_bundle(
+    selection: &SourceInstallSelection,
+    package_set: &SourcePackageSet,
+    schema_root: impl AsRef<Path>,
+    target_root: impl AsRef<Path>,
+) -> Result<SourceInstallBundle, LifecycleError> {
+    let schema_root = schema_root.as_ref();
+    let base = compile_source_install_bundle(selection, package_set, schema_root, None)?;
+    let lock = LifecycleLock::acquire_existing(target_root)?;
+    let target = lock.target_directory()?;
+    let managed = open_child_directory(
+        &target,
+        ".agent-skills",
+        Some(crate::MANAGED_DIRECTORY_MODE),
+        "managed metadata directory",
+    )?;
+    let current_install_plan = load_json_file(
+        &managed,
+        "install-lock.json",
+        crate::MANAGED_FILE_MODE,
+        "current Install Lock",
+    )?;
+    let current_package_lock = load_json_file(
+        &managed,
+        crate::PERSISTENT_PACKAGE_LOCK,
+        crate::MANAGED_FILE_MODE,
+        "current package Lockfile",
+    )?;
+    if current_install_plan.get("status").and_then(Value::as_str) != Some("installed") {
+        return invalid("source upgrade requires an installed Install Lock");
+    }
+    ValidatedInstallPlan::new(current_install_plan.clone(), current_package_lock.clone())?;
+    lock.validate()?;
+    if semantic_lock_identity(base.package_lock())?
+        == semantic_lock_identity(&current_package_lock)?
+    {
+        return Ok(base);
+    }
+    let candidate = compile_source_install_bundle(
+        selection,
+        package_set,
+        schema_root,
+        Some(&current_package_lock),
+    )?;
+    let reloaded_install_plan = load_json_file(
+        &managed,
+        "install-lock.json",
+        crate::MANAGED_FILE_MODE,
+        "current Install Lock",
+    )?;
+    let reloaded_package_lock = load_json_file(
+        &managed,
+        crate::PERSISTENT_PACKAGE_LOCK,
+        crate::MANAGED_FILE_MODE,
+        "current package Lockfile",
+    )?;
+    if reloaded_install_plan != current_install_plan
+        || reloaded_package_lock != current_package_lock
+    {
+        return invalid("installed Lock pair changed while compiling source upgrade");
+    }
+    lock.validate()?;
+    Ok(candidate)
 }
 
 /// Compile a native source Upgrade Plan without mutating the installed target.
@@ -842,8 +922,21 @@ mod tests {
     fn native_no_change_upgrade_returns_without_staging_or_target_writes() {
         let fixture = Fixture::new();
         let target = fixture.target();
-        let (bundle, packages) = core_bundle();
-        install_source_bundle(&bundle, &packages, &target).expect("install core fixture");
+        let (installed, installed_packages) = core_bundle();
+        install_source_bundle(&installed, &installed_packages, &target)
+            .expect("install core fixture");
+        let root = repository_root();
+        let selection =
+            resolve_source_install_selection(root.join("platforms"), &[], &[], &[], true)
+                .expect("resolve core candidate");
+        let packages = snapshot_source_packages(&selection).expect("snapshot core candidate");
+        let bundle =
+            compile_source_upgrade_bundle(&selection, &packages, root.join("schemas"), &target)
+                .expect("compile no-change candidate");
+        assert_eq!(
+            bundle.package_lock().pointer("/lineage/previous_lock_hash"),
+            Some(&Value::Null)
+        );
         let evidence = upgrade_evidence(bundle.package_lock());
         let plan = inspect_source_upgrade(
             &bundle,
@@ -885,6 +978,39 @@ mod tests {
     }
 
     #[test]
+    fn source_upgrade_candidate_requires_an_installed_lock_projection() {
+        let fixture = Fixture::new();
+        let target = fixture.target();
+        let (installed, installed_packages) = core_bundle();
+        install_source_bundle(&installed, &installed_packages, &target)
+            .expect("install core fixture");
+        let install_lock_path = target.join(".agent-skills/install-lock.json");
+        let mut install_lock = load_json(&install_lock_path).expect("load Install Lock");
+        install_lock["status"] = Value::String("planned".to_owned());
+        std::fs::write(
+            install_lock_path,
+            canonical_json(&install_lock).expect("encode planned Install Lock"),
+        )
+        .expect("write planned Install Lock");
+
+        let root = repository_root();
+        let selection =
+            resolve_source_install_selection(root.join("platforms"), &[], &[], &[], true)
+                .expect("resolve core candidate");
+        let packages = snapshot_source_packages(&selection).expect("snapshot core candidate");
+        let error =
+            compile_source_upgrade_bundle(&selection, &packages, root.join("schemas"), &target)
+                .expect_err("planned projection must not be accepted as installed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires an installed Install Lock")
+        );
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+    }
+
+    #[test]
     fn native_partial_upgrade_requires_exact_plan_and_persists_rollback_point() {
         let fixture = Fixture::new();
         let target = fixture.target();
@@ -897,13 +1023,19 @@ mod tests {
                 .expect("resolve core candidate");
         let candidate_packages =
             snapshot_source_packages(&selection).expect("snapshot core candidate");
-        let candidate = compile_source_install_bundle(
+        let candidate = compile_source_upgrade_bundle(
             &selection,
             &candidate_packages,
             root.join("schemas"),
-            Some(current.package_lock()),
+            &target,
         )
         .expect("compile partial candidate");
+        assert_eq!(
+            candidate
+                .package_lock()
+                .pointer("/lineage/previous_lock_hash"),
+            Some(&current.package_lock()["fingerprint"])
+        );
         let evidence = upgrade_evidence(candidate.package_lock());
         let removed = vec!["desktop".to_owned()];
         let plan = inspect_source_upgrade(

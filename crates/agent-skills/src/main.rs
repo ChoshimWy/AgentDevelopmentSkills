@@ -9,12 +9,13 @@ use agent_engine::{
     validate_plan_package_lock, validate_upgrade_conformance_evidence, validate_upgrade_plan,
 };
 use agent_lifecycle::{
-    LifecycleError, LifecycleWorkspace, compile_source_install_bundle, compile_upgrade_plan,
-    inspect_doctor_baseline, inspect_doctor_report_v1, inspect_source_install,
-    inspect_source_install_with_activation, inspect_source_platform_options,
-    inspect_uninstall_plan, inspect_upgrade_planning_snapshot, install_source_bundle,
+    LifecycleError, LifecycleWorkspace, compile_source_install_bundle,
+    compile_source_upgrade_bundle, compile_upgrade_plan, inspect_doctor_baseline,
+    inspect_doctor_report_v1, inspect_source_install, inspect_source_install_with_activation,
+    inspect_source_platform_options, inspect_source_upgrade, inspect_uninstall_plan,
+    inspect_upgrade_planning_snapshot, install_source_bundle,
     install_source_bundle_with_activation, render_codex_config, resolve_source_install_selection,
-    snapshot_source_packages,
+    snapshot_source_packages, upgrade_source_bundle,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
@@ -232,6 +233,40 @@ enum Command {
         schemas: PathBuf,
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Plan or execute one approval-bound native source upgrade transaction.
+    LifecycleUpgrade {
+        root: PathBuf,
+        target_root: PathBuf,
+        evidence: PathBuf,
+        #[arg(long = "platform")]
+        platforms: Vec<String>,
+        #[arg(long = "discipline")]
+        disciplines: Vec<String>,
+        #[arg(long = "runtime-config")]
+        runtime_configs: Vec<String>,
+        #[arg(long)]
+        core_only: bool,
+        #[arg(long, default_value = "schemas")]
+        schemas: PathBuf,
+        #[arg(long, default_value = "upgrade")]
+        action: String,
+        #[arg(long = "removed-platform")]
+        removed_platforms: Vec<String>,
+        #[arg(long = "removed-runtime-config")]
+        removed_runtime_configs: Vec<String>,
+        #[arg(long)]
+        session_launcher: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        plan: Option<PathBuf>,
+        #[arg(long)]
+        approve_plan: Option<String>,
+        #[arg(long = "approve")]
+        approvals: Vec<String>,
     },
     /// Emit the sorted automatic recipe capability closure for target platforms.
     RecipeCapabilities { targets: Vec<String> },
@@ -985,6 +1020,101 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 install_source_bundle(&bundle, &packages, target_root)?
             };
             print!("{}", String::from_utf8(canonical_json(&result)?)?);
+        }
+        Command::LifecycleUpgrade {
+            root,
+            target_root,
+            evidence,
+            platforms,
+            disciplines,
+            runtime_configs,
+            core_only,
+            schemas,
+            action,
+            removed_platforms,
+            removed_runtime_configs,
+            session_launcher,
+            dry_run,
+            output,
+            plan,
+            approve_plan,
+            approvals,
+        } => {
+            let selection = resolve_source_install_selection(
+                root,
+                &platforms,
+                &disciplines,
+                &runtime_configs,
+                core_only,
+            )?;
+            let packages = snapshot_source_packages(&selection)?;
+            let bundle =
+                compile_source_upgrade_bundle(&selection, &packages, schemas, &target_root)?;
+            let evidence = load_json(evidence)?;
+            let session_launcher = session_launcher
+                .as_deref()
+                .map(read_frozen_executable)
+                .transpose()?;
+            let generated = inspect_source_upgrade(
+                &bundle,
+                &packages,
+                &target_root,
+                &evidence,
+                &action,
+                &removed_platforms,
+                &removed_runtime_configs,
+                session_launcher.as_deref(),
+            )?;
+            if dry_run {
+                if plan.is_some() || approve_plan.is_some() || !approvals.is_empty() {
+                    return Err("lifecycle-upgrade --dry-run does not accept approvals".into());
+                }
+                let encoded = canonical_json(&generated)?;
+                if let Some(output) = output {
+                    std::fs::write(output, &encoded)?;
+                }
+                print!("{}", String::from_utf8(encoded)?);
+            } else {
+                if output.is_some() {
+                    return Err("lifecycle-upgrade apply does not accept --output".into());
+                }
+                let approved = load_json(
+                    plan.ok_or("lifecycle-upgrade apply requires --plan and --approve-plan")?,
+                )?;
+                let approve_plan = approve_plan
+                    .ok_or("lifecycle-upgrade apply requires --plan and --approve-plan")?;
+                if approved.get("fingerprint").and_then(Value::as_str)
+                    != Some(approve_plan.as_str())
+                {
+                    return Err(
+                        "lifecycle-upgrade apply requires the exact planned fingerprint".into(),
+                    );
+                }
+                if approved != generated {
+                    return Err(
+                        "saved lifecycle-upgrade Plan is stale or differs from the current candidate"
+                            .into(),
+                    );
+                }
+                let mut result = upgrade_source_bundle(
+                    &bundle,
+                    &packages,
+                    &target_root,
+                    &evidence,
+                    &approved,
+                    &approvals,
+                    &action,
+                    &removed_platforms,
+                    &removed_runtime_configs,
+                    session_launcher.as_deref(),
+                )?;
+                if action == "partial-uninstall"
+                    && result.get("status").and_then(Value::as_str) == Some("upgraded")
+                {
+                    result["status"] = Value::String("partially-uninstalled".to_owned());
+                }
+                print!("{}", String::from_utf8(canonical_json(&result)?)?);
+            }
         }
         Command::RecipeCapabilities { targets } => {
             let targets = targets.into_iter().collect::<BTreeSet<_>>();

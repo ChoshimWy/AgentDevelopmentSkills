@@ -609,7 +609,7 @@ fn validate_lock_selection(
     Ok(())
 }
 
-fn semantic_lock_identity(value: &Value) -> Result<String, EngineError> {
+pub(super) fn semantic_lock_identity(value: &Value) -> Result<String, EngineError> {
     let mut identity = object(value, "package Lockfile")?.clone();
     for field in LOCK_IDENTITY_OMISSIONS {
         identity.remove(field);

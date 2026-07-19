@@ -403,9 +403,16 @@ Before an Apple activation can write external state, the newly published
 installation must pass a native installed-registry smoke covering discovery,
 policy, a package-Lock-bound ready Plan, Skill bindings, Recorded Adapter
 execution, independent review, and delivery reporting. Any smoke or handler
-failure remains inside the managed/external rollback window. Public upgrade
-and rollback CLI routing remains on the existing approval-bound compatibility
-path until executor CLI, differential, and release gates pass.
+failure remains inside the managed/external rollback window. The non-default
+`lifecycle-upgrade` command now compiles a source candidate against an
+initially locked snapshot of the installed lineage, emits or saves the exact
+Plan in `--dry-run` mode, and requires both that saved Plan and its explicit
+`--approve-plan` fingerprint before execution. Apply reacquires the target
+lock, regenerates and compares the complete Plan, then delegates to the guarded
+executor; a concurrent target change therefore fails closed instead of
+silently rebasing. Public `upgrade` and rollback CLI routing remains on the
+existing approval-bound compatibility path until differential and release
+gates pass.
 The installed native
 `agent-session` dispatch preserves
 the public `create`, `list`, `inspect`, `fingerprint`, `checkpoint`, and `gate`

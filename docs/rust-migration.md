@@ -361,9 +361,16 @@ Adapter execution, independent review, and delivery reporting while
 `PublishedInstall` can still restore both managed and external preimages.
 No-change, partial removal, legacy Activation migration, approval rejection,
 activate/deactivate/preserve dispatch, smoke-failure compensation, and
-post-write handler compensation have native transaction tests. Public
-upgrade/rollback execution remains behind the existing compatibility approval
-gate until the executor CLI, differential, and release gates are complete.
+post-write handler compensation have native transaction tests. The non-default
+`lifecycle-upgrade` CLI now connects source selection to that executor. It
+compiles a no-lineage candidate, loads and cross-validates the installed Lock
+pair under an initial target lock, and recompiles changed candidates with the
+exact current Lock as lineage. Dry-run emits or saves a canonical Plan; apply
+requires the saved Plan, its exact explicit fingerprint, and the complete
+permission approval set. The executor then reacquires the target lock,
+regenerates the complete Plan, and rejects any candidate or target drift before
+staging. Public upgrade/rollback execution remains behind the existing
+compatibility approval gate until differential and release gates are complete.
 Doctor,
 uninstall, and source activation already have native compatibility commands
 with differential, tamper, concurrency, rollback, and independent-review
