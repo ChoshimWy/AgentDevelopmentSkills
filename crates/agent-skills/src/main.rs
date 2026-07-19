@@ -11,11 +11,12 @@ use agent_engine::{
 use agent_lifecycle::{
     LifecycleError, LifecycleWorkspace, compile_source_install_bundle,
     compile_source_upgrade_bundle, compile_upgrade_plan, inspect_doctor_baseline,
-    inspect_doctor_report_v1, inspect_source_install, inspect_source_install_with_activation,
-    inspect_source_platform_options, inspect_source_upgrade, inspect_uninstall_plan,
-    inspect_upgrade_planning_snapshot, install_source_bundle,
-    install_source_bundle_with_activation, render_codex_config, resolve_source_install_selection,
-    rollback_source_install, snapshot_source_packages, upgrade_source_bundle,
+    inspect_doctor_report_v1, inspect_doctor_report_v2, inspect_source_install,
+    inspect_source_install_with_activation, inspect_source_platform_options,
+    inspect_source_upgrade, inspect_uninstall_plan, inspect_upgrade_planning_snapshot,
+    install_source_bundle, install_source_bundle_with_activation, render_codex_config,
+    resolve_source_install_selection, rollback_source_install, snapshot_source_packages,
+    upgrade_source_bundle,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
@@ -143,6 +144,11 @@ enum Command {
         dry_run: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Diagnose one installed target with the self-contained native Doctor v2.
+    Doctor {
+        #[arg(long)]
+        target_root: PathBuf,
     },
     /// Emit the canonical JSON representation of an existing JSON artifact.
     Canonicalize { artifact: PathBuf },
@@ -887,6 +893,13 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 std::io::stdout().write_all(&canonical_json(&report)?)?;
             } else {
                 print!("{}", native_install_human_report(&report)?);
+            }
+        }
+        Command::Doctor { target_root } => {
+            let value = inspect_doctor_report_v2(target_root)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+            if value.get("status").and_then(Value::as_str) == Some("blocked") {
+                return Ok(2);
             }
         }
         Command::Canonicalize { artifact } => {

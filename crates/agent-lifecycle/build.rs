@@ -24,7 +24,30 @@ fn main() {
     ] {
         collect_local_crate(&workspace.join("crates").join(package), &mut sources);
     }
-    sources.retain(|path| path.exists());
+    for root in ["schemas", "disciplines", "platforms", "stacks"] {
+        println!("cargo:rerun-if-changed={}", workspace.join(root).display());
+    }
+    let schema_inventory = agent_engine::schema_inventory(workspace.join("schemas"))
+        .expect("workspace Schema inventory must be valid");
+    let schema_inventory_bytes = agent_contracts::canonical_json(&schema_inventory)
+        .expect("workspace Schema inventory must be canonicalizable");
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is required"));
+    fs::write(
+        output.join("embedded-schema-inventory.json"),
+        schema_inventory_bytes,
+    )
+    .expect("embedded Schema inventory must be writable");
+    for entry in schema_inventory
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .expect("Schema inventory files must be an array")
+    {
+        let relative = entry
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .expect("Schema inventory path must be a string");
+        sources.push(workspace.join(relative));
+    }
     sources.sort();
 
     let mut digest = Sha256::new();

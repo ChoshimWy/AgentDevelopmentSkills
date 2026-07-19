@@ -1,0 +1,99 @@
+{
+  "$id": "https://agent-workflow.local/schemas/doctor-report-v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "checks": {
+      "$ref": "https://agent-workflow.local/schemas/doctor-report-v1.schema.json#/properties/checks"
+    },
+    "environment": {
+      "additionalProperties": false,
+      "properties": {
+        "core_version": {
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "implementation": {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "pattern": "^[a-z][a-z0-9.-]*$",
+              "type": "string"
+            },
+            "version": {
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "version"
+          ],
+          "type": "object"
+        },
+        "schema_inventory": {
+          "additionalProperties": false,
+          "properties": {
+            "algorithm": {
+              "const": "sha256"
+            },
+            "content_sha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "file_count": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "algorithm",
+            "content_sha256",
+            "file_count"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "core_version",
+        "implementation",
+        "schema_inventory"
+      ],
+      "type": "object"
+    },
+    "fingerprint": {
+      "$ref": "https://agent-workflow.local/schemas/doctor-report-v1.schema.json#/properties/fingerprint"
+    },
+    "install": {
+      "$ref": "https://agent-workflow.local/schemas/doctor-report-v1.schema.json#/properties/install"
+    },
+    "recovery": {
+      "$ref": "https://agent-workflow.local/schemas/doctor-report-v1.schema.json#/properties/recovery"
+    },
+    "schema_version": {
+      "const": "2.0"
+    },
+    "status": {
+      "$ref": "https://agent-workflow.local/schemas/doctor-report-v1.schema.json#/properties/status"
+    },
+    "summary": {
+      "$ref": "https://agent-workflow.local/schemas/doctor-report-v1.schema.json#/properties/summary"
+    },
+    "target_root": {
+      "$ref": "https://agent-workflow.local/schemas/doctor-report-v1.schema.json#/properties/target_root"
+    }
+  },
+  "required": [
+    "schema_version",
+    "target_root",
+    "status",
+    "environment",
+    "install",
+    "recovery",
+    "checks",
+    "summary",
+    "fingerprint"
+  ],
+  "title": "Doctor Report v2",
+  "type": "object"
+}

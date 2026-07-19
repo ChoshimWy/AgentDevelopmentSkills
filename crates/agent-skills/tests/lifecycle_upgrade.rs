@@ -7,6 +7,9 @@ use agent_lifecycle::{
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct TestRoot(PathBuf);
 
@@ -17,8 +20,9 @@ impl TestRoot {
             .expect("system clock")
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "agent-skills-lifecycle-upgrade-{}-{nonce}",
-            std::process::id()
+            "agent-skills-lifecycle-upgrade-{}-{nonce}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed),
         ));
         std::fs::create_dir(&root).expect("create test root");
         Self(root)

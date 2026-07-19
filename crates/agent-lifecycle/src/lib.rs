@@ -44,9 +44,9 @@ mod upgrade_plan;
 mod upgrade_scope;
 
 pub use codex_config::render_codex_config;
-pub use doctor_report::inspect_doctor_report_v1;
+pub use doctor_report::{inspect_doctor_report_v1, inspect_doctor_report_v2};
 #[cfg(test)]
-use doctor_report::validate_doctor_report_v1;
+use doctor_report::{validate_doctor_report_v1, validate_doctor_report_v2};
 pub use managed_swap::{PublishedInstall, PublishedUninstall, inspect_uninstall_plan};
 pub use source_bundle::{SourceInstallBundle, compile_source_install_bundle};
 pub use source_install::{
@@ -204,8 +204,35 @@ pub fn inspect_doctor_baseline(
     target_root: impl AsRef<Path>,
     schema_root: impl AsRef<Path>,
 ) -> Result<Value, LifecycleError> {
-    let target = absolute_path(target_root.as_ref())?;
     let schemas = absolute_path(schema_root.as_ref())?;
+    inspect_doctor_baseline_with_schema_source(
+        target_root.as_ref(),
+        DoctorSchemaSource::Filesystem(&schemas),
+    )
+}
+
+pub(crate) fn inspect_doctor_baseline_embedded(
+    target_root: impl AsRef<Path>,
+    schema_inventory: &Value,
+) -> Result<Value, LifecycleError> {
+    inspect_doctor_baseline_with_schema_source(
+        target_root.as_ref(),
+        DoctorSchemaSource::Embedded(schema_inventory),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum DoctorSchemaSource<'a> {
+    Filesystem(&'a Path),
+    Embedded(&'a Value),
+}
+
+#[allow(clippy::too_many_lines)]
+fn inspect_doctor_baseline_with_schema_source(
+    target_root: &Path,
+    schema_source: DoctorSchemaSource<'_>,
+) -> Result<Value, LifecycleError> {
+    let target = absolute_path(target_root)?;
     let mut state = BaselineState::new();
 
     let target_directory =
@@ -399,7 +426,7 @@ pub fn inspect_doctor_baseline(
     }
 
     if let Some(package_lock) = state.package_lock.as_ref() {
-        match check_schema_inventory(&schemas, package_lock) {
+        match check_schema_inventory(&schema_source, package_lock) {
             Ok(details) => state.record(
                 "schema.inventory",
                 "schema",
@@ -846,8 +873,14 @@ fn check_core_identity(
     Ok(versions)
 }
 
-fn check_schema_inventory(schemas: &Path, package_lock: &Value) -> Result<Value, LifecycleError> {
-    let current = schema_inventory(schemas)?;
+fn check_schema_inventory(
+    schemas: &DoctorSchemaSource<'_>,
+    package_lock: &Value,
+) -> Result<Value, LifecycleError> {
+    let current = match schemas {
+        DoctorSchemaSource::Filesystem(path) => schema_inventory(path)?,
+        DoctorSchemaSource::Embedded(inventory) => (*inventory).clone(),
+    };
     if package_lock.get("schema_inventory") != Some(&current) {
         return Err(LifecycleError::Invalid(
             "runtime Schema inventory differs from persistent package Lockfile".to_owned(),
@@ -1548,6 +1581,39 @@ mod tests {
         let mut tampered = report;
         tampered["summary"]["passed"] = json!(999);
         assert!(validate_doctor_report_v1(&tampered).is_err());
+        std::fs::remove_dir(&root).expect("remove lifecycle test root");
+    }
+
+    #[test]
+    fn doctor_report_v2_is_runtime_neutral_and_self_contained() {
+        let root = temporary_root("doctor-report-v2");
+        let report = inspect_doctor_report_v2(&root).expect("emit Doctor Report v2");
+        assert_eq!(report.get("schema_version"), Some(&json!("2.0")));
+        assert_eq!(report.get("status"), Some(&json!("blocked")));
+        assert_eq!(
+            report.pointer("/environment/implementation/name"),
+            Some(&json!("agent-skills-rs"))
+        );
+        assert!(
+            report
+                .pointer("/environment/schema_inventory/file_count")
+                .and_then(Value::as_u64)
+                .is_some_and(|count| count > 0)
+        );
+        assert!(report.pointer("/environment/python_version").is_none());
+        assert!(
+            report
+                .get("checks")
+                .and_then(Value::as_array)
+                .is_some_and(|checks| checks.iter().all(|check| {
+                    check.get("id").and_then(Value::as_str) != Some("environment.python")
+                }))
+        );
+        validate_doctor_report_v2(&report).expect("validate emitted Doctor Report v2");
+
+        let mut tampered = report.clone();
+        tampered["environment"]["schema_inventory"]["file_count"] = json!(0);
+        assert!(validate_doctor_report_v2(&tampered).is_err());
         std::fs::remove_dir(&root).expect("remove lifecycle test root");
     }
 

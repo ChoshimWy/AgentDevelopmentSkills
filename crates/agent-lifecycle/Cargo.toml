@@ -26,6 +26,9 @@ renamore.workspace = true
 winx.workspace = true
 
 [build-dependencies]
+agent-contracts = { path = "../agent-contracts" }
+agent-engine = { path = "../agent-engine" }
+serde_json.workspace = true
 sha2.workspace = true
 
 [lints]

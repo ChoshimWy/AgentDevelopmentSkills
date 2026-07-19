@@ -2303,6 +2303,41 @@ name = "one"
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, dumps(expected))
+            native = self.run_rust(
+                "doctor",
+                "--target-root",
+                str(target),
+            )
+            self.assertEqual(native.returncode, 0, native.stderr)
+            native_report = json.loads(native.stdout)
+            validate_doctor_report(native_report)
+            self.assertEqual(native_report["schema_version"], "2.0")
+            self.assertEqual(native_report["status"], "passed")
+            self.assertNotIn("python_version", native_report["environment"])
+            self.assertEqual(
+                native_report["environment"]["implementation"]["name"],
+                "agent-skills-rs",
+            )
+            invalid_native = deepcopy(native_report)
+            invalid_native["environment"]["schema_inventory"]["file_count"] = 0
+            invalid_native["fingerprint"] = sha256({
+                key: value
+                for key, value in invalid_native.items()
+                if key != "fingerprint"
+            })
+            with self.assertRaises(ContractError):
+                validate_doctor_report(invalid_native)
+            inconsistent_native = deepcopy(native_report)
+            inconsistent_native["environment"]["schema_inventory"][
+                "content_sha256"
+            ] = "0" * 64
+            inconsistent_native["fingerprint"] = sha256({
+                key: value
+                for key, value in inconsistent_native.items()
+                if key != "fingerprint"
+            })
+            with self.assertRaises(ContractError):
+                validate_doctor_report(inconsistent_native)
 
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "empty"

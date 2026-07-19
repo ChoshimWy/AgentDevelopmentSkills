@@ -213,6 +213,28 @@ fn fresh_apple_install_publishes_a_compatible_agent_session_cli() {
     );
 
     let native_cli = target.join("bin/agent-skills");
+    let doctor = Command::new(&native_cli)
+        .args([
+            "doctor",
+            "--target-root",
+            target.to_str().expect("UTF-8 target"),
+        ])
+        .output()
+        .expect("run installed native Doctor");
+    assert!(
+        doctor.status.success(),
+        "installed native Doctor failed: {}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    let doctor: Value = serde_json::from_slice(&doctor.stdout).expect("native Doctor JSON report");
+    assert_eq!(doctor["schema_version"], "2.0");
+    assert_eq!(doctor["status"], "passed");
+    assert_eq!(
+        doctor["environment"]["implementation"]["name"],
+        "agent-skills-rs"
+    );
+    assert!(doctor["environment"].get("python_version").is_none());
+
     let uninstall_preview = Command::new(&native_cli)
         .args([
             "uninstall",

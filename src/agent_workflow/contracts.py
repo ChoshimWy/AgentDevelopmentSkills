@@ -7,6 +7,7 @@ cross-reference and enum rules that are important to the workflow runtime.
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from pathlib import Path, PurePosixPath
 import re
 from typing import Any
@@ -1482,6 +1483,92 @@ def validate_agent_skills_lock(value: dict[str, Any]) -> None:
 
 
 def validate_doctor_report(value: dict[str, Any]) -> None:
+    if value.get("schema_version") == "2.0":
+        _validate_doctor_report_v2(value)
+        return
+    _validate_doctor_report_v1(value)
+
+
+def _validate_doctor_report_v2(value: dict[str, Any]) -> None:
+    fields = {
+        "schema_version", "target_root", "status", "environment", "install",
+        "recovery", "checks", "summary", "fingerprint",
+    }
+    _exact_object(value, fields, "doctor-report")
+    environment = value["environment"]
+    _exact_object(
+        environment,
+        {"core_version", "implementation", "schema_inventory"},
+        "doctor-report.environment",
+    )
+    version_pattern = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
+    implementation = environment["implementation"]
+    _exact_object(
+        implementation,
+        {"name", "version"},
+        "doctor-report.environment.implementation",
+    )
+    inventory = environment["schema_inventory"]
+    _exact_object(
+        inventory,
+        {"algorithm", "content_sha256", "file_count"},
+        "doctor-report.environment.schema_inventory",
+    )
+    if (
+        not isinstance(environment["core_version"], str)
+        or not version_pattern.fullmatch(environment["core_version"])
+        or not isinstance(implementation["name"], str)
+        or not re.fullmatch(r"[a-z][a-z0-9.-]*", implementation["name"])
+        or not isinstance(implementation["version"], str)
+        or not version_pattern.fullmatch(implementation["version"])
+        or inventory["algorithm"] != "sha256"
+        or not isinstance(inventory["content_sha256"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", inventory["content_sha256"])
+        or not isinstance(inventory["file_count"], int)
+        or isinstance(inventory["file_count"], bool)
+        or inventory["file_count"] <= 0
+    ):
+        raise ContractError("doctor-report environment is invalid")
+    checks = value["checks"]
+    if not isinstance(checks, list):
+        raise ContractError("doctor-report checks must be an array")
+    schema_check = next(
+        (
+            item for item in checks
+            if isinstance(item, dict) and item.get("id") == "schema.inventory"
+        ),
+        None,
+    )
+    if schema_check is None:
+        raise ContractError("doctor-report Schema inventory check is missing")
+    if schema_check.get("status") == "passed":
+        details = schema_check.get("details")
+        if (
+            not isinstance(details, dict)
+            or details.get("content_sha256") != inventory["content_sha256"]
+            or details.get("file_count") != inventory["file_count"]
+        ):
+            raise ContractError("doctor-report Schema inventory differs from its check")
+    if value["fingerprint"] != sha256({
+        key: item for key, item in value.items() if key != "fingerprint"
+    }):
+        raise ContractError("doctor-report fingerprint mismatch")
+
+    compatibility = deepcopy(value)
+    compatibility["schema_version"] = "1.0"
+    compatibility["environment"] = {
+        "core_version": environment["core_version"],
+        "python_required": ">=3.11",
+        "python_version": "3.11.0",
+        "schema_root": "embedded://agent-skills/schema-inventory",
+    }
+    compatibility["fingerprint"] = sha256({
+        key: item for key, item in compatibility.items() if key != "fingerprint"
+    })
+    _validate_doctor_report_v1(compatibility)
+
+
+def _validate_doctor_report_v1(value: dict[str, Any]) -> None:
     fields = {
         "schema_version", "target_root", "status", "environment", "install",
         "recovery", "checks", "summary", "fingerprint",

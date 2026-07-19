@@ -1,11 +1,18 @@
-use super::{LifecycleError, absolute_path, inspect_doctor_baseline, valid_sha256};
-use agent_contracts::canonical_sha256;
+use super::{
+    LifecycleError, absolute_path, inspect_doctor_baseline, inspect_doctor_baseline_embedded,
+    valid_sha256,
+};
+use agent_contracts::{canonical_sha256, parse_json};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::Path;
 
-const DOCTOR_SCHEMA_VERSION: &str = "1.0";
+const DOCTOR_SCHEMA_VERSION_V1: &str = "1.0";
+const DOCTOR_SCHEMA_VERSION_V2: &str = "2.0";
+const NATIVE_IMPLEMENTATION: &str = "agent-skills-rs";
 const PYTHON_REQUIREMENT: &str = ">=3.11";
+const EMBEDDED_SCHEMA_INVENTORY: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/embedded-schema-inventory.json"));
 
 /// Emit a complete Doctor Report v1 from the native read-only inspection.
 ///
@@ -82,7 +89,7 @@ pub fn inspect_doctor_report_v1(
         },
         "install": projection.remove("install").unwrap_or(Value::Null),
         "recovery": projection.remove("recovery").unwrap_or(Value::Null),
-        "schema_version": DOCTOR_SCHEMA_VERSION,
+        "schema_version": DOCTOR_SCHEMA_VERSION_V1,
         "status": if blocked { "blocked" } else { "passed" },
         "summary": counts,
         "target_root": projection.remove("target_root").unwrap_or(Value::Null),
@@ -96,6 +103,70 @@ pub fn inspect_doctor_report_v1(
         .ok_or_else(|| invalid_error("Doctor Report v1 is invalid"))?
         .insert("fingerprint".to_owned(), Value::String(fingerprint));
     validate_doctor_report_v1(&report)?;
+    Ok(report)
+}
+
+/// Emit the runtime-neutral Doctor Report v2 from the native read-only engine.
+///
+/// Report v2 removes the Python-host attestation from the public contract. The
+/// native executable carries the exact release Schema inventory produced at
+/// build time, so an installed CLI can diagnose its target without a source
+/// checkout, an external interpreter, network access, or a caller-supplied
+/// Schema directory.
+///
+/// # Errors
+/// Returns an error when the embedded Schema inventory is invalid, the native
+/// baseline cannot be assembled, or the result violates Doctor Report v2.
+pub fn inspect_doctor_report_v2(target_root: impl AsRef<Path>) -> Result<Value, LifecycleError> {
+    let schema_inventory = parse_json(EMBEDDED_SCHEMA_INVENTORY)?;
+    let mut projection = inspect_doctor_baseline_embedded(target_root, &schema_inventory)?;
+    let projection = projection
+        .as_object_mut()
+        .ok_or_else(|| invalid_error("Doctor baseline projection is invalid"))?;
+    projection.remove("fingerprint");
+    let checks = projection
+        .remove("checks")
+        .and_then(|value| value.as_array().cloned())
+        .ok_or_else(|| invalid_error("Doctor baseline checks are invalid"))?;
+    let counts = count_check_statuses(&checks);
+    let blocked = counts
+        .get("failed")
+        .and_then(Value::as_u64)
+        .is_some_and(|count| count > 0);
+    let file_count = schema_inventory
+        .get("files")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let mut report = json!({
+        "checks": checks,
+        "environment": {
+            "core_version": env!("CARGO_PKG_VERSION"),
+            "implementation": {
+                "name": NATIVE_IMPLEMENTATION,
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+            "schema_inventory": {
+                "algorithm": schema_inventory.get("algorithm").cloned().unwrap_or(Value::Null),
+                "content_sha256": schema_inventory.get("content_sha256").cloned().unwrap_or(Value::Null),
+                "file_count": file_count,
+            },
+        },
+        "install": projection.remove("install").unwrap_or(Value::Null),
+        "recovery": projection.remove("recovery").unwrap_or(Value::Null),
+        "schema_version": DOCTOR_SCHEMA_VERSION_V2,
+        "status": if blocked { "blocked" } else { "passed" },
+        "summary": counts,
+        "target_root": projection.remove("target_root").unwrap_or(Value::Null),
+    });
+    if !projection.is_empty() {
+        return invalid("Doctor baseline projection contains unknown fields");
+    }
+    let fingerprint = canonical_sha256(&report)?;
+    report
+        .as_object_mut()
+        .ok_or_else(|| invalid_error("Doctor Report v2 is invalid"))?
+        .insert("fingerprint".to_owned(), Value::String(fingerprint));
+    validate_doctor_report_v2(&report)?;
     Ok(report)
 }
 
@@ -120,7 +191,7 @@ pub(super) fn validate_doctor_report_v1(value: &Value) -> Result<(), LifecycleEr
             )
         })
         .ok_or_else(|| invalid_error("doctor-report must contain exactly the required fields"))?;
-    if report.get("schema_version").and_then(Value::as_str) != Some(DOCTOR_SCHEMA_VERSION) {
+    if report.get("schema_version").and_then(Value::as_str) != Some(DOCTOR_SCHEMA_VERSION_V1) {
         return invalid("unsupported schema_version");
     }
     if !matches!(
@@ -347,6 +418,159 @@ pub(super) fn validate_doctor_report_v1(value: &Value) -> Result<(), LifecycleEr
         return invalid("doctor-report fingerprint mismatch");
     }
     Ok(())
+}
+
+pub(super) fn validate_doctor_report_v2(value: &Value) -> Result<(), LifecycleError> {
+    let report = value
+        .as_object()
+        .filter(|object| {
+            exact_object_fields(
+                object,
+                &[
+                    "checks",
+                    "environment",
+                    "fingerprint",
+                    "install",
+                    "recovery",
+                    "schema_version",
+                    "status",
+                    "summary",
+                    "target_root",
+                ],
+            )
+        })
+        .ok_or_else(|| invalid_error("doctor-report must contain exactly the required fields"))?;
+    if report.get("schema_version").and_then(Value::as_str) != Some(DOCTOR_SCHEMA_VERSION_V2) {
+        return invalid("unsupported schema_version");
+    }
+    let environment = exact_object(
+        report.get("environment"),
+        &["core_version", "implementation", "schema_inventory"],
+        "doctor-report environment",
+    )?;
+    parse_semantic_version(
+        environment
+            .get("core_version")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        "doctor-report Core version",
+    )?;
+    let implementation = exact_object(
+        environment.get("implementation"),
+        &["name", "version"],
+        "doctor-report implementation",
+    )?;
+    if implementation
+        .get("name")
+        .and_then(Value::as_str)
+        .is_none_or(|name| !valid_check_id(name))
+    {
+        return invalid("doctor-report implementation is invalid");
+    }
+    parse_semantic_version(
+        implementation
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        "doctor-report implementation version",
+    )?;
+    let inventory = exact_object(
+        environment.get("schema_inventory"),
+        &["algorithm", "content_sha256", "file_count"],
+        "doctor-report Schema inventory",
+    )?;
+    if inventory.get("algorithm").and_then(Value::as_str) != Some("sha256")
+        || !inventory
+            .get("content_sha256")
+            .and_then(Value::as_str)
+            .is_some_and(valid_sha256)
+        || inventory
+            .get("file_count")
+            .and_then(Value::as_u64)
+            .is_none_or(|count| count == 0)
+    {
+        return invalid("doctor-report Schema inventory is invalid");
+    }
+    validate_v2_schema_check(report, inventory)?;
+
+    let fingerprint = report
+        .get("fingerprint")
+        .and_then(Value::as_str)
+        .filter(|value| valid_sha256(value))
+        .ok_or_else(|| invalid_error("doctor-report fingerprint is invalid"))?;
+    let mut identity = report.clone();
+    identity.remove("fingerprint");
+    if canonical_sha256(&Value::Object(identity))? != fingerprint {
+        return invalid("doctor-report fingerprint mismatch");
+    }
+
+    validate_v2_compatibility(value, environment)
+}
+
+fn validate_v2_schema_check(
+    report: &serde_json::Map<String, Value>,
+    inventory: &serde_json::Map<String, Value>,
+) -> Result<(), LifecycleError> {
+    let check = report
+        .get("checks")
+        .and_then(Value::as_array)
+        .and_then(|checks| {
+            checks
+                .iter()
+                .find(|check| check.get("id").and_then(Value::as_str) == Some("schema.inventory"))
+        })
+        .ok_or_else(|| invalid_error("doctor-report Schema inventory check is missing"))?;
+    if check.get("status").and_then(Value::as_str) == Some("passed") {
+        let details = check
+            .get("details")
+            .and_then(Value::as_object)
+            .ok_or_else(|| invalid_error("doctor-report Schema inventory check is invalid"))?;
+        if details.get("content_sha256") != inventory.get("content_sha256")
+            || details.get("file_count") != inventory.get("file_count")
+        {
+            return invalid("doctor-report Schema inventory differs from its check");
+        }
+    }
+    Ok(())
+}
+
+fn validate_v2_compatibility(
+    value: &Value,
+    environment: &serde_json::Map<String, Value>,
+) -> Result<(), LifecycleError> {
+    let mut compatibility = value.clone();
+    compatibility["schema_version"] = Value::String(DOCTOR_SCHEMA_VERSION_V1.to_owned());
+    compatibility["environment"] = json!({
+        "core_version": environment.get("core_version").cloned().unwrap_or(Value::Null),
+        "python_required": PYTHON_REQUIREMENT,
+        "python_version": "3.11.0",
+        "schema_root": "embedded://agent-skills/schema-inventory",
+    });
+    compatibility
+        .as_object_mut()
+        .ok_or_else(|| invalid_error("doctor-report compatibility projection is invalid"))?
+        .remove("fingerprint");
+    let compatibility_fingerprint = canonical_sha256(&compatibility)?;
+    compatibility
+        .as_object_mut()
+        .ok_or_else(|| invalid_error("doctor-report compatibility projection is invalid"))?
+        .insert(
+            "fingerprint".to_owned(),
+            Value::String(compatibility_fingerprint),
+        );
+    validate_doctor_report_v1(&compatibility)
+}
+
+fn count_check_statuses(checks: &[Value]) -> Value {
+    let mut counts = serde_json::Map::new();
+    for status in ["passed", "failed", "skipped", "warning"] {
+        let count = checks
+            .iter()
+            .filter(|check| check.get("status").and_then(Value::as_str) == Some(status))
+            .count();
+        counts.insert(status.to_owned(), json!(count));
+    }
+    Value::Object(counts)
 }
 
 fn exact_object<'a>(

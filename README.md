@@ -167,6 +167,8 @@ cargo run --locked -p agent-skills-rs -- \
   doctor-report /path/to/installed-root --schemas schemas \
   --python-version 3.11.0
 cargo run --locked -p agent-skills-rs -- \
+  doctor --target-root /path/to/installed-root
+cargo run --locked -p agent-skills-rs -- \
   lifecycle-uninstall /path/to/installed-root --platform all
 cargo run --locked -p agent-skills-rs -- \
   runtime-execute /path/to/workflow-plan.json \
@@ -256,15 +258,16 @@ closure, and permission profiles and per-Capability grants against rebuilt
 installed Manifest semantics. Persistent rollback points are now checked
 read-only as complete snapshots, including their own Lock pair, package,
 Skill, AGENTS, external-state, Activation, semantic, and snapshot-digest
-anchors. The native lane can now assemble and validate a complete Doctor
-Report v1 through `doctor-report`. Because v1 freezes the hosting Python
-runtime, this compatibility command requires the host to attest
-`--python-version`; it never discovers or executes an interpreter and does not
-claim a no-Python production cutover. Mutating lifecycle transactions remain
-on the Python path. As their first native prerequisite, `agent-lifecycle` now
-exposes an identity-bound RAII directory lock with atomic exclusion, safe
-missing-target creation, crash-residue visibility, and identity-checked
-cleanup; it is not yet wired into production install or upgrade commands.
+anchors. The compatibility-only `doctor-report` command still emits Doctor
+Report v1 with an explicit `--python-version` host attestation. The public
+`doctor` command now emits runtime-neutral Doctor Report v2 instead: the Rust
+binary embeds its build-time Schema inventory and requires neither Python, a
+source checkout, a network connection, nor a caller-supplied Schema path.
+Fresh install and uninstall already use guarded native transactions, while
+native upgrade and rollback remain non-default until their separate public
+cutover gate completes. `agent-lifecycle` uses an identity-bound RAII
+directory lock with atomic exclusion, safe missing-target creation,
+crash-residue visibility, and identity-checked cleanup.
 The companion `LifecycleWorkspace` now creates a unique POSIX mode-`0700`
 stage/backup pair under that lock, holds both directory capabilities, exposes
 them for later native staging, removes symlink-safe temporary trees, and can
@@ -442,8 +445,8 @@ holds directory capabilities and opens contract files without following
 symlinks; unlike the explicit lock API, it does not repair, install, upgrade,
 roll back, uninstall, or otherwise write the target. Failed projected checks
 keep canonical JSON on
-stdout and return exit status 2. Core also does not create commits, change
-staging, switch the production CLI, or make installation changes.
+stdout and return exit status 2. Doctor does not create commits, change
+staging, or make installation changes.
 Activation and installed-package tree mode parity are currently POSIX
 contracts; Windows-native Doctor still verifies the Lock shape, paths,
 no-follow traversal, and content hashes but does not interpret POSIX mode

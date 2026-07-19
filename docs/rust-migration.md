@@ -107,10 +107,12 @@ The repository contains:
   Persistent rollback points are validated as complete read-only snapshots:
   their own Lock pair, packages, Skills, AGENTS composition, external state,
   optional Activation ownership, semantic closure, and full tree digest must
-  agree. It can now wrap the projection in a validated Doctor Report v1. Since
-  v1 records its Python host, `doctor-report` requires an explicit
-  `--python-version` host attestation and never discovers or executes an
-  interpreter. The crate also exposes the first mutating-lifecycle prerequisite:
+  agree. The compatibility-only `doctor-report` command still emits validated
+  Doctor Report v1 with an explicit `--python-version` host attestation. The
+  public `doctor` command emits runtime-neutral Doctor Report v2 from the same
+  native checks and an exact build-time embedded Schema inventory, so it does
+  not require Python, a source checkout, network access, or an external Schema
+  directory. The crate also exposes the first mutating-lifecycle prerequisite:
   an identity-bound RAII directory lock with atomic exclusion, capability-safe
   missing-target creation, visible crash residue, and identity-checked cleanup.
   A `LifecycleWorkspace` now adds unique POSIX mode-`0700` stage/backup
@@ -321,12 +323,12 @@ Skill/AGENTS/Binding/permission integrity is now included in that native
 projection and covered by healthy-install, cross-Lock, semantic-forgery, and
 content-tamper differential cases. Rollback-point validation is also projected
 with healthy internal/external snapshots and contract, content, symlink, and
-snapshot-digest tamper cases. The companion `doctor-report` command now
-assembles the complete v1 artifact, recomputes summary/status/fingerprint, and
-validates its cross-field invariants. Its required `--python-version` is
-supplied by the compatibility host rather than inferred or executed by Rust,
-so this closes report-emission parity without claiming the production CLI is
-Python-free. The next upgrade slice now validates Upgrade Conformance Evidence
+snapshot-digest tamper cases. The companion compatibility command
+`doctor-report` assembles the complete v1 artifact and retains exact Python
+differential coverage. The public `doctor` route now assembles and validates
+Doctor Report v2, removes the Python-host field, identifies its generic
+implementation, and compares the installed Lock against the Schema inventory
+embedded in the release binary. The next upgrade slice now validates Upgrade Conformance Evidence
 v1 and Upgrade Plan v1 natively. It rejects unknown fields, unstable command,
 selection, migration, or step ordering, stale attestations, malformed
 permission approvals, invalid external-handler/rollback identities, and

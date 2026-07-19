@@ -1050,6 +1050,21 @@ mod tests {
             std::fs::read_to_string(target.join("AGENTS.md")).expect("read AGENTS"),
             bundle.instructions()
         );
+        let doctor = crate::inspect_doctor_report_v2(&target)
+            .expect("diagnose native install without external runtime");
+        assert_eq!(doctor["schema_version"], "2.0");
+        assert_eq!(doctor["status"], "passed");
+        let mut inconsistent_doctor = doctor;
+        inconsistent_doctor["environment"]["schema_inventory"]["content_sha256"] =
+            Value::String("0".repeat(64));
+        inconsistent_doctor
+            .as_object_mut()
+            .expect("Doctor report object")
+            .remove("fingerprint");
+        inconsistent_doctor["fingerprint"] = Value::String(
+            canonical_sha256(&inconsistent_doctor).expect("hash inconsistent Doctor report"),
+        );
+        assert!(crate::doctor_report::validate_doctor_report_v2(&inconsistent_doctor).is_err());
         assert!(
             std::fs::read_dir(&target)
                 .expect("read target")
