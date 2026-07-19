@@ -19,6 +19,7 @@ const SYSTEM_SKILLS_DIRECTORY: &str = ".system";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ExternalStageSnapshot {
     activation: Option<Vec<u8>>,
+    source_activation: Option<Vec<u8>>,
     system_skills: Option<SystemTreeSnapshot>,
 }
 
@@ -67,6 +68,30 @@ enum EntryKind {
 
 pub(super) fn stage(target: &Dir, stage: &Dir) -> Result<ExternalStageSnapshot, LifecycleError> {
     let activation = inspect_activation(target)?;
+    stage_with_activation(target, stage, activation.clone(), activation)
+}
+
+pub(super) fn stage_for_rollback(
+    target: &Dir,
+    rollback_root: &Dir,
+    stage: &Dir,
+) -> Result<ExternalStageSnapshot, LifecycleError> {
+    let snapshot = stage_with_activation(
+        target,
+        stage,
+        inspect_rollback_activation(rollback_root)?,
+        inspect_activation(target)?,
+    )?;
+    verify_rollback_source(rollback_root, &snapshot)?;
+    Ok(snapshot)
+}
+
+fn stage_with_activation(
+    target: &Dir,
+    stage: &Dir,
+    activation: Option<Vec<u8>>,
+    source_activation: Option<Vec<u8>>,
+) -> Result<ExternalStageSnapshot, LifecycleError> {
     let system_skills = inspect_system_skills(target)?;
     if let Some(bytes) = activation.as_deref() {
         let managed = open_child_directory(
@@ -88,6 +113,7 @@ pub(super) fn stage(target: &Dir, stage: &Dir) -> Result<ExternalStageSnapshot, 
     }
     let snapshot = ExternalStageSnapshot {
         activation,
+        source_activation,
         system_skills,
     };
     verify(target, stage, &snapshot)?;
@@ -99,13 +125,41 @@ pub(super) fn verify(
     stage: &Dir,
     expected: &ExternalStageSnapshot,
 ) -> Result<(), LifecycleError> {
-    if inspect_activation(target)? != expected.activation {
+    if inspect_activation(target)? != expected.source_activation {
         return invalid("target Activation state changed after staging");
     }
     if inspect_system_skills(target)? != expected.system_skills {
         return invalid("target .system Skills changed after staging");
     }
     verify_staged(stage, expected)
+}
+
+fn inspect_rollback_activation(root: &Dir) -> Result<Option<Vec<u8>>, LifecycleError> {
+    match root.symlink_metadata(EXTERNAL_ACTIVATION_LOCK) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            invalid("rollback Activation Lock is missing or unsafe")
+        }
+        Ok(_) => read_single_link_file(
+            root,
+            OsStr::new(EXTERNAL_ACTIVATION_LOCK),
+            Some(MANAGED_FILE_MODE),
+            Some(MAX_CONTRACT_JSON_BYTES),
+            "rollback Activation Lock",
+        )
+        .map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) fn verify_rollback_source(
+    root: &Dir,
+    expected: &ExternalStageSnapshot,
+) -> Result<(), LifecycleError> {
+    if inspect_rollback_activation(root)? != expected.activation {
+        return invalid("rollback Activation Lock changed while staging");
+    }
+    Ok(())
 }
 
 pub(super) fn verify_staged(
@@ -154,12 +208,33 @@ pub(super) fn verify_published_after_handler(
     if matches!(
         activation,
         PublishedActivation::Preserved | PublishedActivation::Managed
-    ) {
+    ) && (activation == PublishedActivation::Managed
+        || expected.activation == expected.source_activation)
+    {
         let status = check_activation(target)?;
         if (expected.activation.is_some() || activation == PublishedActivation::Managed)
             && status.get("managed").and_then(serde_json::Value::as_bool) != Some(true)
         {
             return invalid("published Activation Lock is missing after handler execution");
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn verify_published_rollback(
+    target: &Dir,
+    expected: &ExternalStageSnapshot,
+) -> Result<(), LifecycleError> {
+    if inspect_staged_activation(target)? != expected.activation {
+        return invalid("published Activation Lock differs from rollback state");
+    }
+    if inspect_staged_system_skills(target)? != expected.system_skills {
+        return invalid("published .system Skills differ from preserved state");
+    }
+    if expected.activation.is_some() {
+        let status = check_activation(target)?;
+        if status.get("managed").and_then(serde_json::Value::as_bool) != Some(true) {
+            return invalid("published Activation Lock is missing after rollback");
         }
     }
     Ok(())

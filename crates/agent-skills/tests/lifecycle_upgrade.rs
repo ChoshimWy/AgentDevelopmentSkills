@@ -185,6 +185,62 @@ fn prepare_changed_upgrade(root: &TestRoot) -> ChangedUpgradeFixture {
     }
 }
 
+fn assert_cli_rollback_round_trip(
+    binary: &Path,
+    target: &Path,
+    current_lock: &Value,
+    candidate_lock: &Value,
+) {
+    let point =
+        load_json(target.join(".agent-skills/rollback-point/rollback-point.json")).expect("point");
+    let rejected = Command::new(binary)
+        .arg("lifecycle-rollback")
+        .arg(target)
+        .arg("--approve-current-lock")
+        .arg("0".repeat(64))
+        .arg("--approve-rollback-point")
+        .arg(point["fingerprint"].as_str().expect("point fingerprint"))
+        .output()
+        .expect("reject stale rollback approval");
+    assert!(!rejected.status.success());
+    assert_eq!(
+        load_json(target.join(".agent-skills/agent-skills.lock"))
+            .expect("candidate survives rejection"),
+        *candidate_lock
+    );
+
+    let rollback = Command::new(binary)
+        .arg("lifecycle-rollback")
+        .arg(target)
+        .arg("--approve-current-lock")
+        .arg(
+            candidate_lock["fingerprint"]
+                .as_str()
+                .expect("candidate Lock"),
+        )
+        .arg("--approve-rollback-point")
+        .arg(point["fingerprint"].as_str().expect("point fingerprint"))
+        .output()
+        .expect("execute native rollback");
+    assert!(
+        rollback.status.success(),
+        "rollback failed: {}",
+        String::from_utf8_lossy(&rollback.stderr)
+    );
+    let rollback: Value = serde_json::from_slice(&rollback.stdout).expect("rollback result");
+    assert_eq!(rollback["status"], "rolled-back");
+    assert_eq!(rollback["restored_lock_hash"], current_lock["fingerprint"]);
+    assert_eq!(
+        load_json(target.join(".agent-skills/agent-skills.lock")).expect("restored Lock"),
+        *current_lock
+    );
+    assert_eq!(
+        rollback["rollback_point"]["package_lock_hash"],
+        candidate_lock["fingerprint"]
+    );
+    assert!(!target.join(".agent-skills-lifecycle.lock").exists());
+}
+
 #[test]
 fn lifecycle_upgrade_cli_requires_saved_plan_and_exact_fingerprint() {
     let root = TestRoot::new();
@@ -371,4 +427,6 @@ fn lifecycle_upgrade_cli_applies_changed_partial_uninstall_and_rejects_drift() {
             .is_file()
     );
     assert!(!target.join(".agent-skills-lifecycle.lock").exists());
+
+    assert_cli_rollback_round_trip(&binary, &target, &current_lock, &candidate_lock);
 }

@@ -20,6 +20,10 @@ const ROLLBACK_POINT_DIRECTORY: &str = "rollback-point";
 const EXTERNAL_ACTIVATION_LOCK: &str = "activation-lock.json";
 const EXTERNAL_FILES_DIRECTORY: &str = "external-files";
 const EXTERNAL_STATE_FILE: &str = "external-state.json";
+const MAX_ROLLBACK_DEPTH: usize = 128;
+const MAX_ROLLBACK_ENTRIES: usize = 100_000;
+const MAX_ROLLBACK_PATH_BYTES: usize = 4_096;
+const MAX_ROLLBACK_RETAINED_BYTES: usize = super::MAX_CONTRACT_JSON_BYTES;
 const MANAGED_ROOTS: [&str; 4] = [
     ".agent-skills",
     ".agent-skills-lifecycle.lock",
@@ -33,7 +37,67 @@ struct ExternalState {
     fingerprint: String,
 }
 
+pub(super) struct PersistentRollbackPoint {
+    external_paths: Vec<String>,
+    point: Value,
+    root: Dir,
+}
+
+impl PersistentRollbackPoint {
+    pub(super) fn external_paths(&self) -> &[String] {
+        &self.external_paths
+    }
+
+    pub(super) fn point(&self) -> &Value {
+        &self.point
+    }
+
+    pub(super) fn root(&self) -> &Dir {
+        &self.root
+    }
+}
+
 static RESTORE_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
+
+pub(super) fn open_persistent_rollback_point(
+    target: &Dir,
+) -> Result<PersistentRollbackPoint, LifecycleError> {
+    let managed = open_child_directory(
+        target,
+        ".agent-skills",
+        Some(MANAGED_DIRECTORY_MODE),
+        "managed metadata directory",
+    )?;
+    let root = open_child_directory(
+        &managed,
+        ROLLBACK_POINT_DIRECTORY,
+        Some(MANAGED_DIRECTORY_MODE),
+        "rollback point directory",
+    )?;
+    validate_rollback_point_root(&root)?;
+    let point = load_json_file(
+        &root,
+        "rollback-point.json",
+        MANAGED_FILE_MODE,
+        "rollback point contract",
+    )?;
+    let external = validate_external_state(&root)?;
+    let external_paths = external
+        .entries
+        .iter()
+        .map(|entry| value_path(entry, "external lifecycle file").map(str::to_owned))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PersistentRollbackPoint {
+        external_paths,
+        point,
+        root,
+    })
+}
+
+pub(super) fn verify_external_target_state(root: &Dir, target: &Dir) -> Result<(), LifecycleError> {
+    validate_rollback_point_root(root)?;
+    validate_external_target_state(target, &validate_external_state(root)?)
+}
 
 #[allow(clippy::too_many_lines)]
 pub(super) fn check_rollback_point(target: &Dir) -> Result<Value, LifecycleError> {
@@ -69,6 +133,7 @@ pub(super) fn check_rollback_point(target: &Dir) -> Result<Value, LifecycleError
 pub(super) fn validate_rollback_point_root(root: &Dir) -> Result<Value, LifecycleError> {
     let root_identity = root.dir_metadata()?;
     validate_root_entries(root)?;
+    snapshot_identity(root)?;
 
     for name in [
         "AGENTS.md",
@@ -385,6 +450,35 @@ pub(super) fn restore_external_state(
     quarantine: &Dir,
     quarantine_path: &Path,
 ) -> Result<(), LifecycleError> {
+    restore_external_state_with(
+        root,
+        target,
+        target_path,
+        quarantine,
+        quarantine_path,
+        |_, _| Ok(()),
+    )
+}
+
+pub(super) fn restore_external_state_with_hook(
+    root: &Dir,
+    target: &Dir,
+    target_path: &Path,
+    quarantine: &Dir,
+    quarantine_path: &Path,
+    hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+) -> Result<(), LifecycleError> {
+    restore_external_state_with(root, target, target_path, quarantine, quarantine_path, hook)
+}
+
+fn restore_external_state_with(
+    root: &Dir,
+    target: &Dir,
+    target_path: &Path,
+    quarantine: &Dir,
+    quarantine_path: &Path,
+    mut hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+) -> Result<(), LifecycleError> {
     let state = validate_external_state(root)?;
     let files_root = open_child_directory(
         root,
@@ -401,6 +495,7 @@ pub(super) fn restore_external_state(
         let expected_mode = mode(entry.get("mode"))
             .ok_or_else(|| invalid_error("rollback point external directory mode is invalid"))?;
         ensure_target_directory(target, relative, expected_mode, true)?;
+        hook(relative, "directory-prepared")?;
     }
 
     for entry in &state.entries {
@@ -444,6 +539,7 @@ pub(super) fn restore_external_state(
             }
             _ => return invalid("rollback point external state entry is invalid"),
         }
+        hook(relative, "entry-restored")?;
     }
 
     for entry in state.directories.iter().rev() {
@@ -466,6 +562,7 @@ pub(super) fn restore_external_state(
             )?,
             _ => return invalid("rollback point external directory entry is invalid"),
         }
+        hook(relative, "directory-finalized")?;
     }
 
     validate_external_target_state(target, &state)
@@ -1430,11 +1527,13 @@ struct SnapshotFrame {
 }
 
 impl SnapshotFrame {
-    fn open(directory: Dir, prefix: String) -> Result<Self, LifecycleError> {
-        let mut names = directory
-            .entries()?
-            .map(|entry| entry.map(|entry| entry.file_name()))
-            .collect::<Result<Vec<_>, _>>()?;
+    fn open(directory: Dir, prefix: String, entries: &mut usize) -> Result<Self, LifecycleError> {
+        let mut names = Vec::new();
+        for entry in directory.entries()? {
+            let entry = entry?;
+            reserve_rollback_entry(entries)?;
+            names.push(entry.file_name());
+        }
         names.sort();
         Ok(Self {
             directory,
@@ -1462,7 +1561,13 @@ fn snapshot_tree(root: &Dir) -> Result<TreeSnapshot, LifecycleError> {
         directories: Vec::new(),
         files: Vec::new(),
     };
-    let mut frames = vec![SnapshotFrame::open(root.try_clone()?, String::new())?];
+    let mut entry_count = 0_usize;
+    let mut retained_bytes = 0_usize;
+    let mut frames = vec![SnapshotFrame::open(
+        root.try_clone()?,
+        String::new(),
+        &mut entry_count,
+    )?];
     while let Some(frame) = frames.last_mut() {
         if frame.next == frame.names.len() {
             frames.pop();
@@ -1478,6 +1583,8 @@ fn snapshot_tree(root: &Dir) -> Result<TreeSnapshot, LifecycleError> {
         } else {
             format!("{}/{text}", frame.prefix)
         };
+        validate_rollback_snapshot_path(&relative)?;
+        reserve_rollback_bytes(&mut retained_bytes, relative.len())?;
         let metadata = frame.directory.symlink_metadata(&name)?;
         if metadata.file_type().is_symlink() {
             return invalid(format!(
@@ -1495,13 +1602,21 @@ fn snapshot_tree(root: &Dir) -> Result<TreeSnapshot, LifecycleError> {
                 Some(mode),
                 "rollback point snapshot directory",
             )?;
-            frames.push(SnapshotFrame::open(child, relative)?);
+            frames.push(SnapshotFrame::open(child, relative, &mut entry_count)?);
         } else if metadata.is_file() {
             if metadata.nlink() != 1 {
                 return invalid(format!(
                     "rollback point file has an unsafe hard-link alias: {relative}"
                 ));
             }
+            reserve_rollback_bytes(
+                &mut retained_bytes,
+                usize::try_from(metadata.len()).map_err(|_| {
+                    LifecycleError::Invalid(
+                        "rollback point file length does not fit this host".to_owned(),
+                    )
+                })?,
+            )?;
             let sha256 = packages::hash_child_file(
                 &frame.directory,
                 text,
@@ -1539,6 +1654,40 @@ fn snapshot_tree(root: &Dir) -> Result<TreeSnapshot, LifecycleError> {
             .cmp(&right.get("path").and_then(Value::as_str))
     });
     Ok(snapshot)
+}
+
+fn reserve_rollback_bytes(total: &mut usize, additional: usize) -> Result<(), LifecycleError> {
+    *total = total.checked_add(additional).ok_or_else(|| {
+        LifecycleError::Invalid("rollback point retained byte counter overflow".to_owned())
+    })?;
+    if *total > MAX_ROLLBACK_RETAINED_BYTES {
+        return invalid(format!(
+            "rollback point exceeds maximum retained content of {MAX_ROLLBACK_RETAINED_BYTES} bytes"
+        ));
+    }
+    Ok(())
+}
+
+fn reserve_rollback_entry(entries: &mut usize) -> Result<(), LifecycleError> {
+    *entries = entries.checked_add(1).ok_or_else(|| {
+        LifecycleError::Invalid("rollback point entry counter overflow".to_owned())
+    })?;
+    if *entries > MAX_ROLLBACK_ENTRIES {
+        return invalid(format!(
+            "rollback point exceeds maximum of {MAX_ROLLBACK_ENTRIES} entries"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rollback_snapshot_path(relative: &str) -> Result<(), LifecycleError> {
+    if relative.len() > MAX_ROLLBACK_PATH_BYTES {
+        return invalid("rollback point snapshot path exceeds the length limit");
+    }
+    if relative.split('/').count() > MAX_ROLLBACK_DEPTH {
+        return invalid("rollback point snapshot exceeds the depth limit");
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1740,4 +1889,53 @@ fn invalid_error(message: impl Into<String>) -> LifecycleError {
 
 fn invalid<T>(message: impl Into<String>) -> Result<T, LifecycleError> {
     Err(invalid_error(message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cap_std::ambient_authority;
+
+    #[test]
+    fn rollback_snapshot_limits_are_inclusive_and_overflow_safe() {
+        let mut entries = MAX_ROLLBACK_ENTRIES - 1;
+        reserve_rollback_entry(&mut entries).expect("exact entry limit");
+        assert!(reserve_rollback_entry(&mut entries).is_err());
+        let mut overflowed_entries = usize::MAX;
+        assert!(reserve_rollback_entry(&mut overflowed_entries).is_err());
+
+        let mut retained = MAX_ROLLBACK_RETAINED_BYTES - 1;
+        reserve_rollback_bytes(&mut retained, 1).expect("exact retained-byte limit");
+        assert!(reserve_rollback_bytes(&mut retained, 1).is_err());
+        let mut overflowed_bytes = usize::MAX;
+        assert!(reserve_rollback_bytes(&mut overflowed_bytes, 1).is_err());
+
+        validate_rollback_snapshot_path(&"x".repeat(MAX_ROLLBACK_PATH_BYTES))
+            .expect("exact path limit");
+        assert!(validate_rollback_snapshot_path(&"x".repeat(MAX_ROLLBACK_PATH_BYTES + 1)).is_err());
+        validate_rollback_snapshot_path(&vec!["x"; MAX_ROLLBACK_DEPTH].join("/"))
+            .expect("exact depth limit");
+        assert!(
+            validate_rollback_snapshot_path(&vec!["x"; MAX_ROLLBACK_DEPTH + 1].join("/")).is_err()
+        );
+    }
+
+    #[test]
+    fn rollback_snapshot_rejects_oversized_file_before_hashing() {
+        let temporary = tempfile::tempdir().expect("create rollback limit fixture");
+        let path = temporary.path().join("oversized");
+        let file = std::fs::File::create(&path).expect("create sparse rollback file");
+        file.set_len((MAX_ROLLBACK_RETAINED_BYTES + 1) as u64)
+            .expect("size sparse rollback file");
+        drop(file);
+        let root = Dir::open_ambient_dir(temporary.path(), ambient_authority())
+            .expect("open rollback limit fixture");
+
+        let error = snapshot_identity(&root).expect_err("oversized snapshot must fail");
+
+        assert!(
+            error.to_string().contains("maximum retained content"),
+            "{error}"
+        );
+    }
 }

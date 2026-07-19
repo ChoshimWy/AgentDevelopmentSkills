@@ -732,12 +732,22 @@ pub(super) fn hash_child_file(
 ) -> Result<String, LifecycleError> {
     let mut file = open_child_file(parent, name, mode, label)?;
     let opened = file.metadata()?;
+    if opened.len() > super::MAX_CONTRACT_JSON_BYTES as u64 {
+        return invalid(format!("{label} exceeds the size limit"));
+    }
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024].into_boxed_slice();
+    let mut total = 0_usize;
     loop {
         let count = file.read(&mut buffer)?;
         if count == 0 {
             break;
+        }
+        total = total
+            .checked_add(count)
+            .ok_or_else(|| LifecycleError::Invalid(format!("{label} size counter overflow")))?;
+        if total > super::MAX_CONTRACT_JSON_BYTES {
+            return invalid(format!("{label} exceeds the size limit"));
         }
         digest.update(&buffer[..count]);
     }

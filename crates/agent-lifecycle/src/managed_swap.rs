@@ -62,6 +62,7 @@ enum ExternalMutationState {
     InProgress,
     ActivationApplied,
     ActivationRemoved,
+    RollbackRestored,
 }
 
 /// A published managed installation whose previous roots remain recoverable.
@@ -76,6 +77,7 @@ pub struct PublishedInstall {
     external_mutation_started: bool,
     external_mutation_state: ExternalMutationState,
     plan: ValidatedInstallPlan,
+    restored_rollback_point: Option<String>,
     roots: Vec<RootMove>,
     workspace: Option<LifecycleWorkspace>,
 }
@@ -264,6 +266,7 @@ impl LifecycleWorkspace {
                 external_mutation_started: false,
                 external_mutation_state: ExternalMutationState::Preserved,
                 plan: plan.clone(),
+                restored_rollback_point: None,
                 roots,
                 workspace: Some(self),
             }),
@@ -1120,6 +1123,46 @@ impl PublishedInstall {
         self.apply_source_deactivation_with(|_, _| Ok(()))
     }
 
+    pub(crate) fn apply_persistent_rollback(
+        &mut self,
+        approved_point: &str,
+    ) -> Result<(), LifecycleError> {
+        self.apply_persistent_rollback_with(approved_point, |_, _| Ok(()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_persistent_rollback_with_test_hook(
+        &mut self,
+        approved_point: &str,
+        hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<(), LifecycleError> {
+        self.apply_persistent_rollback_with(approved_point, hook)
+    }
+
+    fn apply_persistent_rollback_with(
+        &mut self,
+        approved_point: &str,
+        hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<(), LifecycleError> {
+        if self.external_mutation_state != ExternalMutationState::Preserved {
+            return invalid("external mutation has already started");
+        }
+        {
+            let workspace = self.workspace()?;
+            if !workspace.requires_persistent_rollback_restore() {
+                return invalid("published install is not a persistent rollback transaction");
+            }
+            workspace.verify_published_install(&self.plan)?;
+        }
+        self.external_mutation_started = true;
+        self.external_mutation_state = ExternalMutationState::InProgress;
+        self.workspace()?
+            .restore_persistent_rollback_external_state_with_hook(approved_point, hook)?;
+        self.restored_rollback_point = Some(approved_point.to_owned());
+        self.external_mutation_state = ExternalMutationState::RollbackRestored;
+        Ok(())
+    }
+
     /// Run the trusted source-activation handler inside this transaction.
     ///
     /// Static assets and the shared Codex config are read only from the
@@ -1324,11 +1367,26 @@ impl PublishedInstall {
             return invalid("fresh source activation must complete before commit");
         }
         match self.external_mutation_state {
+            ExternalMutationState::Preserved
+                if workspace.requires_persistent_rollback_restore() =>
+            {
+                invalid("persistent rollback external restore must complete before commit")
+            }
             ExternalMutationState::Preserved => workspace.verify_published_install(plan),
             ExternalMutationState::ActivationApplied => workspace
                 .verify_published_after_handler(plan, external_stage::PublishedActivation::Managed),
             ExternalMutationState::ActivationRemoved => workspace
                 .verify_published_after_handler(plan, external_stage::PublishedActivation::Absent),
+            ExternalMutationState::RollbackRestored => {
+                workspace.verify_published_install(plan)?;
+                workspace.verify_persistent_rollback_result(
+                    self.restored_rollback_point.as_deref().ok_or_else(|| {
+                        LifecycleError::Invalid(
+                            "restored rollback point identity is missing".to_owned(),
+                        )
+                    })?,
+                )
+            }
             ExternalMutationState::InProgress => {
                 invalid("external handler did not complete successfully")
             }

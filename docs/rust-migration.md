@@ -369,8 +369,16 @@ exact current Lock as lineage. Dry-run emits or saves a canonical Plan; apply
 requires the saved Plan, its exact explicit fingerprint, and the complete
 permission approval set. The executor then reacquires the target lock,
 regenerates the complete Plan, and rejects any candidate or target drift before
-staging. Public upgrade/rollback execution remains behind the existing
-compatibility approval gate until differential and release gates are complete.
+staging. The non-default `lifecycle-rollback` command now consumes the
+persistent point without accepting caller-supplied paths or content: exact
+current-Lock and rollback-point fingerprints are checked before workspace
+creation, the complete prior managed projection is rebuilt from the validated
+snapshot, the current `.system` tree is preserved, and frozen external
+preimages are restored while `PublishedInstall` can still recover both sides.
+The displaced current state becomes the next validated rollback point, making
+the transaction reversible again. Public upgrade/rollback execution remains
+behind the existing compatibility approval gate until differential and release
+gates are complete.
 Doctor,
 uninstall, and source activation already have native compatibility commands
 with differential, tamper, concurrency, rollback, and independent-review

@@ -35,6 +35,7 @@ mod source_bundle;
 mod source_install;
 mod source_lifecycle;
 mod source_packages;
+mod source_rollback;
 mod staged_install;
 mod staged_tree;
 mod transaction_lock;
@@ -57,6 +58,7 @@ pub use source_lifecycle::{
     upgrade_source_bundle,
 };
 pub use source_packages::{SourcePackageSet, snapshot_source_packages};
+pub use source_rollback::rollback_source_install;
 pub use staged_install::ValidatedInstallPlan;
 pub use transaction_lock::{LifecycleLock, normalize_lifecycle_target};
 pub use transaction_workspace::LifecycleWorkspace;

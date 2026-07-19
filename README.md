@@ -410,9 +410,14 @@ Plan in `--dry-run` mode, and requires both that saved Plan and its explicit
 `--approve-plan` fingerprint before execution. Apply reacquires the target
 lock, regenerates and compares the complete Plan, then delegates to the guarded
 executor; a concurrent target change therefore fails closed instead of
-silently rebasing. Public `upgrade` and rollback CLI routing remains on the
-existing approval-bound compatibility path until differential and release
-gates pass.
+silently rebasing. The non-default `lifecycle-rollback` command now requires
+the exact current Lock and persistent rollback-point fingerprints before it
+creates a workspace. It stages the validated prior projection, preserves the
+current `.system` tree, restores the frozen external preimages inside the same
+`PublishedInstall` recovery window, and persists the displaced current state
+as the next rollback point. Public `upgrade` and `rollback` CLI routing remains
+on the existing approval-bound compatibility path until differential and
+release gates pass.
 The installed native
 `agent-session` dispatch preserves
 the public `create`, `list`, `inspect`, `fingerprint`, `checkpoint`, and `gate`

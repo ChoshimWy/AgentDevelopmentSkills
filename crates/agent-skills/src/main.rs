@@ -15,7 +15,7 @@ use agent_lifecycle::{
     inspect_source_platform_options, inspect_source_upgrade, inspect_uninstall_plan,
     inspect_upgrade_planning_snapshot, install_source_bundle,
     install_source_bundle_with_activation, render_codex_config, resolve_source_install_selection,
-    snapshot_source_packages, upgrade_source_bundle,
+    rollback_source_install, snapshot_source_packages, upgrade_source_bundle,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_runtime::{
@@ -267,6 +267,14 @@ enum Command {
         approve_plan: Option<String>,
         #[arg(long = "approve")]
         approvals: Vec<String>,
+    },
+    /// Execute one exact-approval native persistent rollback transaction.
+    LifecycleRollback {
+        target_root: PathBuf,
+        #[arg(long)]
+        approve_current_lock: String,
+        #[arg(long)]
+        approve_rollback_point: String,
     },
     /// Emit the sorted automatic recipe capability closure for target platforms.
     RecipeCapabilities { targets: Vec<String> },
@@ -1115,6 +1123,18 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 }
                 print!("{}", String::from_utf8(canonical_json(&result)?)?);
             }
+        }
+        Command::LifecycleRollback {
+            target_root,
+            approve_current_lock,
+            approve_rollback_point,
+        } => {
+            let result = rollback_source_install(
+                target_root,
+                &approve_current_lock,
+                &approve_rollback_point,
+            )?;
+            print!("{}", String::from_utf8(canonical_json(&result)?)?);
         }
         Command::RecipeCapabilities { targets } => {
             let targets = targets.into_iter().collect::<BTreeSet<_>>();

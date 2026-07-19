@@ -731,7 +731,8 @@ fn invalid<T>(message: impl Into<String>) -> Result<T, LifecycleError> {
 mod tests {
     use super::*;
     use crate::{
-        compile_source_install_bundle, resolve_source_install_selection, snapshot_source_packages,
+        compile_source_install_bundle, resolve_source_install_selection, rollback_source_install,
+        snapshot_source_packages,
     };
     use agent_contracts::{canonical_json, canonical_sha256, load_json};
     use serde_json::json;
@@ -877,6 +878,150 @@ mod tests {
         if rollback.exists() {
             std::fs::remove_dir_all(rollback).expect("remove prior optional rollback point");
         }
+    }
+
+    fn assert_no_lifecycle_recovery_residue(target: &Path) {
+        assert!(
+            std::fs::read_dir(target)
+                .expect("read lifecycle target")
+                .all(|entry| {
+                    let name = entry.expect("target entry").file_name();
+                    let name = name.to_string_lossy();
+                    name != LIFECYCLE_LOCK_DIRECTORY
+                        && !name.starts_with(INSTALL_STAGE_PREFIX)
+                        && !name.starts_with(INSTALL_BACKUP_PREFIX)
+                        && !name.starts_with(UNINSTALL_BACKUP_PREFIX)
+                }),
+            "lifecycle recovery residue must be removed"
+        );
+    }
+
+    fn assert_native_rollback_round_trip(
+        target: &Path,
+        current: &SourceInstallBundle,
+        candidate: &SourceInstallBundle,
+    ) {
+        let point = load_json(target.join(".agent-skills/rollback-point/rollback-point.json"))
+            .expect("load persistent rollback point");
+        rollback_source_install(target, "0", point["fingerprint"].as_str().expect("point"))
+            .expect_err("stale current Lock approval must fail");
+        rollback_source_install(
+            target,
+            candidate.package_lock()["fingerprint"]
+                .as_str()
+                .expect("candidate Lock"),
+            "0",
+        )
+        .expect_err("stale rollback point approval must fail");
+        let snapshot_agents = target.join(".agent-skills/rollback-point/AGENTS.md");
+        let snapshot_agents_bytes =
+            std::fs::read(&snapshot_agents).expect("read rollback AGENTS snapshot");
+        let mut tampered_agents = snapshot_agents_bytes.clone();
+        tampered_agents.extend_from_slice(b"tampered\n");
+        std::fs::write(&snapshot_agents, tampered_agents).expect("tamper rollback AGENTS snapshot");
+        rollback_source_install(
+            target,
+            candidate.package_lock()["fingerprint"]
+                .as_str()
+                .expect("candidate Lock"),
+            point["fingerprint"].as_str().expect("point"),
+        )
+        .expect_err("tampered rollback point must fail before staging");
+        assert_eq!(
+            load_json(target.join(".agent-skills/agent-skills.lock"))
+                .expect("candidate Lock survives tamper"),
+            *candidate.package_lock()
+        );
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        std::fs::write(&snapshot_agents, snapshot_agents_bytes)
+            .expect("restore rollback AGENTS snapshot");
+        let lock = LifecycleLock::acquire_existing(target).expect("lock rollback target");
+        let target_directory = lock.target_directory().expect("open rollback target");
+        let persistent = crate::rollback::open_persistent_rollback_point(&target_directory)
+            .expect("open rollback point");
+        let mut workspace = LifecycleWorkspace::from_lock(lock).expect("begin rollback workspace");
+        let (plan, _) = workspace
+            .stage_persistent_rollback_install(&persistent)
+            .expect("stage rollback projection");
+        let published = workspace
+            .publish_staged_install(&plan)
+            .expect("publish rollback projection");
+        let error = published
+            .commit(&plan)
+            .expect_err("rollback cannot commit before external restore");
+        assert!(
+            error
+                .to_string()
+                .contains("external restore must complete before commit")
+        );
+        assert_eq!(
+            load_json(target.join(".agent-skills/agent-skills.lock"))
+                .expect("candidate Lock survives incomplete rollback"),
+            *candidate.package_lock()
+        );
+        let rolled_back = rollback_source_install(
+            target,
+            candidate.package_lock()["fingerprint"]
+                .as_str()
+                .expect("candidate Lock"),
+            point["fingerprint"].as_str().expect("point"),
+        )
+        .expect("rollback partial upgrade");
+        assert_eq!(rolled_back["status"], "rolled-back");
+        assert_eq!(
+            rolled_back["from_lock_hash"],
+            candidate.package_lock()["fingerprint"]
+        );
+        assert_eq!(
+            rolled_back["restored_lock_hash"],
+            current.package_lock()["fingerprint"]
+        );
+        assert_eq!(
+            load_json(target.join(".agent-skills/agent-skills.lock")).expect("load restored Lock"),
+            *current.package_lock()
+        );
+        assert_eq!(
+            rolled_back["rollback_point"]["package_lock_hash"],
+            candidate.package_lock()["fingerprint"]
+        );
+        let reversed = rollback_source_install(
+            target,
+            current.package_lock()["fingerprint"]
+                .as_str()
+                .expect("restored Lock"),
+            rolled_back["rollback_point"]["fingerprint"]
+                .as_str()
+                .expect("reverse rollback point"),
+        )
+        .expect("apply reverse rollback point");
+        assert_eq!(reversed["status"], "rolled-back");
+        assert_eq!(
+            load_json(target.join(".agent-skills/agent-skills.lock"))
+                .expect("load reverse-restored Lock"),
+            *candidate.package_lock()
+        );
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+    }
+
+    fn publish_persistent_rollback(target: &Path) -> (crate::PublishedInstall, String) {
+        let lock = LifecycleLock::acquire_existing(target).expect("lock rollback target");
+        let target_directory = lock.target_directory().expect("open rollback target");
+        let persistent = crate::rollback::open_persistent_rollback_point(&target_directory)
+            .expect("open persistent rollback point");
+        let fingerprint = persistent
+            .point()
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            .expect("rollback point fingerprint")
+            .to_owned();
+        let mut workspace = LifecycleWorkspace::from_lock(lock).expect("begin rollback workspace");
+        let (plan, _) = workspace
+            .stage_persistent_rollback_install(&persistent)
+            .expect("stage persistent rollback");
+        let published = workspace
+            .publish_staged_install(&plan)
+            .expect("publish rollback managed projection");
+        (published, fingerprint)
     }
 
     #[test]
@@ -1110,6 +1255,8 @@ mod tests {
                 .is_file()
         );
         assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+
+        assert_native_rollback_round_trip(&target, &current, &candidate);
     }
 
     #[test]
@@ -1293,9 +1440,50 @@ mod tests {
                 .join(".agent-skills/rollback-point/rollback-point.json")
                 .is_file()
         );
+        let migrated_activation = std::fs::read(target.join(".agent-skills/activation-lock.json"))
+            .expect("read migrated Activation Lock");
+        let migrated_config =
+            std::fs::read(target.join("config.toml")).expect("read migrated config");
+        let (mut interrupted, interrupted_point) = publish_persistent_rollback(&target);
+        let mut restored_entry = false;
+        let error = interrupted
+            .apply_persistent_rollback_with_test_hook(&interrupted_point, |_, phase| {
+                if phase == "entry-restored" && !restored_entry {
+                    restored_entry = true;
+                    invalid("injected Activation migration rollback failure")
+                } else {
+                    Ok(())
+                }
+            })
+            .expect_err("partial Activation migration rollback must fail");
+        assert!(restored_entry);
+        assert!(
+            error
+                .to_string()
+                .contains("injected Activation migration rollback failure")
+        );
+        interrupted
+            .rollback()
+            .expect("recover interrupted Activation migration rollback");
+        assert_eq!(
+            std::fs::read(target.join(".agent-skills/activation-lock.json"))
+                .expect("read recovered migrated Activation Lock"),
+            migrated_activation
+        );
+        assert_eq!(
+            std::fs::read(target.join("bin/agent-session"))
+                .expect("read recovered migrated launcher"),
+            launcher
+        );
+        assert_eq!(
+            std::fs::read(target.join("config.toml")).expect("read recovered migrated config"),
+            migrated_config
+        );
+        assert_no_lifecycle_recovery_residue(&target);
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn deactivation_upgrade_removes_only_activation_owned_state_and_persists_rollback() {
         let fixture = Fixture::new();
         let target = fixture.target();
@@ -1304,6 +1492,12 @@ mod tests {
         install_source_bundle_with_activation(&current, &current_packages, &target, launcher)
             .expect("install activated Apple fixture");
         remove_optional_rollback_point(&target);
+        std::fs::create_dir(target.join("skills/.system")).expect("create local system Skills");
+        std::fs::write(
+            target.join("skills/.system/local.txt"),
+            b"local system skill\n",
+        )
+        .expect("write local system Skill");
         let installed = load_json(target.join(".agent-skills/install-lock.json"))
             .expect("load installed selection");
         let disciplines = selected_strings(&installed, "selected_disciplines");
@@ -1372,6 +1566,76 @@ mod tests {
             load_json(target.join(".agent-skills/agent-skills.lock"))
                 .expect("load deactivated package Lock"),
             *candidate.package_lock()
+        );
+
+        let deactivated_config =
+            std::fs::read(target.join("config.toml")).expect("read deactivated config");
+        let system_skill =
+            std::fs::read(target.join("skills/.system/local.txt")).expect("read system Skill");
+        let (mut interrupted, interrupted_point) = publish_persistent_rollback(&target);
+        let mut restored_entry = false;
+        let error = interrupted
+            .apply_persistent_rollback_with_test_hook(&interrupted_point, |_, phase| {
+                if phase == "entry-restored" && !restored_entry {
+                    restored_entry = true;
+                    invalid("injected forward external restore failure")
+                } else {
+                    Ok(())
+                }
+            })
+            .expect_err("partial external restore must fail");
+        assert!(restored_entry);
+        assert!(
+            error
+                .to_string()
+                .contains("injected forward external restore failure")
+        );
+        interrupted
+            .rollback()
+            .expect("recover interrupted persistent rollback");
+        assert_eq!(
+            load_json(target.join(".agent-skills/agent-skills.lock"))
+                .expect("load recovered deactivated Lock"),
+            *candidate.package_lock()
+        );
+        assert!(!target.join(".agent-skills/activation-lock.json").exists());
+        assert!(!target.join("bin/agent-session").exists());
+        assert!(!target.join("bin/agent-skills").exists());
+        assert_eq!(
+            std::fs::read(target.join("config.toml")).expect("read recovered config"),
+            deactivated_config
+        );
+        assert_eq!(
+            std::fs::read(target.join("skills/.system/local.txt"))
+                .expect("read recovered system Skill"),
+            system_skill
+        );
+        assert_no_lifecycle_recovery_residue(&target);
+
+        let point = load_json(target.join(".agent-skills/rollback-point/rollback-point.json"))
+            .expect("load deactivation rollback point");
+        let rolled_back = rollback_source_install(
+            &target,
+            candidate.package_lock()["fingerprint"]
+                .as_str()
+                .expect("candidate Lock"),
+            point["fingerprint"].as_str().expect("rollback point"),
+        )
+        .expect("restore activated Apple projection");
+        assert_eq!(rolled_back["status"], "rolled-back");
+        assert_eq!(
+            load_json(target.join(".agent-skills/agent-skills.lock"))
+                .expect("load restored Apple Lock"),
+            *current.package_lock()
+        );
+        assert!(target.join(".agent-skills/activation-lock.json").is_file());
+        assert_eq!(
+            std::fs::read(target.join("bin/agent-session")).expect("restored session launcher"),
+            launcher
+        );
+        assert_eq!(
+            rolled_back["rollback_point"]["package_lock_hash"],
+            candidate.package_lock()["fingerprint"]
         );
     }
 

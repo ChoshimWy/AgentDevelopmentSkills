@@ -1,13 +1,16 @@
 use super::{
     INSTALL_BACKUP_PREFIX, INSTALL_STAGE_PREFIX, LifecycleError, LifecycleLock,
-    ValidatedInstallPlan, external_stage, open_child_directory, rollback_stage, same_object_cap,
-    source_activation, staged_install, staged_tree,
+    ValidatedInstallPlan, external_stage, load_json_file, open_child_directory, open_child_file,
+    rollback, rollback_stage, same_content_state_cap, same_object_cap, source_activation,
+    staged_install, staged_tree,
 };
+use agent_contracts::MAX_CONTRACT_JSON_BYTES;
 use cap_std::fs::Dir;
 use serde_json::Value;
 use std::collections::hash_map::RandomState;
 use std::ffi::OsStr;
 use std::hash::BuildHasher as _;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,6 +38,7 @@ pub struct LifecycleWorkspace {
     backup: WorkspaceEntry,
     contract_target: PathBuf,
     lock: Option<LifecycleLock>,
+    requires_persistent_rollback_restore: bool,
     stage: WorkspaceEntry,
     staged_external_state: Option<external_stage::ExternalStageSnapshot>,
     staged_install_identity: Option<StagedInstallIdentity>,
@@ -108,6 +112,7 @@ impl LifecycleWorkspace {
                 backup,
                 contract_target,
                 lock: Some(lock),
+                requires_persistent_rollback_restore: false,
                 stage,
                 staged_external_state: None,
                 staged_install_identity: None,
@@ -264,6 +269,124 @@ impl LifecycleWorkspace {
         external_stage::verify(&self.target_directory, self.stage.directory()?, &snapshot)?;
         self.staged_external_state = Some(snapshot);
         self.validate()
+    }
+
+    pub(super) fn stage_persistent_rollback_install(
+        &mut self,
+        persistent: &rollback::PersistentRollbackPoint,
+    ) -> Result<(ValidatedInstallPlan, Value), LifecycleError> {
+        self.validate()?;
+        if self.staged_install_identity.is_some()
+            || self.staged_external_state.is_some()
+            || self.staged_rollback_point.is_some()
+        {
+            return invalid("persistent rollback requires an empty lifecycle workspace");
+        }
+        rollback::validate_rollback_point_root(persistent.root())?;
+        let install_lock = load_json_file(
+            persistent.root(),
+            "install-lock.json",
+            super::MANAGED_FILE_MODE,
+            "rollback point Install Lock",
+        )?;
+        let package_lock = load_json_file(
+            persistent.root(),
+            super::PERSISTENT_PACKAGE_LOCK,
+            super::MANAGED_FILE_MODE,
+            "rollback point package Lockfile",
+        )?;
+        let plan = ValidatedInstallPlan::new(install_lock.clone(), package_lock)?;
+        let instructions = read_persistent_agents(persistent.root())?;
+        self.stage_install_layout(&plan, &instructions)?;
+
+        self.stage_persistent_packages(&plan, persistent.root(), &install_lock)?;
+        self.stage_persistent_skills(&plan, persistent.root(), &install_lock)?;
+        let external = external_stage::stage_for_rollback(
+            &self.target_directory,
+            persistent.root(),
+            self.stage.directory()?,
+        )?;
+        external_stage::verify(&self.target_directory, self.stage.directory()?, &external)?;
+        self.staged_external_state = Some(external);
+        self.requires_persistent_rollback_restore = true;
+        self.stage_rollback_point(&plan, persistent.external_paths())?;
+        rollback::validate_rollback_point_root(persistent.root())?;
+        external_stage::verify_rollback_source(
+            persistent.root(),
+            self.staged_external_state.as_ref().ok_or_else(|| {
+                LifecycleError::Invalid("rollback external snapshot is missing".to_owned())
+            })?,
+        )?;
+        if load_json_file(
+            persistent.root(),
+            "rollback-point.json",
+            super::MANAGED_FILE_MODE,
+            "rollback point contract",
+        )? != *persistent.point()
+        {
+            return invalid("persistent rollback point changed while staging");
+        }
+        let reverse = self
+            .staged_rollback_point
+            .as_ref()
+            .ok_or_else(|| LifecycleError::Invalid("reverse rollback point is missing".to_owned()))?
+            .point()
+            .clone();
+        self.verify_staged_install(&plan)?;
+        Ok((plan, reverse))
+    }
+
+    fn stage_persistent_packages(
+        &mut self,
+        plan: &ValidatedInstallPlan,
+        root: &Dir,
+        install_lock: &Value,
+    ) -> Result<(), LifecycleError> {
+        let packages = open_child_directory(
+            root,
+            "packages",
+            Some(super::MANAGED_DIRECTORY_MODE),
+            "rollback point packages",
+        )?;
+        for record in install_lock
+            .get("packages")
+            .and_then(Value::as_array)
+            .ok_or_else(|| LifecycleError::Invalid("rollback packages are invalid".to_owned()))?
+        {
+            let id = record.get("id").and_then(Value::as_str).ok_or_else(|| {
+                LifecycleError::Invalid("rollback package id is invalid".to_owned())
+            })?;
+            let package =
+                open_child_directory(&packages, id, None, "rollback point package source")?;
+            self.stage_plan_package(plan, id, &package)?;
+        }
+        Ok(())
+    }
+
+    fn stage_persistent_skills(
+        &mut self,
+        plan: &ValidatedInstallPlan,
+        root: &Dir,
+        install_lock: &Value,
+    ) -> Result<(), LifecycleError> {
+        let skills = open_child_directory(
+            root,
+            "skills",
+            Some(super::MANAGED_DIRECTORY_MODE),
+            "rollback point Skills",
+        )?;
+        for record in install_lock
+            .get("skills")
+            .and_then(Value::as_array)
+            .ok_or_else(|| LifecycleError::Invalid("rollback Skills are invalid".to_owned()))?
+        {
+            let name = record.get("name").and_then(Value::as_str).ok_or_else(|| {
+                LifecycleError::Invalid("rollback Skill name is invalid".to_owned())
+            })?;
+            let skill = open_child_directory(&skills, name, None, "rollback point Skill source")?;
+            self.stage_plan_skill(plan, name, &skill)?;
+        }
+        Ok(())
     }
 
     /// Snapshot the currently installed managed state as a staged rollback point.
@@ -669,6 +792,76 @@ impl LifecycleWorkspace {
         )
     }
 
+    pub(super) fn restore_persistent_rollback_external_state_with_hook(
+        &self,
+        approved_point: &str,
+        hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<(), LifecycleError> {
+        self.restore_persistent_rollback_external_state_with(approved_point, hook)
+    }
+
+    fn restore_persistent_rollback_external_state_with(
+        &self,
+        approved_point: &str,
+        hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        let persistent = rollback::open_persistent_rollback_point(self.backup_directory()?)?;
+        if persistent
+            .point()
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            != Some(approved_point)
+        {
+            return invalid("backup rollback point differs from the approved identity");
+        }
+        if persistent.external_paths() != self.rollback_external_paths {
+            return invalid("backup rollback external scope differs from the staged transaction");
+        }
+        self.require_rollback_external_paths(persistent.external_paths())?;
+        let quarantine = external_stage::create_directory(
+            self.stage.directory()?,
+            OsStr::new("rollback-forward-recovery"),
+            Some(0o700),
+            "rollback forward recovery quarantine",
+        )?;
+        rollback::restore_external_state_with_hook(
+            persistent.root(),
+            &self.target_directory,
+            self.target(),
+            &quarantine,
+            &self.stage_path().join("rollback-forward-recovery"),
+            hook,
+        )?;
+        rollback::verify_external_target_state(persistent.root(), &self.target_directory)?;
+        self.validate()
+    }
+
+    pub(super) fn verify_persistent_rollback_result(
+        &self,
+        approved_point: &str,
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        let persistent = rollback::open_persistent_rollback_point(self.backup_directory()?)?;
+        if persistent
+            .point()
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            != Some(approved_point)
+            || persistent.external_paths() != self.rollback_external_paths
+        {
+            return invalid("published rollback differs from the approved rollback point");
+        }
+        rollback::verify_external_target_state(persistent.root(), &self.target_directory)?;
+        let external = self.staged_external_state.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid(
+                "lifecycle workspace external state has not been staged".to_owned(),
+            )
+        })?;
+        external_stage::verify_published_rollback(&self.target_directory, external)?;
+        self.validate()
+    }
+
     /// Copy and verify one caller-supplied package tree record.
     ///
     /// The destination is derived from `record.id` under
@@ -905,6 +1098,10 @@ impl LifecycleWorkspace {
 
     pub(super) fn has_fresh_rollback_point(&self) -> bool {
         self.staged_rollback_point.is_some() && self.staged_rollback_point_is_fresh
+    }
+
+    pub(super) fn requires_persistent_rollback_restore(&self) -> bool {
+        self.requires_persistent_rollback_restore
     }
 
     pub(super) fn verify_fresh_recovery(&self) -> Result<(), LifecycleError> {
@@ -1196,6 +1393,42 @@ fn workspace_suffix(attempt: u64) -> String {
     let entropy =
         RandomState::new().hash_one((u64::from(std::process::id()), sequence, timestamp, attempt));
     format!("{entropy:016x}")
+}
+
+fn read_persistent_agents(root: &Dir) -> Result<Vec<u8>, LifecycleError> {
+    let mut agents = open_child_file(
+        root,
+        "AGENTS.md",
+        super::MANAGED_FILE_MODE,
+        "rollback point AGENTS.md",
+    )?;
+    let opened = agents.metadata()?;
+    if opened.len() > MAX_CONTRACT_JSON_BYTES as u64 {
+        return invalid("rollback point AGENTS.md exceeds the size limit");
+    }
+    let mut instructions = Vec::new();
+    std::io::Read::by_ref(&mut agents)
+        .take((MAX_CONTRACT_JSON_BYTES + 1) as u64)
+        .read_to_end(&mut instructions)?;
+    if instructions.len() > MAX_CONTRACT_JSON_BYTES {
+        return invalid("rollback point AGENTS.md exceeds the size limit");
+    }
+    let completed = agents.metadata()?;
+    let current = open_child_file(
+        root,
+        "AGENTS.md",
+        super::MANAGED_FILE_MODE,
+        "rollback point AGENTS.md",
+    )?
+    .metadata()?;
+    if !same_object_cap(&opened, &completed)
+        || !same_object_cap(&opened, &current)
+        || !same_content_state_cap(&opened, &completed)
+        || !same_content_state_cap(&opened, &current)
+    {
+        return invalid("rollback point AGENTS.md changed while staging");
+    }
+    Ok(instructions)
 }
 
 fn invalid<T>(message: impl Into<String>) -> Result<T, LifecycleError> {
