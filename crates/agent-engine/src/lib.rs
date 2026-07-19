@@ -7,7 +7,10 @@ pub use package_lock::{
     diff_package_locks, explain_package_lock, install_plan_identity_hash, resolve_package_lock,
     schema_inventory, validate_install_plan, validate_package_lock, validate_plan_package_lock,
 };
-pub use upgrade_contracts::{validate_upgrade_conformance_evidence, validate_upgrade_plan};
+pub use upgrade_contracts::{
+    validate_upgrade_conformance_evidence, validate_upgrade_plan,
+    validate_upgrade_source_qualification,
+};
 
 use agent_contracts::{ContractError, canonical_sha256};
 use agent_registry::{

@@ -7,6 +7,7 @@ use agent_engine::{
     DiscoveryEngine, compile_plan_with_package_lock, diff_package_locks, explain_package_lock,
     resolve_package_lock, resolve_policy, validate_compiled_plan, validate_package_lock,
     validate_plan_package_lock, validate_upgrade_conformance_evidence, validate_upgrade_plan,
+    validate_upgrade_source_qualification,
 };
 use agent_lifecycle::{
     LifecycleError, LifecycleWorkspace, compile_source_install_bundle,
@@ -354,6 +355,8 @@ enum Command {
     LockExplain { lockfile: PathBuf },
     /// Validate one approval-bound Upgrade Conformance Evidence v1 artifact.
     UpgradeEvidenceValidate { evidence: PathBuf },
+    /// Validate one immutable release-bound Upgrade Source Qualification v1 artifact.
+    UpgradeSourceQualificationValidate { qualification: PathBuf },
     /// Inspect an installed target and compile one approval-bound Upgrade Plan v1.
     UpgradePlanBuild {
         #[arg(long)]
@@ -1279,6 +1282,11 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         Command::UpgradeEvidenceValidate { evidence } => {
             let value = load_json(evidence)?;
             validate_upgrade_conformance_evidence(&value)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
+        }
+        Command::UpgradeSourceQualificationValidate { qualification } => {
+            let value = load_json(qualification)?;
+            validate_upgrade_source_qualification(&value)?;
             print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
         Command::UpgradePlanBuild {

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from agent_workflow.contracts import (
     validate,
     validate_migration_report,
     validate_upgrade_conformance_evidence,
+    validate_upgrade_source_qualification,
 )
 from agent_workflow.cli import (
     _partial_uninstall_external_context,
@@ -37,6 +39,7 @@ from agent_workflow.models import ContractError
 from agent_workflow.upgrade import (
     apply_upgrade,
     make_upgrade_conformance_evidence,
+    make_upgrade_source_qualification,
     plan_upgrade,
     prepare_upgrade_candidate,
     rollback_upgrade,
@@ -172,6 +175,81 @@ class UpgradeTests(unittest.TestCase):
         migration["fingerprint"] = sha256(migration)
         with self.assertRaisesRegex(ContractError, "step chain"):
             validate_migration_report(migration)
+
+    def test_source_qualification_binds_the_exact_release_archive(self) -> None:
+        evidence = _evidence(self.current_bundle.package_lock)
+        qualification = make_upgrade_source_qualification(
+            evidence,
+            source_revision="a" * 40,
+            source_artifact_sha256="b" * 64,
+            source_artifact_size=1024,
+            source_root="agent-development-skills-1.0.0",
+            source_materials_sha256="c" * 64,
+        )
+        validate_upgrade_source_qualification(qualification)
+        validate("upgrade-source-qualification", qualification)
+        self.assertNotIn("candidate_package_lock_hash", qualification)
+        self.assertEqual(
+            qualification["source"]["artifact_sha256"],
+            "b" * 64,
+        )
+
+        invalid = deepcopy(qualification)
+        invalid["source"]["artifact_size"] = True
+        invalid["attestation_key"] = sha256({
+            **{
+                key: value
+                for key, value in invalid.items()
+                if key not in {"attestation_key", "fingerprint"}
+            },
+            "command_results": [
+                {"command": item["command"], "exit_code": item["exit_code"]}
+                for item in invalid["command_results"]
+            ],
+        })
+        invalid["fingerprint"] = sha256({
+            key: value for key, value in invalid.items() if key != "fingerprint"
+        })
+        with self.assertRaisesRegex(ContractError, "source identity"):
+            validate_upgrade_source_qualification(invalid)
+
+        for unsafe_root in ("source.", "CON", "aux.txt", "a" * 129):
+            with self.subTest(unsafe_root=unsafe_root):
+                invalid = deepcopy(qualification)
+                invalid["source"]["root"] = unsafe_root
+                invalid["attestation_key"] = sha256({
+                    **{
+                        key: value
+                        for key, value in invalid.items()
+                        if key not in {"attestation_key", "fingerprint"}
+                    },
+                    "command_results": [
+                        {"command": item["command"], "exit_code": item["exit_code"]}
+                        for item in invalid["command_results"]
+                    ],
+                })
+                invalid["fingerprint"] = sha256({
+                    key: value
+                    for key, value in invalid.items()
+                    if key != "fingerprint"
+                })
+                with self.assertRaisesRegex(ContractError, "source identity"):
+                    validate_upgrade_source_qualification(invalid)
+
+    def test_source_qualification_schema_rejects_portable_root_aliases(self) -> None:
+        schema = load(ROOT / "schemas" / "upgrade-source-qualification-v1.schema.json")
+        root_schema = schema["properties"]["source"]["properties"]["root"]
+        reserved = root_schema["allOf"][0]["not"]["pattern"]
+        for unsafe_root in ("source.", "CON", "aux.txt", "a" * 129):
+            with self.subTest(unsafe_root=unsafe_root):
+                accepted = (
+                    root_schema["minLength"]
+                    <= len(unsafe_root)
+                    <= root_schema["maxLength"]
+                    and re.fullmatch(root_schema["pattern"], unsafe_root) is not None
+                    and re.match(reserved, unsafe_root) is None
+                )
+                self.assertFalse(accepted)
 
     def test_no_change_plan_is_deterministic_and_apply_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

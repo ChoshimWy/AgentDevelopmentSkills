@@ -388,6 +388,15 @@ transaction routes with differential, tamper, concurrency, recovery, and
 independent-review evidence. The remaining hosted lifecycle cutover is
 automatic upgrade acquisition, separate from both the explicit-input native
 upgrade route and the Python-free eligible fresh-install route.
+Upgrade Source Qualification v1 establishes the release-side input for that
+cutover. It binds the completed repository Conformance suite to the immutable
+source archive hash and size, source revision, complete SBOM material identity,
+Schema inventory, runner, and stable command set. It deliberately omits a
+candidate Package Lock hash because upgrade lineage is installation-specific
+and cannot be truthfully precomputed at release time. Both Python and Rust
+validate the new artifact; acquisition must later authenticate the exact
+archive and rebind the resulting candidate to the current installed Lock
+before Plan approval.
 
 For the native compatibility command, a supplied `--ledger` parent directory
 must already exist and contain only real directories. The runtime opens the

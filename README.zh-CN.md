@@ -170,6 +170,9 @@ cargo run --locked -p agent-skills-rs -- \
   /path/to/upgrade-conformance-evidence.json --dry-run \
   --output /path/to/upgrade-plan.json
 cargo run --locked -p agent-skills-rs -- \
+  upgrade-source-qualification-validate \
+  /path/to/upgrade-source-qualification.json
+cargo run --locked -p agent-skills-rs -- \
   runtime-execute /path/to/workflow-plan.json \
   --behaviors /path/to/fake-behaviors.json
 cargo run --locked -p agent-skills-rs -- \
@@ -238,6 +241,8 @@ cargo run --locked -p agent-skills-rs -- \
 升级门禁严格验证 Upgrade Conformance Evidence v1 与 Upgrade Plan v1，覆盖 attestation、精确选择和移除、权限审批、external handler identity、迁移顺序、rollback identity 与自洽篡改。Lifecycle 在目标事务锁下复验双 Lock 和 Activation ownership，冻结外部作用域与 rollback state，并签发绑定 Rust 源码闭包、Cargo Lock、目标和固定 toolchain build identity 的 opaque 收据；调用方不能伪造当前 Lock、rollback point、迁移、handler 或外部路径。
 
 公开 `upgrade` 会根据首次持锁读取的安装 lineage 编译候选。`--dry-run` 输出或保存精确 Plan；执行时必须提供该 Plan、对应的 `--approve-plan` fingerprint 和完整权限批准。Apply 会重新取得目标锁、重建并逐值比较 Plan，再交给受保护 executor；候选或目标发生并发漂移时 fail-closed。Apple activation 在任何外部写入前还必须通过原生 installed-registry smoke，覆盖 discovery、policy、Package-Lock-bound ready Plan、Skill Binding、Recorded Adapter Runtime、独立 review 与 delivery report。`lifecycle-upgrade` 仅作为可见兼容别名；托管自动获取源码与 Conformance evidence 仍受独立发布门禁控制。
+
+Upgrade Source Qualification v1 是下一层发布边界：它把已完成的仓库 Conformance 套件绑定到不可变源码归档、source revision、完整 SBOM material identity、Schema inventory 和稳定命令集合，同时避免把发布期证据错误绑定到未来某个安装实例的 Lock lineage。Python 与 Rust 已共同验证该合同，但它本身不授权下载或执行升级。
 
 公开 `rollback` 会在创建 workspace 前校验精确的当前 Lock 与持久 rollback-point fingerprint；随后从已验证快照重建旧 managed projection、保留当前 `.system`、在同一 `PublishedInstall` 恢复窗口内还原冻结的外部预像，并把被替换的当前状态持久化为下一 rollback point。`lifecycle-rollback` 作为可见兼容别名继续保留。
 

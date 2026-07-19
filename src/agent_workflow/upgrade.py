@@ -28,6 +28,7 @@ from .contracts import (
     validate_rollback_point,
     validate_upgrade_conformance_evidence,
     validate_upgrade_plan,
+    validate_upgrade_source_qualification,
 )
 from .doctor import diagnose_install
 from .installation import (
@@ -100,6 +101,46 @@ def make_upgrade_conformance_evidence(
     evidence["fingerprint"] = sha256(evidence)
     validate_upgrade_conformance_evidence(evidence)
     return evidence
+
+
+def make_upgrade_source_qualification(
+    conformance_evidence: dict[str, Any],
+    *,
+    source_revision: str,
+    source_artifact_sha256: str,
+    source_artifact_size: int,
+    source_root: str,
+    source_materials_sha256: str,
+) -> dict[str, Any]:
+    """Bind completed repository Conformance to one immutable source archive."""
+
+    validate_upgrade_conformance_evidence(conformance_evidence)
+    qualification: dict[str, Any] = {
+        key: value
+        for key, value in conformance_evidence.items()
+        if key not in {
+            "attestation_key",
+            "candidate_package_lock_hash",
+            "fingerprint",
+        }
+    }
+    qualification["source"] = {
+        "artifact_sha256": source_artifact_sha256,
+        "artifact_size": source_artifact_size,
+        "revision": source_revision,
+        "root": source_root,
+    }
+    qualification["source_materials_sha256"] = source_materials_sha256
+    qualification["attestation_key"] = sha256({
+        **qualification,
+        "command_results": [
+            {"command": item["command"], "exit_code": item["exit_code"]}
+            for item in qualification["command_results"]
+        ],
+    })
+    qualification["fingerprint"] = sha256(qualification)
+    validate_upgrade_source_qualification(qualification)
+    return qualification
 
 
 def run_upgrade_conformance(

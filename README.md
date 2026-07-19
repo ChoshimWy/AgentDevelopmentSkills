@@ -176,6 +176,9 @@ cargo run --locked -p agent-skills-rs -- \
   /path/to/upgrade-conformance-evidence.json --dry-run \
   --output /path/to/upgrade-plan.json
 cargo run --locked -p agent-skills-rs -- \
+  upgrade-source-qualification-validate \
+  /path/to/upgrade-source-qualification.json
+cargo run --locked -p agent-skills-rs -- \
   lifecycle-uninstall /path/to/installed-root --platform all
 cargo run --locked -p agent-skills-rs -- \
   runtime-execute /path/to/workflow-plan.json \
@@ -429,6 +432,12 @@ current `.system` tree, restores the frozen external preimages inside the same
 as the next rollback point. `lifecycle-rollback` remains a visible
 compatibility alias. `lifecycle-upgrade` likewise remains a visible alias;
 hosted automatic upgrade acquisition remains behind its separate release gate.
+Upgrade Source Qualification v1 now provides the next release boundary: it
+binds the completed repository Conformance suite to one immutable source
+archive, source revision, complete SBOM material identity, Schema inventory,
+and stable command set without falsely binding that release-time evidence to a
+future installation-specific Lock lineage. The contract is validated by both
+Python and Rust, but it does not authorize acquisition or apply by itself.
 The installed native
 `agent-session` dispatch preserves
 the public `create`, `list`, `inspect`, `fingerprint`, `checkpoint`, and `gate`

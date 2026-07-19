@@ -51,6 +51,11 @@ _GIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _REPOSITORY_PATCH = re.compile(r"^repository-patch:[0-9a-f]{64}$")
 _SESSION_SOURCE = re.compile(r"^session-source:[0-9a-f]{64}$")
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
+_WINDOWS_RESERVED_COMPONENTS = {
+    "aux", "con", "nul", "prn",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+}
 
 
 def validate_activation_lock(value: dict[str, Any]) -> None:
@@ -1771,6 +1776,102 @@ def validate_upgrade_conformance_evidence(value: dict[str, Any]) -> None:
         raise ContractError("upgrade-conformance-evidence fingerprint mismatch")
 
 
+def _is_safe_upgrade_source_root(value: Any) -> bool:
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 128
+        or re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?", value) is None
+    ):
+        return False
+    return value.split(".", 1)[0].casefold() not in _WINDOWS_RESERVED_COMPONENTS
+
+
+def validate_upgrade_source_qualification(value: dict[str, Any]) -> None:
+    fields = {
+        "schema_version", "suite", "status", "source", "source_materials_sha256",
+        "schema_inventory_hash", "manifest_count", "negative_contract_count",
+        "test_count", "suite_definition_hash", "runner_sha256", "environment",
+        "command_results", "attestation_key", "fingerprint",
+    }
+    _exact_object(value, fields, "upgrade-source-qualification")
+    require_version(value)
+    if value["suite"] != "agent-skills-release-conformance-v1" or value["status"] != "passed":
+        raise ContractError("upgrade-source-qualification suite or status is invalid")
+    for field in (
+        "source_materials_sha256", "schema_inventory_hash", "suite_definition_hash",
+        "runner_sha256", "fingerprint", "attestation_key",
+    ):
+        if not isinstance(value[field], str) or not re.fullmatch(r"[0-9a-f]{64}", value[field]):
+            raise ContractError(f"upgrade-source-qualification {field} is invalid")
+    for field in ("manifest_count", "negative_contract_count", "test_count"):
+        if not isinstance(value[field], int) or isinstance(value[field], bool) or value[field] < 1:
+            raise ContractError(f"upgrade-source-qualification {field} is invalid")
+    source = value["source"]
+    _exact_object(
+        source,
+        {"artifact_sha256", "artifact_size", "revision", "root"},
+        "upgrade-source-qualification.source",
+    )
+    if (
+        not isinstance(source["artifact_sha256"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", source["artifact_sha256"])
+        or not isinstance(source["artifact_size"], int)
+        or isinstance(source["artifact_size"], bool)
+        or not 0 < source["artifact_size"] <= 128 * 1024 * 1024
+        or not isinstance(source["revision"], str)
+        or not re.fullmatch(r"[0-9a-f]{40}", source["revision"])
+        or not _is_safe_upgrade_source_root(source["root"])
+    ):
+        raise ContractError("upgrade-source-qualification source identity is invalid")
+    environment = value["environment"]
+    _exact_object(environment, {"python", "platform"}, "upgrade-source-qualification.environment")
+    if (
+        not isinstance(environment["python"], str)
+        or not re.fullmatch(r"3\.(11|12|13|14)(\.[0-9]+)?", environment["python"])
+        or not isinstance(environment["platform"], str)
+        or not environment["platform"]
+    ):
+        raise ContractError("upgrade-source-qualification environment is invalid")
+    results = value["command_results"]
+    if not isinstance(results, list) or not results:
+        raise ContractError("upgrade-source-qualification command results are invalid")
+    commands: list[str] = []
+    for result in results:
+        _exact_object(
+            result,
+            {"command", "exit_code", "stdout_sha256", "stderr_sha256"},
+            "upgrade-source-qualification.command-result",
+        )
+        if (
+            not isinstance(result["command"], str)
+            or not result["command"]
+            or not isinstance(result["exit_code"], int)
+            or isinstance(result["exit_code"], bool)
+            or result["exit_code"] != 0
+            or any(
+                not isinstance(result[field], str) or not re.fullmatch(r"[0-9a-f]{64}", result[field])
+                for field in ("stdout_sha256", "stderr_sha256")
+            )
+        ):
+            raise ContractError("upgrade-source-qualification command result is invalid")
+        commands.append(result["command"])
+    if commands != sorted(set(commands)):
+        raise ContractError("upgrade-source-qualification command results must be sorted and unique")
+    stable_identity = {
+        key: item
+        for key, item in value.items()
+        if key not in {"attestation_key", "fingerprint"}
+    }
+    stable_identity["command_results"] = [
+        {"command": item["command"], "exit_code": item["exit_code"]}
+        for item in results
+    ]
+    if value["attestation_key"] != sha256(stable_identity):
+        raise ContractError("upgrade-source-qualification attestation key mismatch")
+    if value["fingerprint"] != sha256({key: item for key, item in value.items() if key != "fingerprint"}):
+        raise ContractError("upgrade-source-qualification fingerprint mismatch")
+
+
 def validate_upgrade_plan(value: dict[str, Any]) -> None:
     fields = {
         "schema_version", "action", "target_root", "status", "current", "candidate",
@@ -2111,6 +2212,7 @@ VALIDATORS: dict[str, Callable[[dict[str, Any]], None]] = {
     "test-case": validate_test_case,
     "test-result": validate_test_result,
     "upgrade-conformance-evidence": validate_upgrade_conformance_evidence,
+    "upgrade-source-qualification": validate_upgrade_source_qualification,
     "upgrade-plan": validate_upgrade_plan,
     "worktree-session-context": validate_worktree_session_context,
     "worktree-session-gate": validate_worktree_session_gate,

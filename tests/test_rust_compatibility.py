@@ -81,6 +81,7 @@ from agent_workflow.registry import ManifestRegistry
 from agent_workflow.runtime import FakeAdapterExecutor, RecordedAdapterExecutor, RunLedger
 from agent_workflow.upgrade import (
     make_upgrade_conformance_evidence,
+    make_upgrade_source_qualification,
     plan_upgrade,
     prepare_upgrade_candidate,
 )
@@ -2484,13 +2485,60 @@ name = "one"
                 schema_root=ROOT / "schemas",
             )
             evidence_path = root / "upgrade-evidence.json"
+            qualification_path = root / "upgrade-source-qualification.json"
             plan_path = root / "upgrade-plan.json"
             candidate_plan_path = root / "candidate-install-plan.json"
             candidate_lock_path = root / "candidate-package-lock.json"
             dump(evidence, evidence_path)
+            qualification = make_upgrade_source_qualification(
+                evidence,
+                source_revision="a" * 40,
+                source_artifact_sha256="b" * 64,
+                source_artifact_size=1024,
+                source_root="agent-development-skills-1.0.0",
+                source_materials_sha256="c" * 64,
+            )
+            dump(qualification, qualification_path)
             dump(operation.plan, plan_path)
             dump(operation.candidate.bundle.plan, candidate_plan_path)
             dump(operation.candidate.bundle.package_lock, candidate_lock_path)
+
+            rust_qualification = self.run_rust(
+                "upgrade-source-qualification-validate",
+                str(qualification_path),
+            )
+            self.assertEqual(
+                rust_qualification.returncode,
+                0,
+                rust_qualification.stderr,
+            )
+            self.assertEqual(rust_qualification.stdout, dumps(qualification))
+            unsafe_qualification = deepcopy(qualification)
+            unsafe_qualification["source"]["root"] = "CON"
+            unsafe_qualification["attestation_key"] = sha256({
+                **{
+                    key: value
+                    for key, value in unsafe_qualification.items()
+                    if key not in {"attestation_key", "fingerprint"}
+                },
+                "command_results": [
+                    {"command": item["command"], "exit_code": item["exit_code"]}
+                    for item in unsafe_qualification["command_results"]
+                ],
+            })
+            unsafe_qualification["fingerprint"] = sha256({
+                key: value
+                for key, value in unsafe_qualification.items()
+                if key != "fingerprint"
+            })
+            dump(unsafe_qualification, qualification_path)
+            rejected_qualification = self.run_rust(
+                "upgrade-source-qualification-validate",
+                str(qualification_path),
+            )
+            self.assertEqual(rejected_qualification.returncode, 2)
+            self.assertEqual(rejected_qualification.stdout, "")
+            dump(qualification, qualification_path)
 
             rust_compiled_plan = self.run_rust(
                 "upgrade-plan-build",

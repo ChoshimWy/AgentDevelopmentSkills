@@ -21,6 +21,23 @@ const EVIDENCE_FIELDS: &[&str] = &[
     "suite_definition_hash",
     "test_count",
 ];
+const SOURCE_QUALIFICATION_FIELDS: &[&str] = &[
+    "attestation_key",
+    "command_results",
+    "environment",
+    "fingerprint",
+    "manifest_count",
+    "negative_contract_count",
+    "runner_sha256",
+    "schema_inventory_hash",
+    "schema_version",
+    "source",
+    "source_materials_sha256",
+    "status",
+    "suite",
+    "suite_definition_hash",
+    "test_count",
+];
 const PLAN_FIELDS: &[&str] = &[
     "action",
     "approvals_required",
@@ -60,11 +77,7 @@ pub fn validate_upgrade_conformance_evidence(value: &Value) -> Result<(), Engine
         EVIDENCE_FIELDS,
         "upgrade-conformance-evidence fields are invalid",
     )?;
-    if string(evidence, "suite")? != "agent-skills-release-conformance-v1"
-        || string(evidence, "status")? != "passed"
-    {
-        return invalid("upgrade-conformance-evidence suite or status is invalid");
-    }
+    let stable_results = validate_suite_execution(evidence, "upgrade-conformance-evidence")?;
     for field in [
         "candidate_package_lock_hash",
         "schema_inventory_hash",
@@ -78,58 +91,6 @@ pub fn validate_upgrade_conformance_evidence(value: &Value) -> Result<(), Engine
             &format!("upgrade-conformance-evidence {field} is invalid"),
         )?;
     }
-    for field in ["manifest_count", "negative_contract_count", "test_count"] {
-        if evidence
-            .get(field)
-            .is_none_or(|count| !is_positive_integer(count))
-        {
-            return invalid(format!("upgrade-conformance-evidence {field} is invalid"));
-        }
-    }
-    let environment = exact_object(
-        required(evidence, "environment")?,
-        &["platform", "python"],
-        "upgrade-conformance-evidence.environment is invalid",
-    )?;
-    let platform = string(environment, "platform")?;
-    let python = string(environment, "python")?;
-    if platform.is_empty() || !is_supported_python(python) {
-        return invalid("upgrade-conformance-evidence environment is invalid");
-    }
-    let results = required(evidence, "command_results")?
-        .as_array()
-        .ok_or_else(|| {
-            EngineError::Invalid(
-                "upgrade-conformance-evidence command results are invalid".to_owned(),
-            )
-        })?;
-    if results.is_empty() {
-        return invalid("upgrade-conformance-evidence command results are invalid");
-    }
-    let mut commands = Vec::with_capacity(results.len());
-    let mut stable_results = Vec::with_capacity(results.len());
-    for result in results {
-        let result = exact_object(
-            result,
-            &["command", "exit_code", "stderr_sha256", "stdout_sha256"],
-            "upgrade-conformance-evidence.command-result is invalid",
-        )?;
-        let command = string(result, "command")?;
-        if command.is_empty()
-            || result
-                .get("exit_code")
-                .is_none_or(|value| !is_zero_integer(value))
-            || !is_hash(required(result, "stdout_sha256")?)
-            || !is_hash(required(result, "stderr_sha256")?)
-        {
-            return invalid("upgrade-conformance-evidence command result is invalid");
-        }
-        commands.push(command.to_owned());
-        stable_results.push(serde_json::json!({"command": command, "exit_code": 0}));
-    }
-    if !is_sorted_unique(&commands) {
-        return invalid("upgrade-conformance-evidence command results must be sorted and unique");
-    }
     let mut stable = evidence.clone();
     stable.remove("attestation_key");
     stable.remove("fingerprint");
@@ -142,6 +103,69 @@ pub fn validate_upgrade_conformance_evidence(value: &Value) -> Result<(), Engine
     verify_fingerprint(
         evidence,
         "upgrade-conformance-evidence fingerprint mismatch",
+    )
+}
+
+/// Validate one release-bound Upgrade Source Qualification v1 artifact.
+///
+/// Unlike candidate-bound Conformance Evidence v1, this artifact binds the
+/// repository-owned suite to one immutable source archive and its complete
+/// SBOM material identity. A later hosted upgrade must still authenticate and
+/// extract that exact archive before compiling a lineage-specific candidate.
+///
+/// # Errors
+/// Returns a fail-closed error for unknown fields, malformed source identity,
+/// invalid suite results, unstable ordering, or either identity mismatch.
+pub fn validate_upgrade_source_qualification(value: &Value) -> Result<(), EngineError> {
+    require_schema_version(value, "1.0")?;
+    let qualification = exact_object(
+        value,
+        SOURCE_QUALIFICATION_FIELDS,
+        "upgrade-source-qualification fields are invalid",
+    )?;
+    let stable_results = validate_suite_execution(qualification, "upgrade-source-qualification")?;
+    for field in [
+        "schema_inventory_hash",
+        "source_materials_sha256",
+        "suite_definition_hash",
+        "runner_sha256",
+        "attestation_key",
+        "fingerprint",
+    ] {
+        require_hash(
+            qualification.get(field),
+            &format!("upgrade-source-qualification {field} is invalid"),
+        )?;
+    }
+    let source = exact_object(
+        required(qualification, "source")?,
+        &["artifact_sha256", "artifact_size", "revision", "root"],
+        "upgrade-source-qualification.source is invalid",
+    )?;
+    require_hash(
+        source.get("artifact_sha256"),
+        "upgrade-source-qualification source artifact hash is invalid",
+    )?;
+    if source
+        .get("artifact_size")
+        .is_none_or(|size| !is_bounded_source_size(size))
+        || !is_source_revision(string(source, "revision")?)
+        || !is_safe_source_root(string(source, "root")?)
+    {
+        return invalid("upgrade-source-qualification source identity is invalid");
+    }
+    let mut stable = qualification.clone();
+    stable.remove("attestation_key");
+    stable.remove("fingerprint");
+    stable.insert("command_results".to_owned(), Value::Array(stable_results));
+    if qualification.get("attestation_key").and_then(Value::as_str)
+        != Some(canonical_sha256(&Value::Object(stable))?.as_str())
+    {
+        return invalid("upgrade-source-qualification attestation key mismatch");
+    }
+    verify_fingerprint(
+        qualification,
+        "upgrade-source-qualification fingerprint mismatch",
     )
 }
 
@@ -465,6 +489,66 @@ fn validate_upgrade_steps(value: &Value) -> Result<(), EngineError> {
     Ok(())
 }
 
+fn validate_suite_execution(
+    document: &Map<String, Value>,
+    label: &str,
+) -> Result<Vec<Value>, EngineError> {
+    if string(document, "suite")? != "agent-skills-release-conformance-v1"
+        || string(document, "status")? != "passed"
+    {
+        return invalid(format!("{label} suite or status is invalid"));
+    }
+    for field in ["manifest_count", "negative_contract_count", "test_count"] {
+        if document
+            .get(field)
+            .is_none_or(|count| !is_positive_integer(count))
+        {
+            return invalid(format!("{label} {field} is invalid"));
+        }
+    }
+    let environment = exact_object(
+        required(document, "environment")?,
+        &["platform", "python"],
+        &format!("{label}.environment is invalid"),
+    )?;
+    if string(environment, "platform")?.is_empty()
+        || !is_supported_python(string(environment, "python")?)
+    {
+        return invalid(format!("{label} environment is invalid"));
+    }
+    let results = required(document, "command_results")?
+        .as_array()
+        .ok_or_else(|| EngineError::Invalid(format!("{label} command results are invalid")))?;
+    if results.is_empty() {
+        return invalid(format!("{label} command results are invalid"));
+    }
+    let mut commands = Vec::with_capacity(results.len());
+    let mut stable_results = Vec::with_capacity(results.len());
+    for result in results {
+        let result = exact_object(
+            result,
+            &["command", "exit_code", "stderr_sha256", "stdout_sha256"],
+            &format!("{label}.command-result is invalid"),
+        )?;
+        let command = string(result, "command")?;
+        if command.is_empty()
+            || result
+                .get("exit_code")
+                .is_none_or(|value| !is_zero_integer(value))
+            || !is_hash(required(result, "stdout_sha256")?)
+            || !is_hash(required(result, "stderr_sha256")?)
+        {
+            return invalid(format!("{label} command result is invalid"));
+        }
+        commands.push(command.to_owned());
+        stable_results.push(serde_json::json!({"command": command, "exit_code": 0}));
+    }
+    if !is_sorted_unique(&commands) {
+        return invalid(format!("{label} command results must be sorted and unique"));
+    }
+    Ok(stable_results)
+}
+
 fn exact_object<'a>(
     value: &'a Value,
     fields: &[&str],
@@ -530,6 +614,49 @@ fn is_positive_integer(value: &Value) -> bool {
         return false;
     };
     value > json_integer(&Value::from(0)).expect("zero is a JSON integer")
+}
+
+fn is_bounded_source_size(value: &Value) -> bool {
+    value
+        .as_u64()
+        .is_some_and(|size| (1..=134_217_728).contains(&size))
+}
+
+fn is_source_revision(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn is_safe_source_root(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        || !value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        || value.as_bytes().last() == Some(&b'.')
+    {
+        return false;
+    }
+    let basename = value
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    !matches!(basename.as_str(), "aux" | "con" | "nul" | "prn")
+        && !is_numbered_windows_device(&basename, "com")
+        && !is_numbered_windows_device(&basename, "lpt")
+}
+
+fn is_numbered_windows_device(value: &str, prefix: &str) -> bool {
+    value
+        .strip_prefix(prefix)
+        .is_some_and(|suffix| matches!(suffix.as_bytes(), [b'1'..=b'9']))
 }
 
 fn is_nonnegative_integer(value: &Value) -> bool {
@@ -628,7 +755,10 @@ fn verify_fingerprint(object: &Map<String, Value>, message: &str) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_upgrade_conformance_evidence, validate_upgrade_plan};
+    use super::{
+        validate_upgrade_conformance_evidence, validate_upgrade_plan,
+        validate_upgrade_source_qualification,
+    };
     use agent_contracts::canonical_sha256;
     use serde_json::{Value, json};
 
@@ -719,6 +849,36 @@ mod tests {
         value
     }
 
+    fn source_qualification(evidence: &Value) -> Value {
+        let mut value = evidence.as_object().unwrap().clone();
+        value.remove("attestation_key");
+        value.remove("candidate_package_lock_hash");
+        value.remove("fingerprint");
+        value.insert(
+            "source".to_owned(),
+            json!({
+                "artifact_sha256": "a".repeat(64),
+                "artifact_size": 1024,
+                "revision": "b".repeat(40),
+                "root": "agent-development-skills-1.0.0",
+            }),
+        );
+        value.insert(
+            "source_materials_sha256".to_owned(),
+            Value::String("c".repeat(64)),
+        );
+        let mut stable = value.clone();
+        stable.insert(
+            "command_results".to_owned(),
+            json!([{"command": "compatibility-suite", "exit_code": 0}]),
+        );
+        let attestation = canonical_sha256(&Value::Object(stable)).unwrap();
+        value.insert("attestation_key".to_owned(), Value::String(attestation));
+        let fingerprint = canonical_sha256(&Value::Object(value.clone())).unwrap();
+        value.insert("fingerprint".to_owned(), Value::String(fingerprint));
+        Value::Object(value)
+    }
+
     fn refresh_fingerprint(value: &mut Value) {
         value.as_object_mut().unwrap().remove("fingerprint");
         value["fingerprint"] = Value::String(canonical_sha256(value).unwrap());
@@ -728,18 +888,19 @@ mod tests {
     fn valid_upgrade_control_plane_contracts_are_accepted() {
         let evidence = evidence();
         validate_upgrade_conformance_evidence(&evidence).unwrap();
+        validate_upgrade_source_qualification(&source_qualification(&evidence)).unwrap();
         validate_upgrade_plan(&plan(&evidence)).unwrap();
     }
 
     #[test]
     fn self_consistent_semantic_tampering_is_rejected() {
-        let evidence = evidence();
-        let mut invalid_plan = plan(&evidence);
+        let valid_evidence = evidence();
+        let mut invalid_plan = plan(&valid_evidence);
         invalid_plan["current_selection"]["core_only"] = Value::Bool(true);
         refresh_fingerprint(&mut invalid_plan);
         assert!(validate_upgrade_plan(&invalid_plan).is_err());
 
-        let mut invalid_evidence = evidence;
+        let mut invalid_evidence = valid_evidence;
         let duplicate = invalid_evidence["command_results"][0].clone();
         invalid_evidence["command_results"]
             .as_array_mut()
@@ -765,5 +926,33 @@ mod tests {
             Value::String(canonical_sha256(&Value::Object(stable)).unwrap());
         refresh_fingerprint(&mut invalid_evidence);
         assert!(validate_upgrade_conformance_evidence(&invalid_evidence).is_err());
+
+        for unsafe_root in [
+            "../source".to_owned(),
+            "source.".to_owned(),
+            "CON".to_owned(),
+            "aux.txt".to_owned(),
+            "a".repeat(129),
+        ] {
+            let mut invalid_qualification = source_qualification(&evidence());
+            invalid_qualification["source"]["root"] = Value::String(unsafe_root);
+            invalid_qualification
+                .as_object_mut()
+                .unwrap()
+                .remove("attestation_key");
+            invalid_qualification
+                .as_object_mut()
+                .unwrap()
+                .remove("fingerprint");
+            let mut stable = invalid_qualification.as_object().unwrap().clone();
+            stable.insert(
+                "command_results".to_owned(),
+                json!([{"command": "compatibility-suite", "exit_code": 0}]),
+            );
+            invalid_qualification["attestation_key"] =
+                Value::String(canonical_sha256(&Value::Object(stable)).unwrap());
+            refresh_fingerprint(&mut invalid_qualification);
+            assert!(validate_upgrade_source_qualification(&invalid_qualification).is_err());
+        }
     }
 }
