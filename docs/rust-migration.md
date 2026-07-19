@@ -350,9 +350,21 @@ external-free results remain byte-differential-tested against Python, while
 native Activation uses semantic differential checks because Rust additionally
 owns `bin/agent-skills` and uses a native handler implementation hash.
 `upgrade-evidence-validate` and `upgrade-plan-validate` retain negative
-contract coverage. Mutating upgrade/rollback execution still remains
-behind the existing Python approval gate until the Rust executor binds these
-validated artifacts to the lifecycle transaction. Doctor,
+contract coverage. The first mutating Rust executor now binds those validated
+artifacts to the lifecycle transaction: it holds the planning lock through
+staging and publication, requires the complete approved Plan and exact
+permission approvals, persists the verified rollback point, and dispatches
+only the receipt-bound source handler. Apple activation additionally runs a
+native installed-registry smoke before any external write. That smoke covers
+discovery, policy, package-Lock-bound planning, Skill resolution, Recorded
+Adapter execution, independent review, and delivery reporting while
+`PublishedInstall` can still restore both managed and external preimages.
+No-change, partial removal, legacy Activation migration, approval rejection,
+activate/deactivate/preserve dispatch, smoke-failure compensation, and
+post-write handler compensation have native transaction tests. Public
+upgrade/rollback execution remains behind the existing compatibility approval
+gate until the executor CLI, differential, and release gates are complete.
+Doctor,
 uninstall, and source activation already have native compatibility commands
 with differential, tamper, concurrency, rollback, and independent-review
 evidence; their remaining hosted public CLI cutovers stay separate from the

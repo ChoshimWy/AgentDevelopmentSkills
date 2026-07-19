@@ -20,6 +20,7 @@ fn main() {
         "agent-engine",
         "agent-lifecycle",
         "agent-registry",
+        "agent-runtime",
     ] {
         collect_local_crate(&workspace.join("crates").join(package), &mut sources);
     }

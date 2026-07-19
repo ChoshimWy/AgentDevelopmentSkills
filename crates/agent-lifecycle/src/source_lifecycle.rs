@@ -1,9 +1,9 @@
 use crate::{
     INSTALL_BACKUP_PREFIX, INSTALL_STAGE_PREFIX, LIFECYCLE_LOCK_DIRECTORY, LifecycleError,
     LifecycleLock, LifecycleWorkspace, UNINSTALL_BACKUP_PREFIX, ValidatedInstallPlan,
-    ignored_os_metadata, open_root_directory, source_activation,
-    source_bundle::SourceInstallBundle, source_packages::SourcePackageSet, staged_install,
-    transaction_lock,
+    compile_upgrade_plan, ignored_os_metadata, inspect_upgrade_planning_snapshot,
+    open_root_directory, source_activation, source_bundle::SourceInstallBundle,
+    source_packages::SourcePackageSet, staged_install, transaction_lock,
 };
 use agent_engine::validate_install_plan;
 use cap_std::fs::Dir;
@@ -198,11 +198,267 @@ pub fn install_source_bundle_with_activation(
     }))
 }
 
+/// Compile a native source Upgrade Plan without mutating the installed target.
+///
+/// The target lifecycle lock is held from current-state inspection through
+/// receipt validation and Plan compilation, then released before returning.
+///
+/// # Errors
+/// Returns a fail-closed error for source drift, unsafe current state, stale
+/// evidence, invalid ownership/removal policy, or an unbound external scope.
+#[allow(clippy::too_many_arguments)]
+pub fn inspect_source_upgrade(
+    bundle: &SourceInstallBundle,
+    package_set: &SourcePackageSet,
+    target_root: impl AsRef<Path>,
+    conformance_evidence: &Value,
+    action: &str,
+    removed_platforms: &[String],
+    removed_runtime_configs: &[String],
+    session_launcher: Option<&[u8]>,
+) -> Result<Value, LifecycleError> {
+    validate_source_install_inputs(bundle, package_set)?;
+    let snapshot = inspect_upgrade_planning_snapshot(
+        target_root,
+        bundle.plan(),
+        bundle.package_lock(),
+        action,
+        removed_platforms,
+        removed_runtime_configs,
+        session_launcher,
+    )?;
+    compile_upgrade_plan(
+        &snapshot,
+        action,
+        bundle.plan(),
+        bundle.package_lock(),
+        conformance_evidence,
+        removed_platforms,
+        removed_runtime_configs,
+    )
+}
+
+/// Apply one exact approval-bound native source upgrade transaction.
+///
+/// The current target, candidate source snapshot, Conformance evidence,
+/// external lifecycle scope, rollback point and supplied approvals are rebuilt
+/// and compared with `approved_plan` while the target lock is held. A changed
+/// candidate is staged and published through [`LifecycleWorkspace`], with the
+/// approved trusted source handler applied before final verification and
+/// commit. A no-change Plan returns without staging or target writes.
+///
+/// # Errors
+/// Returns a fail-closed error for stale approval, source/target drift,
+/// incomplete staging, handler mismatch, publication failure, or rollback
+/// cleanup failure.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn upgrade_source_bundle(
+    bundle: &SourceInstallBundle,
+    package_set: &SourcePackageSet,
+    target_root: impl AsRef<Path>,
+    conformance_evidence: &Value,
+    approved_plan: &Value,
+    approvals: &[String],
+    action: &str,
+    removed_platforms: &[String],
+    removed_runtime_configs: &[String],
+    session_launcher: Option<&[u8]>,
+) -> Result<Value, LifecycleError> {
+    upgrade_source_bundle_with_smoke(
+        bundle,
+        package_set,
+        target_root,
+        conformance_evidence,
+        approved_plan,
+        approvals,
+        action,
+        removed_platforms,
+        removed_runtime_configs,
+        session_launcher,
+        |published| {
+            crate::installed_smoke::run_installed_workflow_smoke(
+                published.target()?,
+                bundle.package_lock(),
+            )
+            .map(|_| ())
+        },
+        |published, launcher| published.apply_source_activation(launcher).map(|_| ()),
+        |published| published.apply_source_deactivation().map(|_| ()),
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn upgrade_source_bundle_with_smoke(
+    bundle: &SourceInstallBundle,
+    package_set: &SourcePackageSet,
+    target_root: impl AsRef<Path>,
+    conformance_evidence: &Value,
+    approved_plan: &Value,
+    approvals: &[String],
+    action: &str,
+    removed_platforms: &[String],
+    removed_runtime_configs: &[String],
+    session_launcher: Option<&[u8]>,
+    mut before_source_activation: impl FnMut(&crate::PublishedInstall) -> Result<(), LifecycleError>,
+    mut apply_source_activation: impl FnMut(
+        &mut crate::PublishedInstall,
+        &[u8],
+    ) -> Result<(), LifecycleError>,
+    mut apply_source_deactivation: impl FnMut(
+        &mut crate::PublishedInstall,
+    ) -> Result<(), LifecycleError>,
+) -> Result<Value, LifecycleError> {
+    validate_source_install_inputs(bundle, package_set)?;
+    let snapshot = inspect_upgrade_planning_snapshot(
+        target_root,
+        bundle.plan(),
+        bundle.package_lock(),
+        action,
+        removed_platforms,
+        removed_runtime_configs,
+        session_launcher,
+    )?;
+    let compiled = compile_upgrade_plan(
+        &snapshot,
+        action,
+        bundle.plan(),
+        bundle.package_lock(),
+        conformance_evidence,
+        removed_platforms,
+        removed_runtime_configs,
+    )?;
+    if &compiled != approved_plan {
+        return invalid("upgrade apply requires the exact approved Plan");
+    }
+    require_exact_upgrade_approvals(&compiled, approvals)?;
+    let evidence_fingerprint = required_string(
+        conformance_evidence,
+        "fingerprint",
+        "upgrade Conformance evidence",
+    )?;
+    let plan_fingerprint = required_string(&compiled, "fingerprint", "Upgrade Plan")?;
+    if compiled.get("status").and_then(Value::as_str) == Some("no-change") {
+        return Ok(serde_json::json!({
+            "conformance_evidence_fingerprint": evidence_fingerprint,
+            "plan_fingerprint": plan_fingerprint,
+            "status": "no-change",
+        }));
+    }
+
+    let handler = snapshot.handler.clone();
+    let external_paths = snapshot.external_paths.clone();
+    let mut workspace = snapshot.into_workspace()?;
+    let plan = ValidatedInstallPlan::new(bundle.plan().clone(), bundle.package_lock().clone())?;
+    stage_source_bundle(&mut workspace, &plan, bundle, package_set)?;
+    workspace.stage_external_state(&plan)?;
+    let rollback_fingerprint = workspace.stage_rollback_point(&plan, &external_paths)?;
+    if compiled
+        .pointer("/rollback/point_fingerprint")
+        .and_then(Value::as_str)
+        != Some(rollback_fingerprint.as_str())
+    {
+        return invalid("staged rollback point differs from the approved Upgrade Plan");
+    }
+    workspace.verify_staged_install(&plan)?;
+    let mut published = workspace.publish_staged_install(&plan)?;
+    match handler.as_str() {
+        "none" | "core.source-preserve.apple-codex-v1" => {}
+        "core.source-activation.apple-codex-v1" => {
+            before_source_activation(&published)?;
+            apply_source_activation(
+                &mut published,
+                session_launcher.ok_or_else(|| {
+                    LifecycleError::Invalid(
+                        "native Apple source upgrade requires a frozen session launcher".to_owned(),
+                    )
+                })?,
+            )?;
+        }
+        "core.source-deactivation.apple-codex-v1" => {
+            apply_source_deactivation(&mut published)?;
+        }
+        _ => return invalid("approved Upgrade Plan contains an unknown source handler"),
+    }
+    published.verify(&plan)?;
+    published.commit(&plan)?;
+    Ok(serde_json::json!({
+        "conformance_evidence_fingerprint": evidence_fingerprint,
+        "install_plan_fingerprint": plan.fingerprint(),
+        "package_lock_hash": plan.package_lock_fingerprint(),
+        "plan_fingerprint": plan_fingerprint,
+        "rollback_point": compiled.get("rollback").cloned().ok_or_else(|| {
+            LifecycleError::Invalid("approved Upgrade Plan rollback identity is missing".to_owned())
+        })?,
+        "status": "upgraded",
+    }))
+}
+
 #[derive(Debug)]
 struct SourceInstallOutcome {
     activation: Option<Value>,
     install_plan: Value,
     target_root: String,
+}
+
+fn stage_source_bundle(
+    workspace: &mut LifecycleWorkspace,
+    plan: &ValidatedInstallPlan,
+    bundle: &SourceInstallBundle,
+    package_set: &SourcePackageSet,
+) -> Result<(), LifecycleError> {
+    workspace.stage_install_layout(plan, bundle.instructions().as_bytes())?;
+    for ((package_id, root), package) in bundle.package_roots().iter().zip(&package_set.packages) {
+        if package_id != &package.id {
+            return invalid("source package order differs from Install Bundle");
+        }
+        let package_source =
+            open_root_directory(root, None, &format!("source package {package_id}"))?;
+        workspace.stage_plan_package(plan, package_id, &package_source)?;
+        for skill in &package.skills {
+            let skill_source = open_root_directory(
+                &root.join(&skill.relative_root),
+                None,
+                &format!("source Skill {}", skill.name),
+            )?;
+            workspace.stage_plan_skill(plan, &skill.name, &skill_source)?;
+        }
+    }
+    Ok(())
+}
+
+fn require_exact_upgrade_approvals(
+    plan: &Value,
+    approvals: &[String],
+) -> Result<(), LifecycleError> {
+    let mut supplied = approvals.to_vec();
+    supplied.sort();
+    supplied.dedup();
+    let required = plan
+        .get("approvals_required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| LifecycleError::Invalid("Upgrade Plan approvals are invalid".to_owned()))?
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                LifecycleError::Invalid("Upgrade Plan approvals are invalid".to_owned())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if supplied != required {
+        return invalid("upgrade permission approvals differ from the approved Plan");
+    }
+    Ok(())
+}
+
+fn required_string<'a>(
+    value: &'a Value,
+    field: &str,
+    label: &str,
+) -> Result<&'a str, LifecycleError> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| LifecycleError::Invalid(format!("{label} {field} is invalid")))
 }
 
 fn install_source_bundle_with_options(
@@ -397,7 +653,8 @@ mod tests {
     use crate::{
         compile_source_install_bundle, resolve_source_install_selection, snapshot_source_packages,
     };
-    use agent_contracts::load_json;
+    use agent_contracts::{canonical_json, canonical_sha256, load_json};
+    use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -449,6 +706,99 @@ mod tests {
         (bundle, packages)
     }
 
+    fn upgrade_evidence(package_lock: &Value) -> Value {
+        let mut evidence = json!({
+            "candidate_package_lock_hash": package_lock["fingerprint"],
+            "command_results": [{
+                "command": "compatibility-suite",
+                "exit_code": 0,
+                "stderr_sha256": "2".repeat(64),
+                "stdout_sha256": "3".repeat(64),
+            }],
+            "environment": {"platform": "unit-test", "python": "3.11.0"},
+            "manifest_count": 19,
+            "negative_contract_count": 16,
+            "runner_sha256": "4".repeat(64),
+            "schema_inventory_hash": package_lock["schema_inventory"]["content_sha256"],
+            "schema_version": "1.0",
+            "status": "passed",
+            "suite": "agent-skills-release-conformance-v1",
+            "suite_definition_hash": "6".repeat(64),
+            "test_count": 531,
+        });
+        let mut stable = evidence.as_object().expect("evidence object").clone();
+        stable.insert(
+            "command_results".to_owned(),
+            json!([{"command": "compatibility-suite", "exit_code": 0}]),
+        );
+        evidence["attestation_key"] =
+            Value::String(canonical_sha256(&Value::Object(stable)).expect("attestation"));
+        evidence["fingerprint"] =
+            Value::String(canonical_sha256(&evidence).expect("evidence fingerprint"));
+        evidence
+    }
+
+    fn desktop_bundle(previous: Option<&Value>) -> (SourceInstallBundle, SourcePackageSet) {
+        let root = repository_root();
+        let selection = resolve_source_install_selection(
+            root.join("platforms"),
+            &["desktop".to_owned()],
+            &[],
+            &[],
+            false,
+        )
+        .expect("resolve desktop");
+        let packages = snapshot_source_packages(&selection).expect("snapshot desktop");
+        let bundle =
+            compile_source_install_bundle(&selection, &packages, root.join("schemas"), previous)
+                .expect("compile desktop bundle");
+        (bundle, packages)
+    }
+
+    fn apple_bundle() -> (SourceInstallBundle, SourcePackageSet) {
+        let root = repository_root();
+        let selection = resolve_source_install_selection(
+            root.join("platforms"),
+            &["apple".to_owned()],
+            &[],
+            &["codex".to_owned()],
+            false,
+        )
+        .expect("resolve Apple");
+        let packages = snapshot_source_packages(&selection).expect("snapshot Apple");
+        let bundle =
+            compile_source_install_bundle(&selection, &packages, root.join("schemas"), None)
+                .expect("compile Apple bundle");
+        (bundle, packages)
+    }
+
+    fn downgrade_activation_lock_to_v1(target: &Path) -> Vec<u8> {
+        let path = target.join(".agent-skills/activation-lock.json");
+        let mut lock = load_json(&path).expect("load Activation Lock");
+        let object = lock.as_object_mut().expect("Activation Lock object");
+        object.insert("schema_version".to_owned(), Value::String("1.0".to_owned()));
+        object.remove("handler");
+        let bytes = canonical_json(&lock).expect("encode legacy Activation Lock");
+        std::fs::write(&path, &bytes).expect("write legacy Activation Lock");
+        bytes
+    }
+
+    fn selected_strings(plan: &Value, field: &str) -> Vec<String> {
+        plan.get(field)
+            .and_then(Value::as_array)
+            .expect("selection array")
+            .iter()
+            .map(|value| value.as_str().expect("selection string").to_owned())
+            .collect()
+    }
+
+    fn remove_optional_rollback_point(target: &Path) {
+        let rollback = target.join(".agent-skills/rollback-point");
+        if rollback.exists() {
+            std::fs::remove_dir_all(rollback).expect("remove prior optional rollback point");
+        }
+    }
+
     #[test]
     fn dry_run_is_read_only_and_fresh_install_commits_exact_plan() {
         let fixture = Fixture::new();
@@ -485,6 +835,514 @@ mod tests {
                         && !name.starts_with(INSTALL_BACKUP_PREFIX)
                         && name != LIFECYCLE_LOCK_DIRECTORY
                 })
+        );
+    }
+
+    #[test]
+    fn native_no_change_upgrade_returns_without_staging_or_target_writes() {
+        let fixture = Fixture::new();
+        let target = fixture.target();
+        let (bundle, packages) = core_bundle();
+        install_source_bundle(&bundle, &packages, &target).expect("install core fixture");
+        let evidence = upgrade_evidence(bundle.package_lock());
+        let plan = inspect_source_upgrade(
+            &bundle,
+            &packages,
+            &target,
+            &evidence,
+            "upgrade",
+            &[],
+            &[],
+            None,
+        )
+        .expect("inspect no-change upgrade");
+        assert_eq!(plan["status"], "no-change");
+        let before = std::fs::read(target.join(".agent-skills/install-lock.json"))
+            .expect("read Install Lock");
+
+        let result = upgrade_source_bundle(
+            &bundle,
+            &packages,
+            &target,
+            &evidence,
+            &plan,
+            &[],
+            "upgrade",
+            &[],
+            &[],
+            None,
+        )
+        .expect("apply no-change upgrade");
+
+        assert_eq!(result["status"], "no-change");
+        assert_eq!(
+            std::fs::read(target.join(".agent-skills/install-lock.json"))
+                .expect("reread Install Lock"),
+            before
+        );
+        assert!(!target.join(".agent-skills/rollback-point").exists());
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn native_partial_upgrade_requires_exact_plan_and_persists_rollback_point() {
+        let fixture = Fixture::new();
+        let target = fixture.target();
+        let (current, current_packages) = desktop_bundle(None);
+        install_source_bundle(&current, &current_packages, &target)
+            .expect("install desktop fixture");
+        let root = repository_root();
+        let selection =
+            resolve_source_install_selection(root.join("platforms"), &[], &[], &[], true)
+                .expect("resolve core candidate");
+        let candidate_packages =
+            snapshot_source_packages(&selection).expect("snapshot core candidate");
+        let candidate = compile_source_install_bundle(
+            &selection,
+            &candidate_packages,
+            root.join("schemas"),
+            Some(current.package_lock()),
+        )
+        .expect("compile partial candidate");
+        let evidence = upgrade_evidence(candidate.package_lock());
+        let removed = vec!["desktop".to_owned()];
+        let plan = inspect_source_upgrade(
+            &candidate,
+            &candidate_packages,
+            &target,
+            &evidence,
+            "partial-uninstall",
+            &removed,
+            &[],
+            None,
+        )
+        .expect("inspect partial upgrade");
+        assert_eq!(plan["status"], "planned");
+
+        upgrade_source_bundle(
+            &candidate,
+            &candidate_packages,
+            &target,
+            &evidence,
+            &plan,
+            &["permission:unexpected:none->project-write".to_owned()],
+            "partial-uninstall",
+            &removed,
+            &[],
+            None,
+        )
+        .expect_err("unexpected permission approval must fail");
+        let mut tampered = plan.clone();
+        tampered["fingerprint"] = Value::String("f".repeat(64));
+        upgrade_source_bundle(
+            &candidate,
+            &candidate_packages,
+            &target,
+            &evidence,
+            &tampered,
+            &[],
+            "partial-uninstall",
+            &removed,
+            &[],
+            None,
+        )
+        .expect_err("tampered approval must fail");
+        assert_eq!(
+            load_json(target.join(".agent-skills/agent-skills.lock"))
+                .expect("current Lock survives rejection"),
+            *current.package_lock()
+        );
+
+        let result = upgrade_source_bundle(
+            &candidate,
+            &candidate_packages,
+            &target,
+            &evidence,
+            &plan,
+            &[],
+            "partial-uninstall",
+            &removed,
+            &[],
+            None,
+        )
+        .expect("apply partial upgrade");
+
+        assert_eq!(result["status"], "upgraded");
+        assert_eq!(
+            load_json(target.join(".agent-skills/agent-skills.lock")).expect("load upgraded Lock"),
+            *candidate.package_lock()
+        );
+        assert!(
+            target
+                .join(".agent-skills/rollback-point/rollback-point.json")
+                .is_file()
+        );
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+    }
+
+    #[test]
+    fn approval_comparison_requires_the_exact_semantic_set() {
+        let plan = json!({
+            "approvals_required": [
+                "permission:implementation.apple:none->project-write",
+            ],
+        });
+        require_exact_upgrade_approvals(&plan, &[])
+            .expect_err("missing permission approval must fail");
+        require_exact_upgrade_approvals(
+            &plan,
+            &[
+                "permission:implementation.apple:none->project-write".to_owned(),
+                "permission:implementation.apple:none->project-write".to_owned(),
+            ],
+        )
+        .expect("duplicate presentation of the exact approval remains compatible");
+        require_exact_upgrade_approvals(
+            &plan,
+            &[
+                "permission:implementation.apple:none->project-write".to_owned(),
+                "permission:unexpected:none->project-write".to_owned(),
+            ],
+        )
+        .expect_err("unexpected permission approval must fail");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn activation_upgrade_smoke_failure_restores_managed_and_external_preimages() {
+        let fixture = Fixture::new();
+        let target = fixture.target();
+        let (bundle, packages) = apple_bundle();
+        let launcher = b"native upgrade smoke launcher\n";
+        install_source_bundle_with_activation(&bundle, &packages, &target, launcher)
+            .expect("install activated Apple fixture");
+        remove_optional_rollback_point(&target);
+        let legacy_activation = downgrade_activation_lock_to_v1(&target);
+        let old_install = std::fs::read(target.join(".agent-skills/install-lock.json"))
+            .expect("old Install Lock");
+        let old_package = std::fs::read(target.join(".agent-skills/agent-skills.lock"))
+            .expect("old package Lock");
+        let evidence = upgrade_evidence(bundle.package_lock());
+        let plan = inspect_source_upgrade(
+            &bundle,
+            &packages,
+            &target,
+            &evidence,
+            "upgrade",
+            &[],
+            &[],
+            Some(launcher),
+        )
+        .expect("inspect Activation migration");
+        assert_eq!(plan["status"], "planned");
+        assert_eq!(
+            plan["external"]["handler"],
+            "core.source-activation.apple-codex-v1"
+        );
+
+        let error = upgrade_source_bundle_with_smoke(
+            &bundle,
+            &packages,
+            &target,
+            &evidence,
+            &plan,
+            &[],
+            "upgrade",
+            &[],
+            &[],
+            Some(launcher),
+            |_| invalid("injected installed workflow smoke failure"),
+            |published, launcher| published.apply_source_activation(launcher).map(|_| ()),
+            |published| published.apply_source_deactivation().map(|_| ()),
+        )
+        .expect_err("smoke failure must roll back");
+        assert!(
+            error
+                .to_string()
+                .contains("injected installed workflow smoke failure")
+        );
+        assert_eq!(
+            std::fs::read(target.join(".agent-skills/install-lock.json"))
+                .expect("restored Install Lock"),
+            old_install
+        );
+        assert_eq!(
+            std::fs::read(target.join(".agent-skills/agent-skills.lock"))
+                .expect("restored package Lock"),
+            old_package
+        );
+        assert_eq!(
+            std::fs::read(target.join(".agent-skills/activation-lock.json"))
+                .expect("restored Activation Lock"),
+            legacy_activation
+        );
+        assert_eq!(
+            std::fs::read(target.join("bin/agent-session")).expect("restored session launcher"),
+            launcher
+        );
+        assert!(!target.join(".agent-skills/rollback-point").exists());
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+
+        let error = upgrade_source_bundle_with_smoke(
+            &bundle,
+            &packages,
+            &target,
+            &evidence,
+            &plan,
+            &[],
+            "upgrade",
+            &[],
+            &[],
+            Some(launcher),
+            |_| Ok(()),
+            |published, launcher| {
+                published
+                    .apply_source_activation_with_test_hook(launcher, |_, phase| {
+                        if phase == "activation-lock-published" {
+                            invalid("injected partial source Activation failure")
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .map(|_| ())
+            },
+            |published| published.apply_source_deactivation().map(|_| ()),
+        )
+        .expect_err("partial Activation failure must roll back");
+        assert!(
+            error
+                .to_string()
+                .contains("injected partial source Activation failure")
+        );
+        assert_eq!(
+            std::fs::read(target.join(".agent-skills/install-lock.json"))
+                .expect("restored Install Lock after partial handler"),
+            old_install
+        );
+        assert_eq!(
+            std::fs::read(target.join(".agent-skills/agent-skills.lock"))
+                .expect("restored package Lock after partial handler"),
+            old_package
+        );
+        assert_eq!(
+            std::fs::read(target.join(".agent-skills/activation-lock.json"))
+                .expect("restored Activation Lock after partial handler"),
+            legacy_activation
+        );
+        assert_eq!(
+            std::fs::read(target.join("bin/agent-session"))
+                .expect("restored launcher after partial handler"),
+            launcher
+        );
+        assert!(!target.join(".agent-skills/rollback-point").exists());
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+
+        let result = upgrade_source_bundle(
+            &bundle,
+            &packages,
+            &target,
+            &evidence,
+            &plan,
+            &[],
+            "upgrade",
+            &[],
+            &[],
+            Some(launcher),
+        )
+        .expect("apply Activation migration after passing smoke");
+        assert_eq!(result["status"], "upgraded");
+        assert_eq!(
+            load_json(target.join(".agent-skills/activation-lock.json"))
+                .expect("load migrated Activation Lock")["schema_version"],
+            "2.0"
+        );
+        assert!(
+            target
+                .join(".agent-skills/rollback-point/rollback-point.json")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn deactivation_upgrade_removes_only_activation_owned_state_and_persists_rollback() {
+        let fixture = Fixture::new();
+        let target = fixture.target();
+        let (current, current_packages) = apple_bundle();
+        let launcher = b"native deactivation launcher\n";
+        install_source_bundle_with_activation(&current, &current_packages, &target, launcher)
+            .expect("install activated Apple fixture");
+        remove_optional_rollback_point(&target);
+        let installed = load_json(target.join(".agent-skills/install-lock.json"))
+            .expect("load installed selection");
+        let disciplines = selected_strings(&installed, "selected_disciplines");
+        let root = repository_root();
+        let core_only = disciplines.is_empty();
+        let selection = resolve_source_install_selection(
+            root.join("platforms"),
+            &[],
+            &disciplines,
+            &[],
+            core_only,
+        )
+        .expect("resolve deactivated candidate");
+        let packages =
+            snapshot_source_packages(&selection).expect("snapshot deactivated candidate");
+        let candidate = compile_source_install_bundle(
+            &selection,
+            &packages,
+            root.join("schemas"),
+            Some(current.package_lock()),
+        )
+        .expect("compile deactivated candidate");
+        let evidence = upgrade_evidence(candidate.package_lock());
+        let removed_platforms = vec!["apple".to_owned()];
+        let removed_runtime_configs = vec!["codex".to_owned()];
+        let plan = inspect_source_upgrade(
+            &candidate,
+            &packages,
+            &target,
+            &evidence,
+            "partial-uninstall",
+            &removed_platforms,
+            &removed_runtime_configs,
+            None,
+        )
+        .expect("inspect source deactivation");
+        assert_eq!(
+            plan["external"]["handler"],
+            "core.source-deactivation.apple-codex-v1"
+        );
+
+        let result = upgrade_source_bundle(
+            &candidate,
+            &packages,
+            &target,
+            &evidence,
+            &plan,
+            &[],
+            "partial-uninstall",
+            &removed_platforms,
+            &removed_runtime_configs,
+            None,
+        )
+        .expect("apply source deactivation");
+
+        assert_eq!(result["status"], "upgraded");
+        assert!(!target.join(".agent-skills/activation-lock.json").exists());
+        assert!(!target.join("bin/agent-session").exists());
+        assert!(!target.join("bin/agent-skills").exists());
+        assert!(
+            target
+                .join(".agent-skills/rollback-point/rollback-point.json")
+                .is_file()
+        );
+        assert_eq!(
+            load_json(target.join(".agent-skills/agent-skills.lock"))
+                .expect("load deactivated package Lock"),
+            *candidate.package_lock()
+        );
+    }
+
+    #[test]
+    fn preserve_upgrade_keeps_activation_state_byte_exact_and_persists_rollback() {
+        let fixture = Fixture::new();
+        let target = fixture.target();
+        let root = repository_root();
+        let current_selection = resolve_source_install_selection(
+            root.join("platforms"),
+            &["apple".to_owned(), "desktop".to_owned()],
+            &[],
+            &["codex".to_owned()],
+            false,
+        )
+        .expect("resolve Apple and Desktop");
+        let current_packages =
+            snapshot_source_packages(&current_selection).expect("snapshot Apple and Desktop");
+        let current = compile_source_install_bundle(
+            &current_selection,
+            &current_packages,
+            root.join("schemas"),
+            None,
+        )
+        .expect("compile Apple and Desktop bundle");
+        let launcher = b"native preserve launcher\n";
+        install_source_bundle_with_activation(&current, &current_packages, &target, launcher)
+            .expect("install activated multi-platform fixture");
+        remove_optional_rollback_point(&target);
+        let installed = load_json(target.join(".agent-skills/install-lock.json"))
+            .expect("load multi-platform selection");
+        let disciplines = selected_strings(&installed, "selected_disciplines");
+        let candidate_selection = resolve_source_install_selection(
+            root.join("platforms"),
+            &["apple".to_owned()],
+            &disciplines,
+            &["codex".to_owned()],
+            false,
+        )
+        .expect("resolve preserved Apple candidate");
+        let packages =
+            snapshot_source_packages(&candidate_selection).expect("snapshot preserved candidate");
+        let candidate = compile_source_install_bundle(
+            &candidate_selection,
+            &packages,
+            root.join("schemas"),
+            Some(current.package_lock()),
+        )
+        .expect("compile preserved candidate");
+        let evidence = upgrade_evidence(candidate.package_lock());
+        let removed = vec!["desktop".to_owned()];
+        let plan = inspect_source_upgrade(
+            &candidate,
+            &packages,
+            &target,
+            &evidence,
+            "partial-uninstall",
+            &removed,
+            &[],
+            None,
+        )
+        .expect("inspect preserve upgrade");
+        assert_eq!(
+            plan["external"]["handler"],
+            "core.source-preserve.apple-codex-v1"
+        );
+        let activation =
+            std::fs::read(target.join(".agent-skills/activation-lock.json")).expect("Activation");
+        let session = std::fs::read(target.join("bin/agent-session")).expect("session launcher");
+
+        let result = upgrade_source_bundle(
+            &candidate,
+            &packages,
+            &target,
+            &evidence,
+            &plan,
+            &[],
+            "partial-uninstall",
+            &removed,
+            &[],
+            None,
+        )
+        .expect("apply preserve upgrade");
+
+        assert_eq!(result["status"], "upgraded");
+        assert_eq!(
+            std::fs::read(target.join(".agent-skills/activation-lock.json"))
+                .expect("preserved Activation"),
+            activation
+        );
+        assert_eq!(
+            std::fs::read(target.join("bin/agent-session")).expect("preserved session launcher"),
+            session
+        );
+        assert!(
+            target
+                .join(".agent-skills/rollback-point/rollback-point.json")
+                .is_file()
+        );
+        assert_eq!(
+            load_json(target.join(".agent-skills/agent-skills.lock"))
+                .expect("load preserved package Lock"),
+            *candidate.package_lock()
         );
     }
 

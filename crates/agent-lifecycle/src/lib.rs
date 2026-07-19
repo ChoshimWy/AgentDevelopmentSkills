@@ -24,6 +24,7 @@
 mod codex_config;
 mod doctor_report;
 mod external_stage;
+mod installed_smoke;
 mod managed_swap;
 mod packages;
 mod post_install;
@@ -51,8 +52,8 @@ pub use source_install::{
     SourceInstallSelection, inspect_source_platform_options, resolve_source_install_selection,
 };
 pub use source_lifecycle::{
-    inspect_source_install, inspect_source_install_with_activation, install_source_bundle,
-    install_source_bundle_with_activation,
+    inspect_source_install, inspect_source_install_with_activation, inspect_source_upgrade,
+    install_source_bundle, install_source_bundle_with_activation, upgrade_source_bundle,
 };
 pub use source_packages::{SourcePackageSet, snapshot_source_packages};
 pub use staged_install::ValidatedInstallPlan;

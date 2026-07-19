@@ -25,6 +25,8 @@ pub struct UpgradePlanningSnapshot {
     pub(super) activation_owned: bool,
     pub(super) current_install_plan: Value,
     pub(super) current_package_lock: Value,
+    pub(super) external_paths: Vec<String>,
+    pub(super) handler: String,
     pub(super) handler_sha256: String,
     pub(super) lock: LifecycleLock,
     pub(super) receipt: Value,
@@ -34,6 +36,10 @@ pub struct UpgradePlanningSnapshot {
 impl UpgradePlanningSnapshot {
     pub(super) fn validate_lock(&self) -> Result<(), LifecycleError> {
         self.lock.validate()
+    }
+
+    pub(super) fn into_workspace(self) -> Result<crate::LifecycleWorkspace, LifecycleError> {
+        crate::LifecycleWorkspace::from_lock(self.lock)
     }
 }
 
@@ -270,6 +276,8 @@ pub fn inspect_upgrade_planning_snapshot(
         activation_owned,
         current_install_plan,
         current_package_lock,
+        external_paths: paths,
+        handler: handler.to_owned(),
         handler_sha256,
         lock,
         receipt,

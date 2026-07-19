@@ -35,6 +35,7 @@ dependencies = [
  "agent-contracts",
  "agent-engine",
  "agent-registry",
+ "agent-runtime",
  "cap-fs-ext",
  "cap-std",
  "libc",

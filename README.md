@@ -394,8 +394,18 @@ remain byte-for-byte differential-tested against Python, while native
 Activation results are semantic-differential-tested because the Rust route
 also owns `bin/agent-skills` and has its own handler implementation hash.
 `upgrade-evidence-validate` and `upgrade-plan-validate` retain negative
-contract coverage. Mutating upgrade and rollback routing remains on the
-existing approval-bound path until the native executor passes the same gates.
+contract coverage. `agent-lifecycle` now also contains the first native
+mutating executor: it rebuilds the exact approved Plan under the same held
+target lock, compares the complete Plan and permission approvals, stages the
+candidate and persistent rollback point, publishes through `PublishedInstall`,
+and dispatches only the receipt-bound activate/deactivate/preserve handler.
+Before an Apple activation can write external state, the newly published
+installation must pass a native installed-registry smoke covering discovery,
+policy, a package-Lock-bound ready Plan, Skill bindings, Recorded Adapter
+execution, independent review, and delivery reporting. Any smoke or handler
+failure remains inside the managed/external rollback window. Public upgrade
+and rollback CLI routing remains on the existing approval-bound compatibility
+path until executor CLI, differential, and release gates pass.
 The installed native
 `agent-session` dispatch preserves
 the public `create`, `list`, `inspect`, `fingerprint`, `checkpoint`, and `gate`
