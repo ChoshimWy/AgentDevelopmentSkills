@@ -67,9 +67,10 @@ hosted fresh installs and dry-runs now select Rust, explicit-source native
 upgrade is public, and release qualification emits a Manifest-v3-bound
 immutable Upgrade Source Qualification. An operator-invoked hosted upgrade
 route now performs authenticated acquisition, approval-envelope generation,
-and guarded native apply. Automatic invocation from compatibility bootstraps,
-legacy adoption, the remaining bootstrap compatibility layer, and other routes
-remain pending.
+and guarded native apply. The signed POSIX release bootstrap now routes an
+explicit `--upgrade` request through the release-matched Rust executable with
+no Python fallback. PowerShell and other compatibility bootstrap surfaces,
+legacy adoption, and other routes remain pending.
 The repository contains:
 
 - a Rust workspace pinned to Rust 1.97.1;
@@ -276,12 +277,17 @@ fresh Apple/Desktop request downloads both bounded assets with HTTPS-only
 redirects, verifies their exact size and SHA-256, extracts the frozen source
 archive, and invokes the verified native installer without requiring Python.
 The Final Gate independently recomputes the rendered bootstrap from source
-SBOM materials and the verified native index. Source-checkout, interactive,
-compatibility-only, existing-install, upgrade, legacy-adoption, and PowerShell
-requests still use the Python compatibility path. Operators may explicitly
-select that path with `AGENT_SKILLS_INSTALL_ENGINE=python`; forced Rust fails
-closed when the request is ineligible, and a selected native acquisition or
-execution failure never silently downgrades. The parallel CLI currently covers canonical JSON,
+SBOM materials and the verified native index. The same signed POSIX bootstrap
+routes an explicit existing-install `--upgrade` request to the exact
+release-matched host executable after checking its embedded size and SHA-256;
+it does not download the source archive, trust the installed launcher, or
+permit Python fallback. Source-checkout, interactive, compatibility-only,
+legacy-adoption, and PowerShell requests still use the Python compatibility
+path. Operators may explicitly select that path for eligible fresh installs
+with `AGENT_SKILLS_INSTALL_ENGINE=python`; forced Rust fails closed when a
+fresh request is ineligible, while an explicit hosted upgrade rejects the
+Python engine. A selected native acquisition or execution failure never
+silently downgrades. The parallel CLI currently covers canonical JSON,
 hashing, the shared schema-version boundary, registry snapshots, targeted
 binding resolution, source package-selection, package-snapshot, and complete
 Install Bundle/Plan/Lock compatibility, fresh-only guarded source install, an
@@ -410,10 +416,11 @@ release-provenance-bound approval envelope. Apply reacquires the same materials
 and rejects any source, candidate, target, Plan, or approval drift.
 Doctor, uninstall, rollback, and source activation now have native public or
 transaction routes with differential, tamper, concurrency, recovery, and
-independent-review evidence. The remaining hosted lifecycle cutover is
-automatic invocation from the compatibility bootstrap, separate from both the
-explicit operator-invoked native routes and the Python-free eligible
-fresh-install route.
+independent-review evidence. The signed POSIX release bootstrap now exposes
+the explicit guarded `--upgrade` route without Python. The remaining hosted
+lifecycle cutover is PowerShell and the other compatibility bootstrap
+surfaces, separate from both the operator-invoked native routes and the
+Python-free eligible fresh-install route.
 Upgrade Source Qualification v1 establishes the release-side input for that
 cutover. It binds the completed repository Conformance suite to the immutable
 source archive hash and size, source revision, complete SBOM material identity,

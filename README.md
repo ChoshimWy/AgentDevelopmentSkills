@@ -26,17 +26,18 @@ uninstall transactions. It now also provides an operator-invoked
 `hosted-upgrade` route that authenticates the fixed Pages control plane,
 qualified source archive, and current-host executable before issuing a
 release-provenance-bound approval envelope. Source-checkout installs,
-interactive or compatibility-only requests, automatic bootstrap-driven
-upgrades, and legacy adoption still use separately gated compatibility paths. The
-repository carries an MIT `LICENSE`, a `NOTICE`, and verified
+interactive or compatibility-only requests, PowerShell bootstrap upgrades, and
+legacy adoption still use separately gated compatibility paths. The signed
+POSIX release bootstrap now routes an explicit `--upgrade` request through the
+release-matched Rust executable without Python fallback. The repository
+carries an MIT `LICENSE`, a `NOTICE`, and verified
 migration-audit hashes. The GitHub Pages control plane is deployed; public
 release assets and remote installation remain gated on an external release
 signature and GitHub environment approval.
 
 ## Requirements
 
-- Python 3.11 or newer for the current thin bootstrap, source-checkout install,
-  and compatibility fallback
+- Python 3.11 or newer for source-checkout install and compatibility fallback
 - Rust 1.97.1 for native development; hosted v2 releases download a qualified
   target binary
 - macOS, Linux, or WSL2 for the production bootstrap path
@@ -83,11 +84,12 @@ require Python. Set
 `AGENT_SKILLS_INSTALL_ENGINE=python` to request the transitional compatibility
 path. `AGENT_SKILLS_INSTALL_ENGINE=rust` fails closed if the request is not
 eligible; once Rust has been selected, a native failure never silently
-downgrades to Python. Source-checkout, automatic bootstrap-driven upgrades,
-and other compatibility-only requests still require Python 3.11+. The PowerShell
-bootstrap also remains on that compatibility path because Windows is blocked
-as a production source-install target until its complete install contract is
-enabled.
+downgrades to Python. A signed POSIX release bootstrap also routes an explicit
+`--upgrade` request directly to the release-matched Rust executable; this route
+has no Python fallback. Source-checkout and other compatibility-only requests
+still require Python 3.11+. The PowerShell bootstrap also remains on that
+compatibility path because Windows is blocked as a production source-install
+target until its complete install contract is enabled.
 
 An Apple native install publishes the verified executable as both
 `~/.codex/bin/agent-session` and `~/.codex/bin/agent-skills`. The latter exposes
@@ -120,6 +122,29 @@ The apply command reacquires and reauthenticates the release, recompiles the
 candidate twice, compares the complete saved envelope, and replaces both
 installed launcher names with the verified current-host executable inside the
 guarded lifecycle transaction. It is never an unattended background update.
+
+The signed POSIX release bootstrap provides the same explicit two-step flow
+without trusting the already installed launcher:
+
+```bash
+curl -fsSL --proto '=https' --tlsv1.2 \
+  https://choshimwy.github.io/AgentDevelopmentSkills/install.sh \
+  | bash -s -- --upgrade --target-root ~/.codex --dry-run \
+      --output /path/to/hosted-upgrade-plan.json
+
+curl -fsSL --proto '=https' --tlsv1.2 \
+  https://choshimwy.github.io/AgentDevelopmentSkills/install.sh \
+  | bash -s -- --upgrade --target-root ~/.codex \
+      --plan /path/to/hosted-upgrade-plan.json \
+      --approve-plan <envelope-fingerprint> \
+      --approve <each-required-permission-approval>
+```
+
+The bootstrap downloads only the current release's exact host executable,
+checks its embedded size and SHA-256 identity, and forwards only the guarded
+upgrade arguments. Unsupported hosts, malformed approval modes, source-checkout
+invocation, an explicit Python engine, and asset tampering all fail closed
+before native execution.
 
 The gated hosted uninstaller authenticates that installed executable against
 its embedded release matrix before selecting Rust:
@@ -461,8 +486,9 @@ current `.system` tree, restores the frozen external preimages inside the same
 `PublishedInstall` recovery window, and persists the displaced current state
 as the next rollback point. `lifecycle-rollback` remains a visible
 compatibility alias. `lifecycle-upgrade` likewise remains a visible alias.
-Automatic invocation from compatibility bootstraps remains a separate release
-gate.
+The signed POSIX release bootstrap now exposes the explicit guarded
+`--upgrade` route. PowerShell and the remaining compatibility bootstrap
+surfaces remain separate release gates.
 Upgrade Source Qualification v1 now provides the next release boundary: it
 binds the completed repository Conformance suite to one immutable source
 archive, source revision, complete SBOM material identity, Schema inventory,

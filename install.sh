@@ -88,10 +88,24 @@ case "$REQUESTED_ENGINE" in
         ;;
 esac
 
+NATIVE_UPGRADE_REQUESTED=0
+for argument in "$@"; do
+    if [[ "$argument" == "--upgrade" ]]; then
+        NATIVE_UPGRADE_REQUESTED=1
+        break
+    fi
+done
+
 # Source-checkout compatibility path. The hosted/piped script has no repository sibling.
 if [[ -n "$SCRIPT_SOURCE" ]]; then
     REPO_ROOT="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd -P)"
     if [[ -f "$REPO_ROOT/scripts/install_local.py" ]]; then
+        if ((NATIVE_UPGRADE_REQUESTED)); then
+            printf '%s\n' \
+                "hosted upgrade requires the signed release bootstrap, not a source checkout" \
+                >&2
+            exit 2
+        fi
         if [[ "$REQUESTED_ENGINE" == "rust" ]]; then
             printf '%s\n' \
                 "forced Rust install requires a hosted v2 release and an explicit fresh platform selection" \
@@ -114,6 +128,11 @@ NATIVE_PLATFORMS=()
 NATIVE_PLATFORM_KEYS='|'
 NATIVE_JSON=0
 NATIVE_DRY_RUN=0
+NATIVE_UPGRADE_DRY_RUN=0
+NATIVE_UPGRADE_OUTPUT=''
+NATIVE_UPGRADE_PLAN=''
+NATIVE_UPGRADE_APPROVE_PLAN=''
+NATIVE_UPGRADE_APPROVALS=()
 
 parse_native_request() {
     local argument value
@@ -173,6 +192,94 @@ parse_native_request() {
     for existing in AGENTS.md skills .agent-skills; do
         [[ ! -e "$NATIVE_TARGET_ROOT/$existing" && ! -L "$NATIVE_TARGET_ROOT/$existing" ]] || return 1
     done
+}
+
+parse_native_upgrade_request() {
+    local argument value upgrade_seen=0 target_root_seen=0
+    while (($#)); do
+        argument="$1"
+        case "$argument" in
+            --upgrade)
+                ((upgrade_seen == 0)) || return 1
+                upgrade_seen=1
+                shift
+                ;;
+            --dry-run)
+                ((NATIVE_UPGRADE_DRY_RUN == 0)) || return 1
+                NATIVE_UPGRADE_DRY_RUN=1
+                shift
+                ;;
+            --target-root|--output|--plan|--approve-plan|--approve)
+                (($# >= 2)) || return 1
+                value="$2"
+                [[ -n "$value" ]] || return 1
+                case "$argument" in
+                    --target-root)
+                        ((target_root_seen == 0)) || return 1
+                        target_root_seen=1
+                        NATIVE_TARGET_ROOT="$value"
+                        ;;
+                    --output)
+                        [[ -z "$NATIVE_UPGRADE_OUTPUT" ]] || return 1
+                        NATIVE_UPGRADE_OUTPUT="$value"
+                        ;;
+                    --plan)
+                        [[ -z "$NATIVE_UPGRADE_PLAN" ]] || return 1
+                        NATIVE_UPGRADE_PLAN="$value"
+                        ;;
+                    --approve-plan)
+                        [[ -z "$NATIVE_UPGRADE_APPROVE_PLAN" ]] || return 1
+                        NATIVE_UPGRADE_APPROVE_PLAN="$value"
+                        ;;
+                    --approve) NATIVE_UPGRADE_APPROVALS+=("$value") ;;
+                esac
+                shift 2
+                ;;
+            --target-root=*|--output=*|--plan=*|--approve-plan=*|--approve=*)
+                value="${argument#*=}"
+                [[ -n "$value" ]] || return 1
+                case "$argument" in
+                    --target-root=*)
+                        ((target_root_seen == 0)) || return 1
+                        target_root_seen=1
+                        NATIVE_TARGET_ROOT="$value"
+                        ;;
+                    --output=*)
+                        [[ -z "$NATIVE_UPGRADE_OUTPUT" ]] || return 1
+                        NATIVE_UPGRADE_OUTPUT="$value"
+                        ;;
+                    --plan=*)
+                        [[ -z "$NATIVE_UPGRADE_PLAN" ]] || return 1
+                        NATIVE_UPGRADE_PLAN="$value"
+                        ;;
+                    --approve-plan=*)
+                        [[ -z "$NATIVE_UPGRADE_APPROVE_PLAN" ]] || return 1
+                        NATIVE_UPGRADE_APPROVE_PLAN="$value"
+                        ;;
+                    --approve=*) NATIVE_UPGRADE_APPROVALS+=("$value") ;;
+                esac
+                shift
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+    ((upgrade_seen == 1)) || return 1
+    [[ -n "$NATIVE_TARGET_ROOT" && "$NATIVE_TARGET_ROOT" != *'~'* ]] || return 1
+    [[ -d "$NATIVE_TARGET_ROOT" && ! -L "$NATIVE_TARGET_ROOT" ]] || return 1
+    if ((NATIVE_UPGRADE_DRY_RUN)); then
+        [[ -z "$NATIVE_UPGRADE_PLAN" \
+            && -z "$NATIVE_UPGRADE_APPROVE_PLAN" \
+            && ${#NATIVE_UPGRADE_APPROVALS[@]} -eq 0 ]] || return 1
+    else
+        [[ -z "$NATIVE_UPGRADE_OUTPUT" \
+            && -n "$NATIVE_UPGRADE_PLAN" \
+            && -n "$NATIVE_UPGRADE_APPROVE_PLAN" \
+            && "$NATIVE_UPGRADE_APPROVE_PLAN" =~ ^[0-9a-f]{64}$ \
+            && -f "$NATIVE_UPGRADE_PLAN" \
+            && ! -L "$NATIVE_UPGRADE_PLAN" ]] || return 1
+    fi
 }
 
 gnu_libc_is_compatible() {
@@ -308,6 +415,80 @@ run_native_install() {
     AGENT_SKILLS_RELEASE_VERSION="$AGENT_SKILLS_EMBEDDED_VERSION" \
         "${command[@]}"
 }
+
+run_native_upgrade() {
+    local target="$1"
+    local native_filename native_sha256 native_size
+    local temporary native_executable
+    command -v curl >/dev/null 2>&1 || {
+        printf '%s\n' "native hosted upgrade requires curl" >&2
+        return 2
+    }
+    [[ "$AGENT_SKILLS_EMBEDDED_ASSET_BASE_URL" == https://* \
+        || ( "${AGENT_SKILLS_ALLOW_FILE_URL:-}" == "1" \
+            && "$AGENT_SKILLS_EMBEDDED_ASSET_BASE_URL" == file://* ) ]] || {
+        printf '%s\n' "embedded release asset base URL is unavailable or insecure" >&2
+        return 2
+    }
+    agent_skills_select_native_record "$target" || {
+        printf '%s\n' "the embedded release has no native artifact for $target" >&2
+        return 2
+    }
+    temporary="$(mktemp -d "${TMPDIR:-/tmp}/agent-skills-native-upgrade.XXXXXX")"
+    NATIVE_BOOTSTRAP_DIR="$temporary"
+    trap 'rm -rf "${NATIVE_BOOTSTRAP_DIR:-}"' EXIT HUP INT TERM
+    native_executable="$temporary/$native_filename"
+    download_native_asset \
+        "$AGENT_SKILLS_EMBEDDED_ASSET_BASE_URL$native_filename" \
+        "$native_executable" \
+        "$native_size" \
+        "$native_sha256"
+    chmod 700 "$native_executable"
+    local command=(
+        "$native_executable"
+        hosted-upgrade
+        --target-root "$NATIVE_TARGET_ROOT"
+    )
+    if ((NATIVE_UPGRADE_DRY_RUN)); then
+        command+=(--dry-run)
+        if [[ -n "$NATIVE_UPGRADE_OUTPUT" ]]; then
+            command+=(--output "$NATIVE_UPGRADE_OUTPUT")
+        fi
+    else
+        command+=(
+            --plan "$NATIVE_UPGRADE_PLAN"
+            --approve-plan "$NATIVE_UPGRADE_APPROVE_PLAN"
+        )
+        local approval
+        for approval in "${NATIVE_UPGRADE_APPROVALS[@]}"; do
+            command+=(--approve "$approval")
+        done
+    fi
+    AGENT_SKILLS_INSTALL_ENGINE_SELECTED=rust \
+    AGENT_SKILLS_RELEASE_SHA256="$AGENT_SKILLS_EMBEDDED_SOURCE_SHA256" \
+    AGENT_SKILLS_RELEASE_VERSION="$AGENT_SKILLS_EMBEDDED_VERSION" \
+        "${command[@]}"
+}
+
+if ((NATIVE_UPGRADE_REQUESTED)); then
+    if [[ "$REQUESTED_ENGINE" == "python" ]]; then
+        printf '%s\n' "hosted upgrade has no Python fallback" >&2
+        exit 2
+    fi
+    if ! parse_native_upgrade_request "$@"; then
+        printf '%s\n' \
+            "hosted upgrade requires a safe existing target and either --dry-run or the exact --plan and --approve-plan" \
+            >&2
+        exit 2
+    fi
+    HOST_TARGET="$(native_host_target || true)"
+    if [[ -z "$HOST_TARGET" ]] || ! agent_skills_select_native_record "$HOST_TARGET"; then
+        printf '%s\n' "the signed release has no supported native upgrade artifact for this host" >&2
+        exit 2
+    fi
+    run_native_upgrade "$HOST_TARGET"
+    exit $?
+fi
 
 NATIVE_REQUEST_ELIGIBLE=0
 if parse_native_request "$@"; then

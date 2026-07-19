@@ -904,6 +904,205 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(arguments_path.is_file())
 
     @unittest.skipIf(os.name == "nt", "POSIX native bootstrap is covered on macOS/Linux")
+    def test_rendered_posix_bootstrap_routes_explicit_hosted_upgrade_without_python(self) -> None:
+        release = self.root / "rendered-native-upgrade-release"
+        release.mkdir()
+        target_triple = bootstrap._NATIVE_TARGETS[
+            (bootstrap._host_os(), bootstrap._host_arch())
+        ]
+        native_filename = f"agent-skills-1.0.0-{target_triple}"
+        native_path = release / native_filename
+        native_path.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$@\" > \"$AGENT_SKILLS_TEST_NATIVE_ARGS\"\n"
+            "printf '%s\\n' '{\"engine\":\"rust-shell\",\"status\":\"routed\"}'\n",
+            encoding="utf-8",
+        )
+        native_data = native_path.read_bytes()
+        native_records = [{
+            "filename": native_filename,
+            "sha256": hashlib.sha256(native_data).hexdigest(),
+            "size": len(native_data),
+            "target": target_triple,
+        }]
+        if target_triple != "x86_64-unknown-linux-gnu":
+            native_records.append({
+                **native_records[0],
+                "target": "x86_64-unknown-linux-gnu",
+            })
+        rendered = builder._render_posix_bootstrap(
+            (ROOT / "install.sh").read_bytes(),
+            asset_base_url=release.as_uri() + "/",
+            source_artifact={
+                "filename": "source-not-needed-for-upgrade.zip",
+                "root": "agent-development-skills-1.0.0",
+                "sha256": "1" * 64,
+                "size": 1,
+            },
+            native_records=native_records,
+            version="1.0.0",
+        )
+        script = self.root / "rendered-upgrade-install.sh"
+        script.write_bytes(rendered)
+        target = self.root / "existing-native-target"
+        target.mkdir()
+        arguments_path = self.root / "rendered-upgrade-arguments.txt"
+        environment = {
+            **os.environ,
+            "AGENT_SKILLS_ALLOW_FILE_URL": "1",
+            "AGENT_SKILLS_PYTHON": str(self.root / "missing-python"),
+            "AGENT_SKILLS_TEST_NATIVE_ARGS": str(arguments_path),
+            "PATH": "/usr/bin:/bin",
+        }
+
+        preview_output = self.root / "hosted-upgrade-plan.json"
+        preview = subprocess.run(
+            [
+                "/bin/bash",
+                str(script),
+                "--upgrade",
+                "--target-root",
+                str(target),
+                "--dry-run",
+                "--output",
+                str(preview_output),
+            ],
+            cwd=self.root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        self.assertEqual(
+            json.loads(preview.stdout),
+            {"engine": "rust-shell", "status": "routed"},
+        )
+        self.assertEqual(
+            arguments_path.read_text(encoding="utf-8").splitlines(),
+            [
+                "hosted-upgrade",
+                "--target-root",
+                str(target),
+                "--dry-run",
+                "--output",
+                str(preview_output),
+            ],
+        )
+        self.assertFalse((release / "source-not-needed-for-upgrade.zip").exists())
+
+        arguments_path.unlink()
+        saved_plan = self.root / "saved-hosted-upgrade-plan.json"
+        saved_plan.write_text("{}\n", encoding="utf-8")
+        fingerprint = "a" * 64
+        applied = subprocess.run(
+            [
+                "/bin/bash",
+                str(script),
+                "--upgrade",
+                f"--target-root={target}",
+                f"--plan={saved_plan}",
+                f"--approve-plan={fingerprint}",
+                "--approve",
+                "permission:core:none->project-write",
+                "--approve=permission:apple:none->project-write",
+            ],
+            cwd=self.root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        self.assertEqual(
+            arguments_path.read_text(encoding="utf-8").splitlines(),
+            [
+                "hosted-upgrade",
+                "--target-root",
+                str(target),
+                "--plan",
+                str(saved_plan),
+                "--approve-plan",
+                fingerprint,
+                "--approve",
+                "permission:core:none->project-write",
+                "--approve",
+                "permission:apple:none->project-write",
+            ],
+        )
+
+        arguments_path.unlink()
+        missing_approval = subprocess.run(
+            ["/bin/bash", str(script), "--upgrade", "--target-root", str(target)],
+            cwd=self.root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(missing_approval.returncode, 2)
+        self.assertIn("exact --plan and --approve-plan", missing_approval.stderr)
+        self.assertFalse(arguments_path.exists())
+
+        duplicate_target = subprocess.run(
+            [
+                "/bin/bash",
+                str(script),
+                "--upgrade",
+                "--target-root",
+                str(target),
+                f"--target-root={target}",
+                "--dry-run",
+            ],
+            cwd=self.root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(duplicate_target.returncode, 2)
+        self.assertIn("safe existing target", duplicate_target.stderr)
+        self.assertFalse(arguments_path.exists())
+
+        python_fallback = subprocess.run(
+            [
+                "/bin/bash",
+                str(script),
+                "--upgrade",
+                "--target-root",
+                str(target),
+                "--dry-run",
+            ],
+            cwd=self.root,
+            env={**environment, "AGENT_SKILLS_INSTALL_ENGINE": "python"},
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(python_fallback.returncode, 2)
+        self.assertIn("has no Python fallback", python_fallback.stderr)
+        self.assertFalse(arguments_path.exists())
+
+        native_path.write_bytes(native_data + b"tampered")
+        tampered = subprocess.run(
+            [
+                "/bin/bash",
+                str(script),
+                "--upgrade",
+                "--target-root",
+                str(target),
+                "--dry-run",
+            ],
+            cwd=self.root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(tampered.returncode, 0)
+        self.assertFalse(arguments_path.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX native bootstrap is covered on macOS/Linux")
     def test_rendered_posix_uninstall_uses_only_the_release_matched_installed_binary(self) -> None:
         release = self.root / "rendered-native-uninstall-release"
         release.mkdir()
