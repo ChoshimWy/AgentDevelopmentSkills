@@ -73,15 +73,22 @@ jobs:
               }
             }
             $env:AGENT_SKILLS_PYTHON = (Get-Command python -ErrorAction Stop).Source
-            $compatibilityOutput = & ./install.ps1 --platform desktop --target-root $target --dry-run --json
-            if ($LASTEXITCODE -ne 0) { throw "occupied PowerShell compatibility route failed" }
+            $occupiedOutput = & ./install.ps1 --platform desktop --target-root $target --dry-run --json 2>&1
+            if ($LASTEXITCODE -ne 2) { throw "occupied PowerShell compatibility route did not fail closed" }
+            if (($occupiedOutput | Out-String) -notmatch "refusing to overwrite unmanaged or modified install roots") {
+              throw "occupied PowerShell target did not preserve the Python compatibility failure"
+            }
+            $compatibilityTarget = "${target}-python"
+            $env:AGENT_SKILLS_INSTALL_ENGINE = "python"
+            $compatibilityOutput = & ./install.ps1 --platform desktop --target-root $compatibilityTarget --dry-run --json
+            if ($LASTEXITCODE -ne 0) { throw "forced Python compatibility route failed" }
             $compatibilityReport = $compatibilityOutput | ConvertFrom-Json
             if ($compatibilityReport.status -ne "planned" -or
                 $compatibilityReport.engine -ne "python-source") {
-              throw "occupied PowerShell target did not use the Python compatibility route"
+              throw "forced Python compatibility route did not preserve engine provenance"
             }
             $env:AGENT_SKILLS_INSTALL_ENGINE = "rust"
-            $blocked = & ./install.ps1 --platform apple --target-root "$target-apple" --dry-run --json 2>&1
+            $blocked = & ./install.ps1 --platform apple --target-root "${target}-apple" --dry-run --json 2>&1
             if ($LASTEXITCODE -ne 2) { throw "forced Rust Apple request did not fail closed" }
             if (($blocked | Out-String) -notmatch "forced Rust source install requires Cargo") {
               throw "forced Rust Apple request failed for an unexpected reason"
@@ -91,6 +98,7 @@ jobs:
             Remove-Item Env:AGENT_SKILLS_INSTALL_ENGINE_SELECTED -ErrorAction SilentlyContinue
             Remove-Item Env:AGENT_SKILLS_PYTHON -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "${target}-python" -Recurse -Force -ErrorAction SilentlyContinue
           }
 
   conformance:
