@@ -31,8 +31,8 @@ static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// [`super::PublishedInstall`] guard. That guard owns external rollback
 /// restoration once its internal mutation boundary starts; trusted handlers
 /// now cover source deactivation, rollback-backed replacement/fresh
-/// activation, and rollback-backed full uninstall, while production commands
-/// are not routed through these guards yet.
+/// activation, rollback-backed legacy adoption, and rollback-backed full
+/// uninstall for the production lifecycle routes that have passed their gates.
 #[must_use = "the lifecycle workspace must be held for the full transaction"]
 pub struct LifecycleWorkspace {
     backup: WorkspaceEntry,

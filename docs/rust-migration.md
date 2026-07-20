@@ -28,7 +28,8 @@ Every migrated component must preserve:
 
 Python remains the compatibility implementation for every route that has not
 passed its Rust differential and release gates. Eligible hosted fresh installs
-have now passed that boundary and default to Rust.
+and exact POSIX legacy iOSAgentSkills adoption now pass that boundary and
+default to Rust.
 
 ## Workspace boundaries
 
@@ -74,8 +75,10 @@ including `--platform all` expanded only across ready inventory entries, now
 builds the pinned Rust CLI offline in a private target directory and executes
 that exact binary. Fresh source-checkout terminal selection now also runs in
 that binary, as does a downloaded signed POSIX release bootstrap invoked with
-an attached terminal. PowerShell, legacy-adoption bootstrap routing, and other
-compatibility surfaces remain pending. Native legacy adoption now has both a
+an attached terminal. Exact legacy iOSAgentSkills layouts selected through the
+same POSIX source or signed-release bootstrap now route to the native adoption
+transaction; PowerShell and other compatibility surfaces remain pending.
+Native legacy adoption now has both a
 read-only classifier and a locked mutation transaction. The classifier
 preserves exact raw `AGENTS.md` / `skills` targets, rejects partial or unrelated
 layouts, and tightens the Python baseline by rejecting links resolved from
@@ -86,7 +89,6 @@ link objects on failure. Repository and resolved-entry identities are checked
 again at each symlink move and restore boundary. A verified publication crosses
 an explicit commit point before best-effort workspace cleanup, so a cleanup
 failure is reported as committed-with-warning rather than as a false rollback.
-It is not yet selected by bootstrap routing.
 The repository contains:
 
 - a Rust workspace pinned to Rust 1.97.1;
@@ -226,8 +228,12 @@ The repository contains:
   full private stage and backup workspace. Repository namespace identities are
   revalidated before and after link moves and before restoration. Post-commit
   cleanup warnings report any retained stage or backup without misclassifying
-  the already committed install as failed. Bootstrap selection of this API
-  remains pending.
+  the already committed install as failed. The production `install` command
+  performs the same read-only classification before dispatch and the
+  transaction revalidates the exact layout again under its lifecycle lock.
+  Before activation and commit, the adopted installed registry must also pass
+  the native installed-workflow smoke; JSON and human reports expose that
+  result plus any committed cleanup warning or retained recovery workspace.
   The crate now also resolves the source package catalog used before native
   installation: explicit platform, discipline, and runtime-config selection;
   required and optional package dependencies; numeric version constraints;
@@ -253,11 +259,12 @@ The repository contains:
   atomically, verifies again, and rolls back on failure. Core-only and Apple
   result/filesystem projections are differential-tested against Python
   `install_bundle`. The production `install` command reuses that transaction
-  and, for Apple, freezes the verified native executable as the session
-  launcher and completes source activation before commit. When invoked through
-  the installed `agent-session` path, the same binary preserves the public
-  create/list/inspect/fingerprint/checkpoint/gate interface. Replacement,
-  upgrade, and legacy adoption remain separate approval-bound gates.
+  for fresh targets, dispatches exact POSIX legacy layouts to the separate
+  legacy-adoption transaction, and, for Apple, freezes the verified native
+  executable as the session launcher before activation and commit. When
+  invoked through the installed `agent-session` path, the same binary preserves the public
+  create/list/inspect/fingerprint/checkpoint/gate interface. Replacement and
+  upgrade remain separate approval-bound gates.
   Portable name-based release assumes a trusted target parent, and callers must
   expand `~` before acquisition. The Doctor path holds directory capabilities
   and opens contract files without following symlinks; unlike the explicit
@@ -315,22 +322,23 @@ SBOM materials and the verified native index. The same signed POSIX bootstrap
 routes an explicit existing-install `--upgrade` request to the exact
 release-matched host executable after checking its embedded size and SHA-256;
 it does not download the source archive, trust the installed launcher, or
-permit Python fallback. An explicit fresh Apple/Desktop source-checkout request,
+permit Python fallback. An explicit Apple/Desktop source-checkout request,
 including `--platform all` expanded from the ready inventory, now selects Rust
 when `cargo` is available, performs a locked offline build from the pinned
 checkout into a private temporary target, and runs that exact binary. It accepts
 explicit discipline and runtime-config selection; the same selection is
 preserved by the shared verified bootstrap compatibility core. With no
-platform argument, a fresh source checkout or rendered POSIX release bootstrap,
-fresh target, and attached terminal now invoke a native line-based selector
-that defaults to Apple, accepts comma-separated ready platform IDs or `all`,
+platform argument, a source checkout or rendered POSIX release bootstrap and
+attached terminal now invoke a native line-based selector that defaults to
+Apple, accepts comma-separated ready platform IDs or `all`,
 exposes bootstrap-only entries as unavailable, and never changes terminal
 mode. A `curl | bash` pipeline has no interactive stdin, so the published
-one-liner supplies `--platform apple` explicitly. Existing-install,
-legacy-adoption, and other
-compatibility-only source requests remain on Python. Operators may explicitly
-select that path with `AGENT_SKILLS_INSTALL_ENGINE=python`; forced Rust fails
-closed when a fresh request is ineligible or Cargo is unavailable, while an
+one-liner supplies `--platform apple` explicitly. Exact legacy iOSAgentSkills
+layouts are classified read-only and dispatched to native adoption; unrelated,
+partial, mixed-root, or unsafe layouts fail closed. Other compatibility-only
+source requests remain on Python. Operators may explicitly select that path
+with `AGENT_SKILLS_INSTALL_ENGINE=python`; forced Rust fails
+closed when a request is ineligible or Cargo is unavailable, while an
 explicit hosted upgrade rejects the Python engine. A selected native build,
 acquisition, or execution failure never silently downgrades. PowerShell is not
 promoted solely because the native matrix contains Windows executables: the
@@ -340,8 +348,8 @@ filesystem contract and its Conformance gate are enabled. The parallel CLI
 currently covers canonical JSON,
 hashing, the shared schema-version boundary, registry snapshots, targeted
 binding resolution, source package-selection, package-snapshot, and complete
-Install Bundle/Plan/Lock compatibility, fresh-only guarded source install, an
-internal recipe-closure compatibility probe, repository discovery, policy
+Install Bundle/Plan/Lock compatibility, guarded fresh and POSIX legacy source
+install, an internal recipe-closure compatibility probe, repository discovery, policy
 resolution, and plan compilation. Package-lock resolution is also available
 through the parallel CLI, including local-registry,
 relative-path, and pinned HTTPS sources, deterministic lineage, validation,

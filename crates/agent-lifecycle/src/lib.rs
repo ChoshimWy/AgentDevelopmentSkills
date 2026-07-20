@@ -21,7 +21,8 @@
 //! preserving local profiles, config semantics, and `skills/.system`.
 //! The legacy-adoption transaction additionally preserves exact source
 //! symlink objects and their external `.system` tree until activation commits.
-//! Bootstrap routing of that transaction remains outside this slice.
+//! The production source installer dispatches only an exact read-only-classified
+//! POSIX legacy layout to that transaction, which revalidates it under lock.
 
 mod codex_config;
 mod doctor_report;
@@ -57,9 +58,10 @@ pub use source_install::{
 pub use source_lifecycle::{
     InstalledSourceSelection, compile_source_upgrade_bundle, compile_source_upgrade_bundle_bound,
     inspect_installed_source_selection, inspect_legacy_adoption, inspect_source_install,
-    inspect_source_install_with_activation, inspect_source_upgrade, inspect_source_upgrade_bound,
-    install_source_bundle, install_source_bundle_with_activation,
-    install_source_bundle_with_legacy_adoption, upgrade_source_bundle,
+    inspect_source_install_with_activation, inspect_source_install_with_legacy_adoption,
+    inspect_source_upgrade, inspect_source_upgrade_bound, install_source_bundle,
+    install_source_bundle_with_activation, install_source_bundle_with_legacy_adoption,
+    upgrade_source_bundle,
 };
 pub use source_packages::{SourcePackageSet, snapshot_source_packages};
 pub use source_rollback::rollback_source_install;
@@ -67,7 +69,10 @@ pub use staged_install::ValidatedInstallPlan;
 pub use transaction_lock::{LifecycleLock, normalize_lifecycle_target};
 pub use transaction_workspace::LifecycleWorkspace;
 pub use upgrade_plan::compile_upgrade_plan;
-pub use upgrade_scope::{UpgradePlanningSnapshot, inspect_upgrade_planning_snapshot};
+pub use upgrade_scope::{
+    UpgradePlanningSnapshot, inspect_upgrade_planning_snapshot,
+    inspect_upgrade_planning_snapshot_compatibility,
+};
 
 use agent_contracts::{
     ContractError, MAX_CONTRACT_JSON_BYTES, canonical_json, canonical_sha256, parse_json,

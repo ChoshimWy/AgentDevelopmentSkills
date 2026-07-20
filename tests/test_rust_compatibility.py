@@ -369,6 +369,149 @@ class RustCompatibilityTests(unittest.TestCase):
             self.assertEqual(native.returncode, 2)
             self.assertIn("same repository", native.stderr)
 
+    @unittest.skipIf(os.name == "nt", "legacy source adoption is POSIX-only")
+    def test_native_install_adopts_legacy_layout_with_python_report_contract(self) -> None:
+        self.maxDiff = None
+
+        def normalized_report(
+            report: dict[str, object], *, rust: bool
+        ) -> dict[str, object]:
+            normalized = deepcopy(report)
+            normalized.pop("engine", None)
+            normalized["target_root"] = "<target>"
+            activation = normalized.get("activation")
+            if isinstance(activation, dict):
+                for field in (
+                    "managed_file_updates",
+                    "managed_files_unchanged",
+                    "profile_creates",
+                    "profile_preserves",
+                ):
+                    values = activation.get(field)
+                    if isinstance(values, list):
+                        activation[field] = sorted(values)
+                if rust:
+                    updates = activation.get("managed_file_updates")
+                    if isinstance(updates, list) and "bin/agent-skills" in updates:
+                        updates.remove("bin/agent-skills")
+            normalized.pop("cleanup_warnings", None)
+            normalized.pop("persistent_stage", None)
+            return normalized
+
+        def create_legacy(root: Path) -> Path:
+            legacy = root / "iOSAgentSkills"
+            target = root / "home/.codex"
+            (legacy / "skills/.system/openai-docs").mkdir(parents=True)
+            target.mkdir(parents=True)
+            (legacy / "AGENTS.md").write_text("legacy\n", encoding="utf-8")
+            (legacy / "skills/.system/openai-docs/SKILL.md").write_text(
+                "system\n", encoding="utf-8"
+            )
+            (target / "AGENTS.md").symlink_to("../../iOSAgentSkills/AGENTS.md")
+            (target / "skills").symlink_to("../../iOSAgentSkills/skills")
+            (target / "bin").mkdir()
+            (target / "bin/agent-skills").write_bytes(b"unmanaged legacy cli\n")
+            (target / "bin/agent-skills").chmod(0o644)
+            (target / "config.toml").write_text(
+                'model = "keep-me"\n\n[custom]\nvalue = 7\n',
+                encoding="utf-8",
+            )
+            return target
+
+        def run_python(target: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/install_local.py"),
+                    "--target-root",
+                    str(target),
+                    "--platform",
+                    "apple",
+                    "--json",
+                    *extra,
+                ],
+                cwd=ROOT,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+
+        with tempfile.TemporaryDirectory(
+            prefix="agent-skills-native-legacy-install-"
+        ) as directory:
+            root = Path(directory).resolve()
+            rust_target = create_legacy(root / "rust")
+            python_target = create_legacy(root / "python")
+            rust_arguments = (
+                "install",
+                "--source-root",
+                str(ROOT),
+                "--target-root",
+                str(rust_target),
+                "--platform",
+                "apple",
+                "--session-launcher",
+                str(self.rust_cli),
+                "--json",
+            )
+
+            rust_preview_result = self.run_rust(*rust_arguments, "--dry-run")
+            python_preview_result = run_python(python_target, "--dry-run")
+            self.assertEqual(rust_preview_result.returncode, 0, rust_preview_result.stderr)
+            self.assertEqual(
+                python_preview_result.returncode, 0, python_preview_result.stderr
+            )
+            rust_preview = json.loads(rust_preview_result.stdout)
+            python_preview = json.loads(python_preview_result.stdout)
+            self.assertEqual(
+                normalized_report(rust_preview, rust=True),
+                normalized_report(python_preview, rust=False),
+            )
+            for preview in (rust_preview, python_preview):
+                self.assertIn(
+                    "bin/agent-session", preview["activation"]["managed_file_updates"]
+                )
+            self.assertIn(
+                "bin/agent-skills",
+                rust_preview["activation"]["managed_file_updates"],
+            )
+            self.assertTrue(rust_target.joinpath("AGENTS.md").is_symlink())
+            self.assertTrue(rust_target.joinpath("skills").is_symlink())
+            self.assertEqual(
+                rust_target.joinpath("bin/agent-skills").read_bytes(),
+                b"unmanaged legacy cli\n",
+            )
+
+            rust_install_result = self.run_rust(*rust_arguments)
+            python_install_result = run_python(python_target)
+            self.assertEqual(rust_install_result.returncode, 0, rust_install_result.stderr)
+            self.assertEqual(
+                python_install_result.returncode, 0, python_install_result.stderr
+            )
+            rust_install = json.loads(rust_install_result.stdout)
+            python_install = json.loads(python_install_result.stdout)
+            self.assertEqual(rust_install["cleanup_warnings"], [])
+            self.assertEqual(rust_install["persistent_stage"], False)
+            self.assertNotIn("post_install_validation", rust_install)
+            self.assertEqual(
+                normalized_report(rust_install, rust=True),
+                normalized_report(python_install, rust=False),
+            )
+            self.assertFalse(rust_target.joinpath("AGENTS.md").is_symlink())
+            self.assertFalse(rust_target.joinpath("skills").is_symlink())
+            self.assertEqual(
+                rust_target.joinpath("skills/.system/openai-docs/SKILL.md").read_text(
+                    encoding="utf-8"
+                ),
+                "system\n",
+            )
+            self.assertIn(
+                'model = "keep-me"',
+                rust_target.joinpath("config.toml").read_text(encoding="utf-8"),
+            )
+            self.assertFalse(any(rust_target.glob(".agent-skills-backup-*")))
+            self.assertFalse(any(rust_target.glob(".agent-skills-stage-*")))
+
     @unittest.skipIf(os.name == "nt", "interactive source install is POSIX-only")
     def test_native_interactive_install_uses_terminal_and_preserves_mode(self) -> None:
         with tempfile.TemporaryDirectory(

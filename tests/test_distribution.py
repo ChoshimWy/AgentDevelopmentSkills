@@ -803,7 +803,7 @@ class DistributionTests(unittest.TestCase):
         self.assertNotIn("build_install_bundle", powershell)
 
     @unittest.skipIf(os.name == "nt", "POSIX source bootstrap is covered on macOS/Linux")
-    def test_source_checkout_fresh_install_builds_and_routes_rust_without_python(self) -> None:
+    def test_source_checkout_install_builds_and_routes_rust_without_python(self) -> None:
         tools = self.root / "source-native-tools"
         tools.mkdir()
         cargo_arguments = self.root / "source-native-cargo-arguments.txt"
@@ -944,7 +944,7 @@ class DistributionTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(mixed_all.returncode, 2)
-        self.assertIn("fresh explicit platform", mixed_all.stderr)
+        self.assertIn("supported explicit platform", mixed_all.stderr)
         self.assertFalse(cargo_arguments.exists())
 
         interactive_target = self.root / "source-native-interactive-target"
@@ -992,6 +992,71 @@ class DistributionTests(unittest.TestCase):
         self.assertIn("--dry-run", interactive_forwarded)
         self.assertNotIn("--platform", interactive_forwarded)
         self.assertFalse(interactive_target.exists())
+
+        legacy_repository = self.root / "iOSAgentSkills"
+        (legacy_repository / "skills/.system").mkdir(parents=True)
+        (legacy_repository / "AGENTS.md").write_text("legacy\n", encoding="utf-8")
+        legacy_target = self.root / "source-native-legacy-target"
+        legacy_target.mkdir()
+        (legacy_target / "AGENTS.md").symlink_to(
+            legacy_repository / "AGENTS.md"
+        )
+        (legacy_target / "skills").symlink_to(legacy_repository / "skills")
+        legacy_preview = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "install.sh"),
+                "--target-root",
+                str(legacy_target),
+                "--platform",
+                "apple",
+                "--json",
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(legacy_preview.returncode, 0, legacy_preview.stderr)
+        self.assertEqual(
+            json.loads(legacy_preview.stdout),
+            {"engine": "rust", "status": "planned"},
+        )
+        legacy_forwarded = native_arguments.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            legacy_forwarded[
+                legacy_forwarded.index("--target-root") + 1
+            ],
+            str(legacy_target),
+        )
+        self.assertIn("--session-launcher", legacy_forwarded)
+        self.assertTrue((legacy_target / "AGENTS.md").is_symlink())
+        self.assertTrue((legacy_target / "skills").is_symlink())
+
+        cargo_arguments.unlink()
+        native_arguments.unlink()
+        legacy_desktop = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "install.sh"),
+                "--target-root",
+                str(legacy_target),
+                "--platform",
+                "desktop",
+                "--json",
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(legacy_desktop.returncode, 0)
+        self.assertFalse(cargo_arguments.exists())
+        self.assertFalse(native_arguments.exists())
 
         failing_cargo = tools / "cargo"
         failing_cargo.write_text("#!/bin/sh\nexit 37\n", encoding="utf-8")

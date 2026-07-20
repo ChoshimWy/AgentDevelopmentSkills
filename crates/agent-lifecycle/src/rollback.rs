@@ -133,7 +133,6 @@ pub(super) fn check_rollback_point(target: &Dir) -> Result<Value, LifecycleError
 pub(super) fn validate_rollback_point_root(root: &Dir) -> Result<Value, LifecycleError> {
     let root_identity = root.dir_metadata()?;
     validate_root_entries(root)?;
-    snapshot_identity(root)?;
 
     for name in [
         "AGENTS.md",

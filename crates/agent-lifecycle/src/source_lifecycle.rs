@@ -8,7 +8,7 @@ use crate::{
     upgrade_plan::semantic_lock_identity,
 };
 #[cfg(not(windows))]
-use crate::{managed_swap, same_content_state_cap, same_object_cap};
+use crate::{external_stage, managed_swap, same_content_state_cap, same_object_cap};
 use agent_engine::validate_install_plan;
 use cap_std::fs::Dir;
 use serde_json::Value;
@@ -492,23 +492,7 @@ pub fn inspect_source_install_with_activation(
     let temporary_stage = tempfile::tempdir()?;
     let stage = open_root_directory(temporary_stage.path(), None, "native install preview stage")?;
     let plan = ValidatedInstallPlan::new(bundle.plan().clone(), bundle.package_lock().clone())?;
-    staged_install::stage_layout(&stage, &plan, bundle.instructions().as_bytes())?;
-    for ((package_id, root), package) in bundle.package_roots().iter().zip(&package_set.packages) {
-        if package_id != &package.id {
-            return invalid("source package order differs from Install Bundle");
-        }
-        let package_source =
-            open_root_directory(root, None, &format!("source package {package_id}"))?;
-        staged_install::stage_package(&stage, &plan, package_id, &package_source)?;
-        for skill in &package.skills {
-            let skill_source = open_root_directory(
-                &root.join(&skill.relative_root),
-                None,
-                &format!("source Skill {}", skill.name),
-            )?;
-            staged_install::stage_skill(&stage, &plan, &skill.name, &skill_source)?;
-        }
-    }
+    stage_source_bundle_preview(&stage, &plan, bundle, package_set)?;
     staged_install::verify(&stage, &plan, staged_install::ExternalLayout::default())?;
     let target_path = Path::new(&target_contract);
     let activation = source_activation::SourceActivation::prepare_fresh(
@@ -527,6 +511,96 @@ pub fn inspect_source_install_with_activation(
         "install_plan": bundle.plan(),
         "target_root": target_contract,
     }))
+}
+
+/// Validate an exact legacy iOSAgentSkills adoption without mutating the target.
+///
+/// The preview uses the same bounded package staging, legacy `.system` copy,
+/// unmanaged regular-file activation preflight, and exact legacy link identity
+/// checks as the mutating transaction. All candidate writes are confined to an
+/// ephemeral private directory; the requested target remains read-only.
+///
+/// # Errors
+/// Returns a fail-closed error for non-Apple selection, a missing or drifting
+/// legacy layout, unsafe `.system` content, activation conflicts, or invalid
+/// source snapshots. Windows remains disabled with the mutating contract.
+pub fn inspect_source_install_with_legacy_adoption(
+    bundle: &SourceInstallBundle,
+    package_set: &SourcePackageSet,
+    target_root: impl AsRef<Path>,
+    session_launcher: &[u8],
+) -> Result<Value, LifecycleError> {
+    #[cfg(windows)]
+    {
+        let _ = (bundle, package_set, target_root, session_launcher);
+        return invalid("legacy adoption is not enabled on Windows");
+    }
+    #[cfg(not(windows))]
+    {
+        validate_source_install_inputs(bundle, package_set)?;
+        if !selected_platforms(bundle.plan())?.contains("apple") {
+            return invalid("legacy adoption requires an Apple source selection");
+        }
+        if session_launcher.is_empty() {
+            return invalid("legacy adoption requires a frozen session launcher");
+        }
+        let (target, canonical_target, contract_target) =
+            transaction_lock::inspect_existing_target(target_root.as_ref())?;
+        reject_recovery_state(&target, false)?;
+        let legacy = capture_legacy_adoption_layout(&target, &canonical_target, || Ok(()))?
+            .ok_or_else(|| {
+                LifecycleError::Invalid(
+                    "target does not contain the exact legacy iOSAgentSkills layout".to_owned(),
+                )
+            })?;
+        let legacy_skills = open_child_directory(
+            &legacy.skills.repository,
+            "skills",
+            None,
+            "legacy Skills source",
+        )?;
+        let legacy_skills_identity = legacy_skills.dir_metadata()?;
+        if !same_object_cap(&legacy.skills.resolved_identity, &legacy_skills_identity)
+            || !same_content_state_cap(&legacy.skills.resolved_identity, &legacy_skills_identity)
+        {
+            return invalid("legacy Skills source changed before adoption preview");
+        }
+
+        let temporary_stage = tempfile::tempdir()?;
+        let stage = open_root_directory(
+            temporary_stage.path(),
+            None,
+            "legacy adoption preview stage",
+        )?;
+        let plan = ValidatedInstallPlan::new(bundle.plan().clone(), bundle.package_lock().clone())?;
+        stage_source_bundle_preview(&stage, &plan, bundle, package_set)?;
+        let external = external_stage::stage_from_legacy_skills(&legacy_skills, &stage)?;
+        staged_install::verify(&stage, &plan, external.layout())?;
+        let activation = source_activation::SourceActivation::prepare_legacy_adoption(
+            &stage,
+            &target,
+            &contract_target,
+            session_launcher,
+        )?;
+        activation.revalidate_from(&stage, &target)?;
+        validate_legacy_link(&target, &canonical_target, &legacy.agents)?;
+        validate_legacy_link(&target, &canonical_target, &legacy.skills)?;
+        external_stage::verify_from_legacy_skills(&legacy_skills, &stage, &external)?;
+        staged_install::verify(&stage, &plan, external.layout())?;
+        let target_root = contract_target
+            .to_str()
+            .ok_or_else(|| LifecycleError::Invalid("lifecycle target is not UTF-8".to_owned()))?;
+        Ok(serde_json::json!({
+            "activation": activation.preview(),
+            "install_plan": bundle.plan(),
+            "legacy_adoption": {
+                "persistent_backup": false,
+                "preserved_system_skills": external.layout().system_skills,
+                "removed_legacy_symlinks": ["AGENTS.md", "skills"],
+            },
+            "target_root": target_root,
+        }))
+    }
 }
 
 /// Stage, verify, atomically publish, and commit a fresh native source install.
@@ -640,6 +714,7 @@ pub fn install_source_bundle_with_legacy_adoption(
             return invalid("lifecycle target changed while acquiring legacy adoption");
         }
         let target = lock.target_directory()?;
+        reject_recovery_state(&target, true)?;
         let canonical_target = lock.target().to_path_buf();
         let legacy = capture_legacy_adoption_layout(&target, &canonical_target, || Ok(()))?
             .ok_or_else(|| {
@@ -682,12 +757,17 @@ pub fn install_source_bundle_with_legacy_adoption(
             skills_evidence,
             session_launcher,
         )?;
+        let post_install_smoke = crate::installed_smoke::run_installed_workflow_smoke(
+            published.target()?,
+            bundle.package_lock(),
+        )?;
         let activation = published.apply_source_activation(session_launcher)?;
         published.verify(&plan)?;
         let cleanup = published.commit(&plan)?;
         Ok(serde_json::json!({
             "activation": activation,
             "install_plan": installed,
+            "post_install_smoke": post_install_smoke,
             "legacy_adoption": {
                 "cleanup_warnings": cleanup["cleanup_warnings"].clone(),
                 "persistent_backup": cleanup["persistent_backup"].clone(),
@@ -1062,6 +1142,32 @@ struct SourceInstallOutcome {
     activation: Option<Value>,
     install_plan: Value,
     target_root: String,
+}
+
+fn stage_source_bundle_preview(
+    stage: &Dir,
+    plan: &ValidatedInstallPlan,
+    bundle: &SourceInstallBundle,
+    package_set: &SourcePackageSet,
+) -> Result<(), LifecycleError> {
+    staged_install::stage_layout(stage, plan, bundle.instructions().as_bytes())?;
+    for ((package_id, root), package) in bundle.package_roots().iter().zip(&package_set.packages) {
+        if package_id != &package.id {
+            return invalid("source package order differs from Install Bundle");
+        }
+        let package_source =
+            open_root_directory(root, None, &format!("source package {package_id}"))?;
+        staged_install::stage_package(stage, plan, package_id, &package_source)?;
+        for skill in &package.skills {
+            let skill_source = open_root_directory(
+                &root.join(&skill.relative_root),
+                None,
+                &format!("source Skill {}", skill.name),
+            )?;
+            staged_install::stage_skill(stage, plan, &skill.name, &skill_source)?;
+        }
+    }
+    Ok(())
 }
 
 fn stage_source_bundle(
@@ -1587,6 +1693,30 @@ mod tests {
         )
         .expect("link legacy Skills");
         target
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_adoption_preview_and_install_reject_recovery_residue() {
+        let fixture = Fixture::new();
+        let target = create_legacy_install_fixture(&fixture);
+        let residue = format!("{INSTALL_STAGE_PREFIX}interrupted");
+        std::fs::create_dir(target.join(&residue)).expect("create legacy recovery residue");
+        let (bundle, packages) = apple_bundle();
+        let launcher = b"legacy recovery residue launcher\n";
+
+        let preview =
+            inspect_source_install_with_legacy_adoption(&bundle, &packages, &target, launcher)
+                .expect_err("legacy preview must reject recovery residue");
+        assert!(preview.to_string().contains("recovery state"), "{preview}");
+        let install =
+            install_source_bundle_with_legacy_adoption(&bundle, &packages, &target, launcher)
+                .expect_err("legacy install must reject recovery residue under lock");
+        assert!(install.to_string().contains("recovery state"), "{install}");
+        assert!(target.join("AGENTS.md").is_symlink());
+        assert!(target.join("skills").is_symlink());
+        assert!(target.join(&residue).is_dir());
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
     }
 
     #[cfg(unix)]

@@ -1838,6 +1838,14 @@ impl PublishedInstall {
 
 #[cfg(not(windows))]
 impl PublishedLegacyAdoption {
+    /// Return the locked legacy-adoption target while rollback remains armed.
+    ///
+    /// # Errors
+    /// Fails only if the guard has already been consumed internally.
+    pub fn target(&self) -> Result<&Path, LifecycleError> {
+        Ok(self.workspace()?.target())
+    }
+
     /// Revalidate the managed publication and exact legacy recovery links.
     pub fn verify(&self, plan: &ValidatedInstallPlan) -> Result<(), LifecycleError> {
         let workspace = self.workspace()?;

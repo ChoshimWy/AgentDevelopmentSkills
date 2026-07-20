@@ -60,6 +60,61 @@ pub fn inspect_upgrade_planning_snapshot(
     removed_runtime_configs: &[String],
     session_launcher: Option<&[u8]>,
 ) -> Result<UpgradePlanningSnapshot, LifecycleError> {
+    inspect_upgrade_planning_snapshot_with_migration_policy(
+        target_root,
+        candidate_install_plan,
+        candidate_package_lock,
+        action,
+        removed_platforms,
+        removed_runtime_configs,
+        session_launcher,
+        true,
+    )
+}
+
+/// Inspect an installed target using the legacy Python Upgrade Plan migration
+/// projection.
+///
+/// The compatibility command intentionally reports only schema migrations,
+/// matching the Python control plane. Native lifecycle commands use
+/// [`inspect_upgrade_planning_snapshot`] and additionally bind activation-state
+/// changes such as replacing the native launcher.
+///
+/// # Errors
+/// Returns the same fail-closed errors as
+/// [`inspect_upgrade_planning_snapshot`].
+pub fn inspect_upgrade_planning_snapshot_compatibility(
+    target_root: impl AsRef<Path>,
+    candidate_install_plan: &Value,
+    candidate_package_lock: &Value,
+    action: &str,
+    removed_platforms: &[String],
+    removed_runtime_configs: &[String],
+    session_launcher: Option<&[u8]>,
+) -> Result<UpgradePlanningSnapshot, LifecycleError> {
+    inspect_upgrade_planning_snapshot_with_migration_policy(
+        target_root,
+        candidate_install_plan,
+        candidate_package_lock,
+        action,
+        removed_platforms,
+        removed_runtime_configs,
+        session_launcher,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn inspect_upgrade_planning_snapshot_with_migration_policy(
+    target_root: impl AsRef<Path>,
+    candidate_install_plan: &Value,
+    candidate_package_lock: &Value,
+    action: &str,
+    removed_platforms: &[String],
+    removed_runtime_configs: &[String],
+    session_launcher: Option<&[u8]>,
+    report_activation_state_migrations: bool,
+) -> Result<UpgradePlanningSnapshot, LifecycleError> {
     if !matches!(action, "upgrade" | "partial-uninstall") {
         return invalid("upgrade action is invalid");
     }
@@ -172,7 +227,12 @@ pub fn inspect_upgrade_planning_snapshot(
                     .get("migration")
                     .filter(|value| !value.is_null())
                     .map(planned_migration)
-                    .transpose()?;
+                    .transpose()?
+                    .filter(|value| {
+                        report_activation_state_migrations
+                            || value.get("artifact").and_then(Value::as_str)
+                                != Some("source-activation-state")
+                    });
                 (
                     ACTIVATION_HANDLER_ID,
                     activation.scope().to_vec(),

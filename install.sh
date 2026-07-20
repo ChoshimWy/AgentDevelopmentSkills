@@ -272,9 +272,27 @@ parse_native_request() {
     if [[ -e "$NATIVE_TARGET_ROOT" && ! -d "$NATIVE_TARGET_ROOT" ]]; then
         return 1
     fi
-    for existing in AGENTS.md skills .agent-skills; do
-        [[ ! -e "$NATIVE_TARGET_ROOT/$existing" && ! -L "$NATIVE_TARGET_ROOT/$existing" ]] || return 1
-    done
+    if [[ ! -e "$NATIVE_TARGET_ROOT/AGENTS.md" && ! -L "$NATIVE_TARGET_ROOT/AGENTS.md" \
+        && ! -e "$NATIVE_TARGET_ROOT/skills" && ! -L "$NATIVE_TARGET_ROOT/skills" \
+        && ! -e "$NATIVE_TARGET_ROOT/.agent-skills" && ! -L "$NATIVE_TARGET_ROOT/.agent-skills" ]]; then
+        return 0
+    fi
+    # The shell only widens eligibility to the two-link legacy candidate shape.
+    # Repository provenance, raw targets, cross-link identity, and target state
+    # are classified again by the Rust CLI and revalidated under its lifecycle
+    # lock before mutation. Any partial or unrelated shape remains fail-closed.
+    # Explicit Desktop-only requests remain on the compatibility route because
+    # legacy adoption is an Apple contract. Interactive selection is retained
+    # so the native selector can choose its default Apple platform.
+    if [[ "$NATIVE_INTERACTIVE" != "1" \
+        && "$NATIVE_PLATFORM_KEYS" != *"|apple|"* \
+        && "$NATIVE_PLATFORM_KEYS" != *"|all|"* ]]; then
+        return 1
+    fi
+    [[ -L "$NATIVE_TARGET_ROOT/AGENTS.md" \
+        && -L "$NATIVE_TARGET_ROOT/skills" \
+        && ! -e "$NATIVE_TARGET_ROOT/.agent-skills" \
+        && ! -L "$NATIVE_TARGET_ROOT/.agent-skills" ]]
 }
 
 parse_native_upgrade_request() {
@@ -689,7 +707,7 @@ if [[ -n "$SOURCE_CHECKOUT_ROOT" ]]; then
     fi
     if [[ "$REQUESTED_ENGINE" == "rust" ]]; then
         printf '%s\n' \
-            "forced Rust source install requires cargo, a fresh explicit platform or attached-terminal interactive selection, and no compatibility-only arguments" \
+            "forced Rust source install requires cargo, a supported explicit platform or attached-terminal interactive selection, and no compatibility-only arguments" \
             >&2
         exit 2
     fi
@@ -707,7 +725,7 @@ fi
 
 if [[ "$REQUESTED_ENGINE" == "rust" ]]; then
     printf '%s\n' \
-        "forced Rust install requires an embedded v2 native release, a fresh explicit platform or attached-terminal interactive selection, and no compatibility-only arguments" \
+        "forced Rust install requires an embedded v2 native release, a supported explicit platform or attached-terminal interactive selection, and no compatibility-only arguments" \
         >&2
     exit 2
 fi

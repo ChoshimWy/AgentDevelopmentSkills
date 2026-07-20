@@ -14,10 +14,12 @@ use agent_lifecycle::{
     compile_source_upgrade_bundle, compile_upgrade_plan, inspect_doctor_baseline,
     inspect_doctor_report_v1, inspect_doctor_report_v2, inspect_legacy_adoption,
     inspect_source_install, inspect_source_install_with_activation,
-    inspect_source_platform_options, inspect_source_upgrade, inspect_uninstall_plan,
-    inspect_upgrade_planning_snapshot, install_source_bundle,
-    install_source_bundle_with_activation, render_codex_config, resolve_source_install_selection,
-    rollback_source_install, snapshot_source_packages, upgrade_source_bundle,
+    inspect_source_install_with_legacy_adoption, inspect_source_platform_options,
+    inspect_source_upgrade, inspect_uninstall_plan,
+    inspect_upgrade_planning_snapshot_compatibility, install_source_bundle,
+    install_source_bundle_with_activation, install_source_bundle_with_legacy_adoption,
+    render_codex_config, resolve_source_install_selection, rollback_source_install,
+    snapshot_source_packages, upgrade_source_bundle,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_release::{
@@ -1081,20 +1083,40 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             if inspect_source_platform_options(&platform_root)? != platform_options {
                 return Err("source platform inventory changed while preparing install".into());
             }
-            let outcome = if dry_run {
-                inspect_source_install_with_activation(
-                    &bundle,
-                    &packages,
-                    &target_root,
-                    launcher.as_deref().unwrap_or_default(),
-                )?
+            let apple_selected = effective_platforms
+                .iter()
+                .any(|platform| platform == "apple");
+            let legacy = if apple_selected {
+                inspect_legacy_adoption(&target_root)?
             } else {
-                install_source_bundle_with_activation(
+                Value::Null
+            };
+            let adopting_legacy = legacy.as_object().is_some_and(|links| !links.is_empty());
+            let outcome = match (dry_run, adopting_legacy) {
+                (true, true) => inspect_source_install_with_legacy_adoption(
                     &bundle,
                     &packages,
                     &target_root,
                     launcher.as_deref().unwrap_or_default(),
-                )?
+                )?,
+                (false, true) => install_source_bundle_with_legacy_adoption(
+                    &bundle,
+                    &packages,
+                    &target_root,
+                    launcher.as_deref().unwrap_or_default(),
+                )?,
+                (true, false) => inspect_source_install_with_activation(
+                    &bundle,
+                    &packages,
+                    &target_root,
+                    launcher.as_deref().unwrap_or_default(),
+                )?,
+                (false, false) => install_source_bundle_with_activation(
+                    &bundle,
+                    &packages,
+                    &target_root,
+                    launcher.as_deref().unwrap_or_default(),
+                )?,
             };
             if dry_run && inspect_source_platform_options(&platform_root)? != platform_options {
                 return Err("source platform inventory changed while previewing install".into());
@@ -1561,7 +1583,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 .as_deref()
                 .map(read_frozen_executable)
                 .transpose()?;
-            let snapshot = inspect_upgrade_planning_snapshot(
+            let snapshot = inspect_upgrade_planning_snapshot_compatibility(
                 &target_root,
                 &candidate_install_plan,
                 &candidate_package_lock,
@@ -2303,19 +2325,7 @@ fn native_install_report(
         .get("selected_runtime_configs")
         .cloned()
         .ok_or("native Install Plan has no selected runtime configs")?;
-    let selected_packages = plan
-        .get("selected_packages")
-        .and_then(Value::as_array)
-        .ok_or("native Install Plan has no selected packages")?
-        .iter()
-        .map(|record| {
-            record
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .ok_or("native Install Plan package id is invalid")
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let selected_packages = native_install_selected_packages(plan)?;
     let skill_count = plan
         .get("skills")
         .and_then(Value::as_array)
@@ -2326,10 +2336,27 @@ fn native_install_report(
         .get("target_root")
         .and_then(Value::as_str)
         .ok_or("native install outcome has no target root")?;
+    let legacy_adoption = outcome.get("legacy_adoption").and_then(Value::as_object);
+    let persistent_backup = legacy_adoption
+        .and_then(|legacy| legacy.get("persistent_backup"))
+        .cloned()
+        .unwrap_or(Value::Bool(false));
+    let removed_legacy_symlinks = legacy_adoption
+        .and_then(|legacy| legacy.get("removed_legacy_symlinks"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let cleanup_warnings = legacy_adoption
+        .and_then(|legacy| legacy.get("cleanup_warnings"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let persistent_stage = legacy_adoption
+        .and_then(|legacy| legacy.get("persistent_stage"))
+        .cloned()
+        .unwrap_or(Value::Bool(false));
     let mut report = json!({
         "activation": activation,
         "engine": "rust",
-        "persistent_backup": false,
+        "persistent_backup": persistent_backup,
         "platform_options": platform_options,
         "schema_version": "1.0",
         "selected_packages": selected_packages,
@@ -2345,23 +2372,78 @@ fn native_install_report(
     if dry_run {
         report.insert(
             "would_remove_legacy_symlinks".to_owned(),
-            serde_json::json!([]),
+            removed_legacy_symlinks,
         );
     } else {
-        report.insert(
-            "post_install_validation".to_owned(),
-            json!({
-                "kind": "native-lifecycle-transaction",
-                "status": "passed",
-            }),
-        );
+        if legacy_adoption.is_some() {
+            report.insert("cleanup_warnings".to_owned(), cleanup_warnings);
+            report.insert("persistent_stage".to_owned(), persistent_stage);
+            report.insert(
+                "post_install_smoke".to_owned(),
+                native_install_smoke_report(
+                    outcome
+                        .get("post_install_smoke")
+                        .ok_or("native legacy install outcome has no post-install smoke")?,
+                )?,
+            );
+        } else {
+            report.insert(
+                "post_install_validation".to_owned(),
+                json!({
+                    "kind": "native-lifecycle-transaction",
+                    "status": "passed",
+                }),
+            );
+        }
         report.insert(
             "preserved_system_skills".to_owned(),
-            Value::Bool(Path::new(target_root).join("skills/.system").is_dir()),
+            legacy_adoption
+                .and_then(|legacy| legacy.get("preserved_system_skills"))
+                .cloned()
+                .unwrap_or_else(|| {
+                    Value::Bool(Path::new(target_root).join("skills/.system").is_dir())
+                }),
         );
-        report.insert("removed_legacy_symlinks".to_owned(), serde_json::json!([]));
+        report.insert(
+            "removed_legacy_symlinks".to_owned(),
+            removed_legacy_symlinks,
+        );
     }
     Ok(Value::Object(report.clone()))
+}
+
+fn native_install_selected_packages(
+    plan: &Map<String, Value>,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    Ok(plan
+        .get("selected_packages")
+        .and_then(Value::as_array)
+        .ok_or("native Install Plan has no selected packages")?
+        .iter()
+        .map(|record| {
+            record
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or("native Install Plan package id is invalid")
+        })
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+fn native_install_smoke_report(smoke: &Value) -> Result<Value, Box<dyn std::error::Error>> {
+    let required = |field: &str| {
+        smoke
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("native post-install smoke {field} is invalid"))
+    };
+    Ok(json!({
+        "final_status": required("final_status")?,
+        "plan_status": required("plan_status")?,
+        "review_status": required("review_status")?,
+        "status": required("status")?,
+    }))
 }
 
 fn native_activation_report(activation: &Value) -> Result<Value, Box<dyn std::error::Error>> {
@@ -2469,9 +2551,78 @@ fn native_install_human_report(report: &Value) -> Result<String, Box<dyn std::er
             "◇ {platforms} 平台安装预览\n\n变更摘要\n  ↻ config.toml：{config}\n  ↻ 受管文件：将更新 {updates} 个\n  ✓ 其余已一致：{unchanged} 个\n  ↻ Profiles：将创建 {creates} 个，保留 {preserves} 个\n  • 持久备份：不创建（按当前安装策略）\n\n未写入目标目录：{target}\n确认后移除 --dry-run，重新执行原命令。\n\n自动化场景：添加 --json 获取 canonical JSON。\n"
         ));
     }
+    let recovery_warning = native_install_recovery_warning(report);
+    let marker = if recovery_warning.is_empty() {
+        "✓"
+    } else {
+        "⚠"
+    };
+    let completion = if recovery_warning.is_empty() {
+        "安装完成"
+    } else {
+        "安装已提交，但临时恢复数据未完全清理"
+    };
+    let smoke_report = native_install_smoke_human_report(report);
     Ok(format!(
-        "✓ {platforms} 平台安装完成\n\n  Rust 原生事务：passed\n  安装态验证：passed\n  目标目录：{target}\n\n自动化场景：添加 --json 获取 canonical JSON。\n"
+        "{marker} {platforms} 平台{completion}\n\n  Rust 原生事务：passed\n{smoke_report}{recovery_warning}  目标目录：{target}\n\n自动化场景：添加 --json 获取 canonical JSON。\n"
     ))
+}
+
+fn native_install_recovery_warning(report: &Value) -> String {
+    let cleanup_warnings = report
+        .get("cleanup_warnings")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let persistent_stage = report
+        .get("persistent_stage")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let persistent_backup = report
+        .get("persistent_backup")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if cleanup_warnings == 0 && !persistent_stage && !persistent_backup {
+        return String::new();
+    }
+    format!(
+        "  ⚠ 清理警告：{cleanup_warnings} 个；保留 stage：{}；保留 backup：{}\n  请先运行 Doctor 检查恢复残留。\n",
+        if persistent_stage { "是" } else { "否" },
+        if persistent_backup { "是" } else { "否" },
+    )
+}
+
+fn native_install_smoke_human_report(report: &Value) -> String {
+    let Some(smoke) = report.get("post_install_smoke").and_then(Value::as_object) else {
+        return "  安装态验证：passed\n".to_owned();
+    };
+    let status = smoke
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let plan = smoke
+        .get("plan_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let review = smoke
+        .get("review_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let final_status = smoke
+        .get("final_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let system = if report
+        .get("preserved_system_skills")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "已保留"
+    } else {
+        "无需迁移"
+    };
+    format!(
+        "  Codex 系统 Skills：{system}\n\n安装态验证\n  ✓ Installed workflow smoke：{status}\n  ✓ Plan / Review / Final：{plan} / {review} / {final_status}\n"
+    )
 }
 
 fn parse_lock_sources(values: &[String]) -> Result<Map<String, Value>, Box<dyn std::error::Error>> {
@@ -2678,6 +2829,72 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn legacy_install_report_surfaces_committed_cleanup_residue() {
+        let outcome = json!({
+            "activation": {
+                "config_changed": false,
+                "created_profiles": [],
+                "unchanged_files": [],
+                "updated_files": [],
+            },
+            "install_plan": {
+                "selected_packages": [{"id": "core"}, {"id": "apple"}],
+                "selected_platforms": ["apple"],
+                "selected_runtime_configs": ["codex"],
+                "skills": [{"name": "apple-verification"}],
+            },
+            "legacy_adoption": {
+                "cleanup_warnings": ["retained transaction workspace"],
+                "persistent_backup": false,
+                "persistent_stage": true,
+                "preserved_system_skills": true,
+                "removed_legacy_symlinks": ["AGENTS.md", "skills"],
+            },
+            "post_install_smoke": {
+                "final_status": "completed",
+                "plan_status": "ready",
+                "review_status": "passed",
+                "status": "passed",
+            },
+            "target_root": "/tmp/.codex",
+        });
+        let platform_options = [json!({
+            "id": "apple",
+            "label": "Apple",
+        })];
+        let report = native_install_report(&outcome, &platform_options, false)
+            .expect("build legacy install report");
+        assert_eq!(
+            report["cleanup_warnings"],
+            json!(["retained transaction workspace"])
+        );
+        assert_eq!(report["persistent_stage"], true);
+        assert_eq!(report["persistent_backup"], false);
+        assert_eq!(report["post_install_smoke"]["status"], "passed");
+        assert!(report.get("post_install_validation").is_none());
+        assert_eq!(
+            report["removed_legacy_symlinks"],
+            json!(["AGENTS.md", "skills"])
+        );
+        let human = native_install_human_report(&report).expect("render cleanup warning");
+        assert!(human.contains("清理警告：1 个"));
+        assert!(human.contains("保留 stage：是"));
+        assert!(human.contains("运行 Doctor"));
+        assert!(human.contains("Installed workflow smoke：passed"));
+        assert!(human.contains("ready / passed / completed"));
+
+        let mut fresh_outcome = outcome;
+        fresh_outcome
+            .as_object_mut()
+            .expect("fresh outcome object")
+            .remove("legacy_adoption");
+        let fresh_report = native_install_report(&fresh_outcome, &platform_options, false)
+            .expect("build fresh install report");
+        assert!(fresh_report.get("cleanup_warnings").is_none());
+        assert!(fresh_report.get("persistent_stage").is_none());
     }
 
     #[test]

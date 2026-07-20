@@ -2384,6 +2384,42 @@ mod tests {
     }
 
     #[test]
+    fn source_activation_reports_v2_state_migration_when_candidate_changes() {
+        let (target_path, target, _scratch) = activation_fixture();
+        let lock_path = target_path.join(".agent-skills/activation-lock.json");
+        let mut lock =
+            parse_json(&std::fs::read(&lock_path).expect("read fixture Activation Lock"))
+                .expect("parse fixture Activation Lock");
+        let object = lock
+            .as_object_mut()
+            .expect("fixture Activation Lock object");
+        object.insert("schema_version".to_owned(), Value::String("2.0".to_owned()));
+        object.insert(
+            "handler".to_owned(),
+            Value::String(ACTIVATION_HANDLER_ID.to_owned()),
+        );
+        std::fs::write(
+            &lock_path,
+            canonical_json(&lock).expect("encode v2 Activation Lock"),
+        )
+        .expect("write v2 Activation Lock");
+
+        let prepared =
+            SourceActivation::prepare(&target, &target_path, b"changed native session launcher\n")
+                .expect("prepare changed v2 Activation state");
+        assert_eq!(
+            prepared
+                .preview()
+                .pointer("/migration/artifact")
+                .and_then(Value::as_str),
+            Some("source-activation-state")
+        );
+
+        drop(target);
+        std::fs::remove_dir_all(&target_path).expect("remove activation fixture");
+    }
+
+    #[test]
     fn fresh_source_activation_reads_stage_assets_and_destination_preimages_separately() {
         let (source_path, source, scratch) = activation_fixture();
         std::fs::remove_file(source_path.join(".agent-skills/activation-lock.json"))

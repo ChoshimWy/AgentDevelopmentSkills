@@ -19,8 +19,9 @@ AgentDevelopmentSkills is an offline-first, fail-closed workflow core for coding
 The incremental Rust migration has reached the controlled bootstrap phase.
 Release Manifest v3 binds a complete macOS, Linux, and Windows native binary
 matrix plus the immutable Upgrade Source Qualification produced by release
-qualification. A hosted, explicit, fresh Apple or Desktop install or dry-run
-selects the verified Rust lifecycle transaction by default. The installed
+qualification. A hosted, explicit, fresh Apple or Desktop install or dry-run,
+and an exact POSIX legacy iOSAgentSkills adoption, select the verified Rust
+lifecycle transaction by default. The installed
 native CLI also supports explicit-source upgrade, rollback, doctor, and
 uninstall transactions. It now also provides an operator-invoked
 `hosted-upgrade` route that authenticates the fixed Pages control plane,
@@ -28,8 +29,8 @@ qualified source archive, and current-host executable before issuing a
 release-provenance-bound approval envelope. Explicit and interactive fresh
 source-checkout installs now build and execute the pinned Rust installer
 offline. A downloaded signed POSIX release bootstrap with an attached terminal
-also runs the same Rust selector; compatibility-only requests, PowerShell
-bootstrap upgrades, and legacy adoption still use separately gated paths.
+also runs the same Rust selector; compatibility-only requests and PowerShell
+bootstrap upgrades still use separately gated paths.
 The signed POSIX release bootstrap routes an explicit `--upgrade` request
 through the release-matched Rust executable without Python fallback. The
 repository carries an MIT `LICENSE`, a `NOTICE`, and verified
@@ -64,6 +65,12 @@ also defaults to Rust:
 ./install.sh --platform all
 ./install.sh --platform apple --discipline qa --runtime-config codex --dry-run
 ```
+
+On POSIX, the same source and signed-release bootstrap also recognize the exact
+legacy `AGENTS.md` plus `skills` symlink layout from an `iOSAgentSkills`
+checkout. The Rust installer previews it read-only, preserves `skills/.system`,
+and removes the two legacy links only inside the locked adoption transaction.
+Partial, unrelated, mixed-root, or unsafe layouts fail closed.
 
 The source bootstrap runs `cargo build --locked --offline` in a private
 temporary target directory and then executes that exact binary. Dependencies
@@ -463,13 +470,14 @@ package Lockfile identities. Core-only, Apple, QA, Codex runtime-config, and
 previous-Lock lineage outputs are byte-for-byte differential-tested against
 Python. The native lifecycle lane now provides a read-only
 `lifecycle-install` compatibility command plus a production `install` command
-for eligible fresh installs. It performs staging, semantic verification,
+for eligible fresh installs and exact POSIX legacy adoption. It performs
+staging, semantic verification,
 atomic publication, post-publication verification, rollback-on-failure, and
 cleanup. Apple installation also freezes the exact launcher bytes and
 completes source activation in the same guarded transaction. Core-only and
 Apple projections remain differential-tested against Python. Replacement
-installs, upgrades, legacy adoption, and compatibility-only requests remain on
-separately gated paths. As the first upgrade cutover gate, Rust now strictly
+installs, upgrades, and compatibility-only requests remain on separately gated
+paths. As the first upgrade cutover gate, Rust now strictly
 validates Upgrade Conformance Evidence v1 and Upgrade Plan v1, including
 stable attestation semantics, exact selections/removals, permission approvals,
 external-handler identity, migration ordering, rollback identity, and
@@ -540,7 +548,8 @@ immutable upgrade source, while keeping Rust as the default engine for
 eligible hosted fresh installs. Explicit fresh source-checkout installs now
 build the pinned Rust CLI offline in a private target directory, and
 fresh source-checkout and downloaded hosted POSIX terminal selection now run in
-that binary without Python.
+that binary without Python. Exact legacy iOSAgentSkills layouts use the same
+POSIX native route and are revalidated under the lifecycle lock before mutation.
 The PowerShell acquisition layer and all other ineligible requests still use
 the explicit Python compatibility path during this controlled phase.
 
