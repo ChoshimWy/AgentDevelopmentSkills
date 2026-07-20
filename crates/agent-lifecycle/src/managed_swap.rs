@@ -2063,6 +2063,7 @@ impl Drop for PublishedLegacyAdoption {
     }
 }
 
+#[cfg(not(windows))]
 fn path_entry_exists(path: &Path) -> bool {
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,

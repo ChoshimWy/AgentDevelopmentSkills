@@ -754,11 +754,14 @@ impl LifecycleWorkspace {
         expected: &external_stage::ExternalStageSnapshot,
     ) -> Result<(), LifecycleError> {
         match self.staged_legacy_skills.as_ref() {
+            #[cfg(not(windows))]
             Some(legacy_skills) => external_stage::verify_from_legacy_skills(
                 legacy_skills,
                 self.stage.directory()?,
                 expected,
             ),
+            #[cfg(windows)]
+            Some(_) => invalid("legacy adoption is unavailable on Windows"),
             None => {
                 external_stage::verify(&self.target_directory, self.stage.directory()?, expected)
             }

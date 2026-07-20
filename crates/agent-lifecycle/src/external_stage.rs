@@ -71,6 +71,7 @@ pub(super) fn stage(target: &Dir, stage: &Dir) -> Result<ExternalStageSnapshot, 
     stage_with_activation(target, stage, activation.clone(), activation)
 }
 
+#[cfg(not(windows))]
 pub(super) fn stage_from_legacy_skills(
     legacy_skills: &Dir,
     stage: &Dir,
@@ -89,6 +90,7 @@ pub(super) fn stage_from_legacy_skills(
     Ok(snapshot)
 }
 
+#[cfg(not(windows))]
 pub(super) fn verify_from_legacy_skills(
     legacy_skills: &Dir,
     stage: &Dir,
