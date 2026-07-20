@@ -524,12 +524,19 @@ impl LifecycleWorkspace {
         self.verify_external_stage(external)?;
         staged_install::verify(self.stage.directory()?, plan, external.layout())?;
         let prepared = if legacy_adoption {
-            source_activation::SourceActivation::prepare_legacy_adoption(
-                self.stage.directory()?,
-                &self.target_directory,
-                &self.contract_target,
-                session_launcher,
-            )?
+            #[cfg(not(windows))]
+            {
+                source_activation::SourceActivation::prepare_legacy_adoption(
+                    self.stage.directory()?,
+                    &self.target_directory,
+                    &self.contract_target,
+                    session_launcher,
+                )?
+            }
+            #[cfg(windows)]
+            {
+                return invalid("legacy adoption is unavailable on Windows");
+            }
         } else {
             source_activation::SourceActivation::prepare_fresh(
                 self.stage.directory()?,

@@ -1,7 +1,9 @@
+#[cfg(not(windows))]
+use super::open_root_directory;
 use super::{
     LifecycleError, LifecycleWorkspace, MANAGED_DIRECTORY_MODE, MANAGED_FILE_MODE,
     ValidatedInstallPlan, external_stage, load_json_file, open_child_directory, open_child_file,
-    open_root_directory, rollback_stage, same_object_cap, source_activation, transaction_lock,
+    rollback_stage, same_object_cap, source_activation, transaction_lock,
 };
 use agent_engine::validate_install_plan;
 use cap_std::fs::{Dir, Metadata};
