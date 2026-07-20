@@ -19,7 +19,9 @@
 //! the new managed roots and restores those preimages on failure.
 //! [`PublishedUninstall`] adds rollback-backed full managed removal while
 //! preserving local profiles, config semantics, and `skills/.system`.
-//! Production command routing remains outside this slice.
+//! The legacy-adoption transaction additionally preserves exact source
+//! symlink objects and their external `.system` tree until activation commits.
+//! Bootstrap routing of that transaction remains outside this slice.
 
 mod codex_config;
 mod doctor_report;
@@ -56,7 +58,8 @@ pub use source_lifecycle::{
     InstalledSourceSelection, compile_source_upgrade_bundle, compile_source_upgrade_bundle_bound,
     inspect_installed_source_selection, inspect_legacy_adoption, inspect_source_install,
     inspect_source_install_with_activation, inspect_source_upgrade, inspect_source_upgrade_bound,
-    install_source_bundle, install_source_bundle_with_activation, upgrade_source_bundle,
+    install_source_bundle, install_source_bundle_with_activation,
+    install_source_bundle_with_legacy_adoption, upgrade_source_bundle,
 };
 pub use source_packages::{SourcePackageSet, snapshot_source_packages};
 pub use source_rollback::rollback_source_install;

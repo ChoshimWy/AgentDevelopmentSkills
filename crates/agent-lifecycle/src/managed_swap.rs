@@ -1,7 +1,7 @@
 use super::{
     LifecycleError, LifecycleWorkspace, MANAGED_DIRECTORY_MODE, MANAGED_FILE_MODE,
     ValidatedInstallPlan, external_stage, load_json_file, open_child_directory, open_child_file,
-    rollback_stage, same_object_cap, source_activation, transaction_lock,
+    open_root_directory, rollback_stage, same_object_cap, source_activation, transaction_lock,
 };
 use agent_engine::validate_install_plan;
 use cap_std::fs::{Dir, Metadata};
@@ -78,6 +78,44 @@ pub struct PublishedInstall {
     external_mutation_state: ExternalMutationState,
     plan: ValidatedInstallPlan,
     restored_rollback_point: Option<String>,
+    roots: Vec<RootMove>,
+    workspace: Option<LifecycleWorkspace>,
+}
+
+#[cfg(not(windows))]
+struct LegacyLinkMove {
+    backed_up: bool,
+    expect_file: bool,
+    identity: Metadata,
+    name: &'static str,
+    raw_target: PathBuf,
+    repository_identity: Metadata,
+    resolved: PathBuf,
+    resolved_identity: Metadata,
+    resolved_parent: PathBuf,
+}
+
+#[cfg(not(windows))]
+pub(super) struct LegacyLinkEvidence {
+    pub(super) expect_file: bool,
+    pub(super) name: &'static str,
+    pub(super) raw_target: PathBuf,
+    pub(super) repository_identity: Metadata,
+    pub(super) resolved: PathBuf,
+    pub(super) resolved_identity: Metadata,
+    pub(super) resolved_parent: PathBuf,
+    pub(super) target_identity: Metadata,
+}
+
+/// A published source installation that still owns the exact legacy symlink
+/// preimage until activation and verification commit successfully.
+#[cfg(not(windows))]
+#[must_use = "a published legacy adoption must be committed or rolled back"]
+pub struct PublishedLegacyAdoption {
+    external_mutation_started: bool,
+    external_mutation_state: ExternalMutationState,
+    legacy_links: Vec<LegacyLinkMove>,
+    plan: ValidatedInstallPlan,
     roots: Vec<RootMove>,
     workspace: Option<LifecycleWorkspace>,
 }
@@ -212,6 +250,84 @@ impl LifecycleWorkspace {
         plan: &ValidatedInstallPlan,
     ) -> Result<PublishedInstall, LifecycleError> {
         self.publish_staged_install_with(plan, |_, _| Ok(()))
+    }
+
+    /// Move the exact legacy iOSAgentSkills symlinks into the private backup,
+    /// freeze fresh activation rollback state, and publish the staged install.
+    #[cfg(not(windows))]
+    pub(super) fn publish_staged_legacy_adoption(
+        self,
+        plan: &ValidatedInstallPlan,
+        agents: LegacyLinkEvidence,
+        skills: LegacyLinkEvidence,
+        session_launcher: &[u8],
+    ) -> Result<PublishedLegacyAdoption, LifecycleError> {
+        self.publish_staged_legacy_adoption_with(plan, agents, skills, session_launcher, |_, _| {
+            Ok(())
+        })
+    }
+
+    #[cfg(all(test, not(windows)))]
+    pub(crate) fn publish_staged_legacy_adoption_with_test_hook(
+        self,
+        plan: &ValidatedInstallPlan,
+        agents: LegacyLinkEvidence,
+        skills: LegacyLinkEvidence,
+        session_launcher: &[u8],
+        move_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<PublishedLegacyAdoption, LifecycleError> {
+        self.publish_staged_legacy_adoption_with(plan, agents, skills, session_launcher, move_hook)
+    }
+
+    #[cfg(not(windows))]
+    fn publish_staged_legacy_adoption_with(
+        mut self,
+        plan: &ValidatedInstallPlan,
+        agents: LegacyLinkEvidence,
+        skills: LegacyLinkEvidence,
+        session_launcher: &[u8],
+        mut move_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<PublishedLegacyAdoption, LifecycleError> {
+        let mut legacy_links = Vec::new();
+        let mut roots = Vec::new();
+        let result = (|| {
+            self.verify_staged_install(plan)?;
+            require_empty(self.backup_directory()?, "legacy adoption recovery backup")?;
+            require_absent(
+                self.target_directory_cap(),
+                ".agent-skills",
+                "legacy adoption target",
+            )?;
+            legacy_links = vec![
+                capture_legacy_link(&self, agents)?,
+                capture_legacy_link(&self, skills)?,
+            ];
+            roots = capture_fresh_root_moves(&self)?;
+            backup_legacy_links(&self, &mut legacy_links, &mut move_hook)?;
+            self.stage_legacy_source_activation(plan, session_launcher)?;
+            self.verify_staged_install(plan)?;
+            publish_new_roots(&self, &mut roots, &mut move_hook)?;
+            verify_published_legacy_adoption(&self, &roots, &legacy_links, plan)
+        })();
+
+        match result {
+            Ok(()) => Ok(PublishedLegacyAdoption {
+                external_mutation_started: false,
+                external_mutation_state: ExternalMutationState::Preserved,
+                legacy_links,
+                plan: plan.clone(),
+                roots,
+                workspace: Some(self),
+            }),
+            Err(error) => Err(abort_legacy_adoption(
+                self,
+                &mut roots,
+                &mut legacy_links,
+                plan,
+                false,
+                error,
+            )),
+        }
     }
 
     #[cfg(test)]
@@ -992,6 +1108,303 @@ fn capture_root_moves(
     Ok((roots, present))
 }
 
+#[cfg(not(windows))]
+fn capture_fresh_root_moves(
+    workspace: &LifecycleWorkspace,
+) -> Result<Vec<RootMove>, LifecycleError> {
+    let stage = workspace.stage_directory()?;
+    MANAGED_ROOTS
+        .into_iter()
+        .map(|root| {
+            Ok(RootMove {
+                backed_up: false,
+                previous_identity: None,
+                published: false,
+                root,
+                staged_identity: capture_required(stage, root, "staged managed root")?,
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn capture_legacy_link(
+    workspace: &LifecycleWorkspace,
+    evidence: LegacyLinkEvidence,
+) -> Result<LegacyLinkMove, LifecycleError> {
+    let target = workspace.target_directory_cap();
+    let name = evidence.name;
+    let before = target.symlink_metadata(name)?;
+    if !before.file_type().is_symlink()
+        || !same_object_cap(&evidence.target_identity, &before)
+        || !super::same_content_state_cap(&evidence.target_identity, &before)
+        || target.read_link_contents(name)? != evidence.raw_target
+    {
+        return invalid(format!(
+            "legacy adoption link changed before backup: {name}"
+        ));
+    }
+    let after = target.symlink_metadata(name)?;
+    if !after.file_type().is_symlink()
+        || !same_object_cap(&before, &after)
+        || !super::same_content_state_cap(&before, &after)
+        || !same_object_cap(&evidence.target_identity, &after)
+        || !super::same_content_state_cap(&evidence.target_identity, &after)
+        || target.read_link_contents(name)? != evidence.raw_target
+    {
+        return invalid(format!(
+            "legacy adoption link changed before backup: {name}"
+        ));
+    }
+    let resolved = std::fs::canonicalize(workspace.target().join(name)).map_err(|_| {
+        LifecycleError::Invalid(format!(
+            "legacy adoption link resolution changed before backup: {name}"
+        ))
+    })?;
+    if resolved != evidence.resolved {
+        return invalid(format!(
+            "legacy adoption link resolution changed before backup: {name}"
+        ));
+    }
+    let moved = LegacyLinkMove {
+        backed_up: false,
+        expect_file: evidence.expect_file,
+        identity: after,
+        name,
+        raw_target: evidence.raw_target,
+        repository_identity: evidence.repository_identity,
+        resolved: evidence.resolved,
+        resolved_identity: evidence.resolved_identity,
+        resolved_parent: evidence.resolved_parent,
+    };
+    verify_legacy_namespace(&moved)?;
+    Ok(moved)
+}
+
+#[cfg(not(windows))]
+fn verify_legacy_namespace(moved: &LegacyLinkMove) -> Result<(), LifecycleError> {
+    let repository = open_root_directory(
+        &moved.resolved_parent,
+        None,
+        "legacy repository changed during adoption",
+    )?;
+    let repository_identity = repository.dir_metadata()?;
+    let resolved_identity = repository.symlink_metadata(moved.name).map_err(|_| {
+        LifecycleError::Invalid(format!(
+            "legacy repository entry changed during adoption: {}",
+            moved.name
+        ))
+    })?;
+    let resolved = std::fs::canonicalize(moved.resolved_parent.join(moved.name)).map_err(|_| {
+        LifecycleError::Invalid(format!(
+            "legacy repository entry changed during adoption: {}",
+            moved.name
+        ))
+    })?;
+    if resolved != moved.resolved
+        || !same_object_cap(&moved.repository_identity, &repository_identity)
+        || !super::same_content_state_cap(&moved.repository_identity, &repository_identity)
+        || resolved_identity.file_type().is_symlink()
+        || !same_object_cap(&moved.resolved_identity, &resolved_identity)
+        || !super::same_content_state_cap(&moved.resolved_identity, &resolved_identity)
+        || (moved.expect_file && !resolved_identity.is_file())
+        || (!moved.expect_file && !resolved_identity.is_dir())
+    {
+        return invalid(format!(
+            "legacy repository entry changed during adoption: {}",
+            moved.name
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn require_legacy_link(
+    parent: &Dir,
+    moved: &LegacyLinkMove,
+    label: &str,
+) -> Result<(), LifecycleError> {
+    let metadata = parent.symlink_metadata(moved.name).map_err(|_| {
+        LifecycleError::Invalid(format!("{label} is missing or unsafe: {}", moved.name))
+    })?;
+    if !metadata.file_type().is_symlink()
+        || !same_object_cap(&moved.identity, &metadata)
+        || parent.read_link_contents(moved.name)? != moved.raw_target
+    {
+        return invalid(format!("{label} changed: {}", moved.name));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn backup_legacy_links(
+    workspace: &LifecycleWorkspace,
+    links: &mut [LegacyLinkMove],
+    hook: &mut impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+) -> Result<(), LifecycleError> {
+    for moved in links {
+        verify_legacy_namespace(moved)?;
+        require_legacy_link(
+            workspace.target_directory_cap(),
+            moved,
+            "legacy adoption link",
+        )?;
+        require_absent(
+            workspace.backup_directory()?,
+            moved.name,
+            "legacy adoption recovery backup",
+        )?;
+        rename_no_replace(
+            workspace.target_directory_cap(),
+            workspace.target(),
+            moved.name,
+            workspace.backup_directory()?,
+            &workspace.backup_path(),
+            moved.name,
+        )?;
+        moved.backed_up = true;
+        hook(moved.name, "legacy-backup-after-rename")?;
+        verify_legacy_namespace(moved)?;
+        require_absent(
+            workspace.target_directory_cap(),
+            moved.name,
+            "legacy adoption target",
+        )?;
+        require_legacy_link(
+            workspace.backup_directory()?,
+            moved,
+            "legacy adoption recovery link",
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn verify_legacy_backup(
+    workspace: &LifecycleWorkspace,
+    links: &[LegacyLinkMove],
+) -> Result<(), LifecycleError> {
+    let names = workspace
+        .backup_directory()?
+        .entries()?
+        .map(|entry| {
+            entry.and_then(|entry| {
+                entry.file_name().into_string().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "legacy recovery backup contains a non-UTF-8 entry",
+                    )
+                })
+            })
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    if names != BTreeSet::from(["AGENTS.md".to_owned(), "skills".to_owned()]) {
+        return invalid("legacy adoption recovery backup contains unexpected entries");
+    }
+    for moved in links {
+        if !moved.backed_up {
+            return invalid("legacy adoption recovery backup is incomplete");
+        }
+        verify_legacy_namespace(moved)?;
+        require_legacy_link(
+            workspace.backup_directory()?,
+            moved,
+            "legacy adoption recovery link",
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn restore_legacy_links(
+    workspace: &LifecycleWorkspace,
+    links: &mut [LegacyLinkMove],
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for moved in links.iter_mut().rev() {
+        if !moved.backed_up {
+            continue;
+        }
+        let result = require_absent(
+            workspace.target_directory_cap(),
+            moved.name,
+            "legacy adoption restored target",
+        )
+        .and_then(|()| verify_legacy_namespace(moved))
+        .and_then(|()| {
+            require_legacy_link(
+                workspace.backup_directory()?,
+                moved,
+                "legacy adoption recovery link",
+            )
+        })
+        .and_then(|()| {
+            rename_no_replace(
+                workspace.backup_directory()?,
+                &workspace.backup_path(),
+                moved.name,
+                workspace.target_directory_cap(),
+                workspace.target(),
+                moved.name,
+            )
+            .map_err(LifecycleError::from)
+        });
+        match result {
+            Ok(()) => {
+                moved.backed_up = false;
+                if let Err(error) = require_legacy_link(
+                    workspace.target_directory_cap(),
+                    moved,
+                    "restored legacy adoption link",
+                ) {
+                    errors.push(format!("restore {}: {error}", moved.name));
+                }
+            }
+            Err(error) => errors.push(format!("restore {}: {error}", moved.name)),
+        }
+    }
+    errors
+}
+
+#[cfg(not(windows))]
+fn verify_published_legacy_adoption(
+    workspace: &LifecycleWorkspace,
+    roots: &[RootMove],
+    links: &[LegacyLinkMove],
+    plan: &ValidatedInstallPlan,
+) -> Result<(), LifecycleError> {
+    verify_published_legacy_roots(workspace, roots, links)?;
+    workspace.verify_published_install(plan)?;
+    verify_published_legacy_roots(workspace, roots, links)
+}
+
+#[cfg(not(windows))]
+fn verify_published_legacy_roots(
+    workspace: &LifecycleWorkspace,
+    roots: &[RootMove],
+    links: &[LegacyLinkMove],
+) -> Result<(), LifecycleError> {
+    workspace.validate()?;
+    for moved in roots {
+        if !moved.published {
+            return invalid("published legacy adoption roots are incomplete");
+        }
+        require_identity(
+            workspace.target_directory_cap(),
+            moved.root,
+            &moved.staged_identity,
+            "published legacy adoption root",
+        )?;
+        require_absent(
+            workspace.stage_directory()?,
+            moved.root.name,
+            "published legacy adoption stage",
+        )?;
+    }
+    verify_legacy_backup(workspace, links)?;
+    workspace.validate()
+}
+
 fn backup_current_roots(
     workspace: &LifecycleWorkspace,
     roots: &mut [RootMove],
@@ -1423,6 +1836,230 @@ impl PublishedInstall {
     }
 }
 
+#[cfg(not(windows))]
+impl PublishedLegacyAdoption {
+    /// Revalidate the managed publication and exact legacy recovery links.
+    pub fn verify(&self, plan: &ValidatedInstallPlan) -> Result<(), LifecycleError> {
+        let workspace = self.workspace()?;
+        verify_published_legacy_roots(workspace, &self.roots, &self.legacy_links)?;
+        match self.external_mutation_state {
+            ExternalMutationState::Preserved => workspace.verify_published_install(plan)?,
+            ExternalMutationState::ActivationApplied => workspace.verify_published_after_handler(
+                plan,
+                external_stage::PublishedActivation::Managed,
+            )?,
+            ExternalMutationState::InProgress
+            | ExternalMutationState::ActivationRemoved
+            | ExternalMutationState::RollbackRestored => {
+                return invalid("legacy adoption external mutation is incomplete");
+            }
+        }
+        verify_published_legacy_roots(workspace, &self.roots, &self.legacy_links)
+    }
+
+    /// Activate the published adoption using its frozen fresh rollback point.
+    pub fn apply_source_activation(
+        &mut self,
+        session_launcher: &[u8],
+    ) -> Result<Value, LifecycleError> {
+        self.apply_source_activation_with(session_launcher, |_, _| Ok(()))
+    }
+
+    fn apply_source_activation_with(
+        &mut self,
+        session_launcher: &[u8],
+        handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<Value, LifecycleError> {
+        if self.external_mutation_state != ExternalMutationState::Preserved {
+            return invalid("external mutation has already started");
+        }
+        let (prepared, target, target_path, scratch, scratch_path) = {
+            let workspace = self.workspace()?;
+            verify_published_legacy_adoption(
+                workspace,
+                &self.roots,
+                &self.legacy_links,
+                &self.plan,
+            )?;
+            if !workspace.has_fresh_rollback_point() {
+                return invalid("legacy adoption requires a fresh rollback point");
+            }
+            let target = workspace.target_directory()?;
+            let target_path = workspace.target().to_path_buf();
+            let scratch = workspace.handler_scratch_directory()?;
+            let scratch_path = workspace.handler_scratch_path();
+            let prepared = source_activation::SourceActivation::prepare_legacy_adoption(
+                &target,
+                &target,
+                workspace.contract_target(),
+                session_launcher,
+            )?;
+            workspace.require_rollback_external_paths(prepared.scope())?;
+            prepared.revalidate(&target)?;
+            (prepared, target, target_path, scratch, scratch_path)
+        };
+        self.external_mutation_started = true;
+        self.external_mutation_state = ExternalMutationState::InProgress;
+        let result = prepared.apply_with_hook(
+            &target,
+            &target_path,
+            &scratch,
+            &scratch_path,
+            handler_hook,
+        )?;
+        self.external_mutation_state = ExternalMutationState::ActivationApplied;
+        Ok(result)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_source_activation_with_test_hook(
+        &mut self,
+        session_launcher: &[u8],
+        handler_hook: impl FnMut(&str, &str) -> Result<(), LifecycleError>,
+    ) -> Result<Value, LifecycleError> {
+        self.apply_source_activation_with(session_launcher, handler_hook)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recovery_paths(&self) -> Result<(PathBuf, PathBuf), LifecycleError> {
+        let workspace = self.workspace()?;
+        Ok((workspace.stage_path(), workspace.backup_path()))
+    }
+
+    /// Commit the adoption and best-effort delete its temporary recovery data.
+    ///
+    /// The irreversible commit point is crossed only after all publication and
+    /// activation checks pass. Cleanup failures after that point are returned
+    /// as warnings rather than an error that could be mistaken for a rolled
+    /// back transaction.
+    pub fn commit(mut self, plan: &ValidatedInstallPlan) -> Result<Value, LifecycleError> {
+        self.commit_with_cleanup(plan, LifecycleWorkspace::cleanup)
+    }
+
+    fn commit_with_cleanup(
+        &mut self,
+        plan: &ValidatedInstallPlan,
+        cleanup: impl FnOnce(LifecycleWorkspace) -> Result<(), LifecycleError>,
+    ) -> Result<Value, LifecycleError> {
+        let workspace = self.take_workspace()?;
+        if self.external_mutation_state != ExternalMutationState::ActivationApplied {
+            return Err(abort_legacy_adoption(
+                workspace,
+                &mut self.roots,
+                &mut self.legacy_links,
+                &self.plan,
+                self.external_mutation_started,
+                LifecycleError::Invalid(
+                    "legacy adoption activation must complete before commit".to_owned(),
+                ),
+            ));
+        }
+        if let Err(error) =
+            verify_published_legacy_roots(&workspace, &self.roots, &self.legacy_links)
+                .and_then(|()| {
+                    workspace.verify_published_after_handler(
+                        plan,
+                        external_stage::PublishedActivation::Managed,
+                    )
+                })
+                .and_then(|()| {
+                    verify_published_legacy_roots(&workspace, &self.roots, &self.legacy_links)
+                })
+        {
+            return Err(abort_legacy_adoption(
+                workspace,
+                &mut self.roots,
+                &mut self.legacy_links,
+                &self.plan,
+                self.external_mutation_started,
+                error,
+            ));
+        }
+        let stage = workspace.stage_path();
+        let backup = workspace.backup_path();
+        let cleanup_warning = cleanup(workspace).err().map(|error| error.to_string());
+        let retained_stage = path_entry_exists(&stage);
+        let retained_backup = path_entry_exists(&backup);
+        Ok(serde_json::json!({
+            "cleanup_warnings": cleanup_warning.into_iter().collect::<Vec<_>>(),
+            "persistent_backup": retained_backup,
+            "persistent_stage": retained_stage,
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn commit_with_test_cleanup(
+        mut self,
+        plan: &ValidatedInstallPlan,
+        cleanup: impl FnOnce(LifecycleWorkspace) -> Result<(), LifecycleError>,
+    ) -> Result<Value, LifecycleError> {
+        self.commit_with_cleanup(plan, cleanup)
+    }
+
+    /// Remove the new install, restore external preimages, and return the exact
+    /// original symlink objects to the target.
+    #[cfg(test)]
+    pub(crate) fn rollback(mut self) -> Result<(), LifecycleError> {
+        let workspace = self.take_workspace()?;
+        let errors = recover_legacy_adoption(
+            &workspace,
+            &mut self.roots,
+            &mut self.legacy_links,
+            &self.plan,
+            self.external_mutation_started,
+        );
+        if errors.is_empty() {
+            workspace.cleanup()
+        } else {
+            Err(preserve_incomplete_recovery(
+                workspace,
+                "legacy adoption rollback",
+                &errors,
+            ))
+        }
+    }
+
+    fn workspace(&self) -> Result<&LifecycleWorkspace, LifecycleError> {
+        self.workspace.as_ref().ok_or_else(|| {
+            LifecycleError::Invalid("published legacy adoption is inactive".to_owned())
+        })
+    }
+
+    fn take_workspace(&mut self) -> Result<LifecycleWorkspace, LifecycleError> {
+        self.workspace.take().ok_or_else(|| {
+            LifecycleError::Invalid("published legacy adoption is inactive".to_owned())
+        })
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for PublishedLegacyAdoption {
+    fn drop(&mut self) {
+        let Some(workspace) = self.workspace.take() else {
+            return;
+        };
+        let errors = recover_legacy_adoption(
+            &workspace,
+            &mut self.roots,
+            &mut self.legacy_links,
+            &self.plan,
+            self.external_mutation_started,
+        );
+        if errors.is_empty() {
+            let _ = workspace.cleanup();
+        } else {
+            let _ = workspace.preserve_recovery_workspace();
+        }
+    }
+}
+
+fn path_entry_exists(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Ok(_) | Err(_) => true,
+    }
+}
+
 impl Drop for PublishedInstall {
     fn drop(&mut self) {
         let Some(workspace) = self.workspace.take() else {
@@ -1622,6 +2259,93 @@ fn abort_workspace(
         workspace,
         &format!("managed-root publication failed ({primary})"),
         &recovery_errors,
+    )
+}
+
+#[cfg(not(windows))]
+fn recover_legacy_adoption(
+    workspace: &LifecycleWorkspace,
+    roots: &mut [RootMove],
+    links: &mut [LegacyLinkMove],
+    plan: &ValidatedInstallPlan,
+    external_mutation_started: bool,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if external_mutation_started {
+        let verified = verify_legacy_backup(workspace, links)
+            .and_then(|()| workspace.verify_published_during_handler(plan))
+            .and_then(|()| verify_legacy_backup(workspace, links));
+        if let Err(error) = verified {
+            return vec![format!(
+                "verify legacy adoption before external recovery: {error}"
+            )];
+        }
+    }
+
+    errors.extend(unpublish_new_roots(workspace, roots, &mut |_, _| Ok(())));
+    if !errors.is_empty() {
+        return errors;
+    }
+    if external_mutation_started {
+        if let Err(error) = workspace.restore_uninstall_external_state() {
+            errors.push(format!("restore legacy adoption external state: {error}"));
+            return errors;
+        }
+        if let Err(error) = workspace.verify_fresh_recovery() {
+            errors.push(format!("verify legacy adoption external recovery: {error}"));
+            return errors;
+        }
+    }
+
+    errors.extend(restore_legacy_links(workspace, links));
+    if !errors.is_empty() {
+        return errors;
+    }
+    for moved in links {
+        if let Err(error) = require_legacy_link(
+            workspace.target_directory_cap(),
+            moved,
+            "restored legacy adoption link",
+        ) {
+            errors.push(format!("verify restored {}: {error}", moved.name));
+        }
+    }
+    match workspace.backup_directory() {
+        Ok(backup) => {
+            if let Err(error) = require_empty(backup, "restored legacy adoption backup") {
+                errors.push(format!("verify restored legacy backup: {error}"));
+            }
+        }
+        Err(error) => errors.push(format!("open restored legacy backup: {error}")),
+    }
+    if let Err(error) = workspace.validate() {
+        errors.push(format!("verify restored legacy workspace: {error}"));
+    }
+    errors
+}
+
+#[cfg(not(windows))]
+fn abort_legacy_adoption(
+    workspace: LifecycleWorkspace,
+    roots: &mut [RootMove],
+    links: &mut [LegacyLinkMove],
+    plan: &ValidatedInstallPlan,
+    external_mutation_started: bool,
+    primary: LifecycleError,
+) -> LifecycleError {
+    let errors = recover_legacy_adoption(&workspace, roots, links, plan, external_mutation_started);
+    if errors.is_empty() {
+        return match workspace.cleanup() {
+            Ok(()) => primary,
+            Err(cleanup) => LifecycleError::Invalid(format!(
+                "legacy adoption failed ({primary}); workspace cleanup is incomplete: {cleanup}"
+            )),
+        };
+    }
+    preserve_incomplete_recovery(
+        workspace,
+        &format!("legacy adoption failed ({primary})"),
+        &errors,
     )
 }
 

@@ -71,6 +71,40 @@ pub(super) fn stage(target: &Dir, stage: &Dir) -> Result<ExternalStageSnapshot, 
     stage_with_activation(target, stage, activation.clone(), activation)
 }
 
+pub(super) fn stage_from_legacy_skills(
+    legacy_skills: &Dir,
+    stage: &Dir,
+) -> Result<ExternalStageSnapshot, LifecycleError> {
+    let system_skills =
+        inspect_optional_system_tree(legacy_skills, "legacy .system Skills", false)?;
+    if let Some(snapshot) = &system_skills {
+        copy_system_skills_from(legacy_skills, stage, snapshot)?;
+    }
+    let snapshot = ExternalStageSnapshot {
+        activation: None,
+        source_activation: None,
+        system_skills,
+    };
+    verify_from_legacy_skills(legacy_skills, stage, &snapshot)?;
+    Ok(snapshot)
+}
+
+pub(super) fn verify_from_legacy_skills(
+    legacy_skills: &Dir,
+    stage: &Dir,
+    expected: &ExternalStageSnapshot,
+) -> Result<(), LifecycleError> {
+    if expected.activation.is_some() || expected.source_activation.is_some() {
+        return invalid("legacy external snapshot must not contain Activation state");
+    }
+    if inspect_optional_system_tree(legacy_skills, "legacy .system Skills", false)?
+        != expected.system_skills
+    {
+        return invalid("legacy .system Skills changed after staging");
+    }
+    verify_staged(stage, expected)
+}
+
 pub(super) fn stage_for_rollback(
     target: &Dir,
     rollback_root: &Dir,
@@ -449,11 +483,19 @@ fn copy_system_skills(
     snapshot: &SystemTreeSnapshot,
 ) -> Result<(), LifecycleError> {
     let source_skills = open_directory(target, OsStr::new("skills"), None, "target Skills root")?;
+    copy_system_skills_from(&source_skills, stage, snapshot)
+}
+
+fn copy_system_skills_from(
+    source_skills: &Dir,
+    stage: &Dir,
+    snapshot: &SystemTreeSnapshot,
+) -> Result<(), LifecycleError> {
     let source_root = open_directory(
-        &source_skills,
+        source_skills,
         OsStr::new(SYSTEM_SKILLS_DIRECTORY),
         snapshot.root_mode,
-        "target .system Skills",
+        "external .system Skills",
     )?;
     let destination_skills = open_child_directory(
         stage,

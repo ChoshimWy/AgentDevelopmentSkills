@@ -231,6 +231,7 @@ impl SourceActivation {
             Some(activation_lock),
             current,
             migration,
+            false,
         )
     }
 
@@ -256,9 +257,38 @@ impl SourceActivation {
             None,
             BTreeMap::new(),
             None,
+            false,
         )
     }
 
+    #[cfg(not(windows))]
+    pub(super) fn prepare_legacy_adoption(
+        source: &Dir,
+        destination: &Dir,
+        target_path: &Path,
+        session_launcher: &[u8],
+    ) -> Result<Self, LifecycleError> {
+        require_bounded_session_launcher(session_launcher)?;
+        let managed = open_child_directory(
+            source,
+            ".agent-skills",
+            Some(MANAGED_DIRECTORY_MODE),
+            "staged managed metadata directory",
+        )?;
+        require_activation_lock_absent(&managed)?;
+        Self::prepare_from(
+            source,
+            destination,
+            target_path,
+            session_launcher,
+            None,
+            BTreeMap::new(),
+            None,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn prepare_from(
         source: &Dir,
         destination: &Dir,
@@ -267,12 +297,17 @@ impl SourceActivation {
         activation_lock: Option<FileSnapshot>,
         current: BTreeMap<String, (ActivationRecord, FileSnapshot)>,
         migration: Option<Value>,
+        allow_unmanaged_overwrite: bool,
     ) -> Result<Self, LifecycleError> {
         let mut source_assets = Vec::new();
         let candidate_values =
             load_activation_candidate_values(source, session_launcher, &mut source_assets)?;
-        let (mut candidates, mut retired) =
-            reconcile_activation_candidates(destination, candidate_values, current)?;
+        let (mut candidates, mut retired) = reconcile_activation_candidates(
+            destination,
+            candidate_values,
+            current,
+            allow_unmanaged_overwrite,
+        )?;
         let (mut profiles, mut created_profile_paths) =
             prepare_activation_profiles(source, destination, &mut source_assets)?;
         let config =
@@ -841,6 +876,7 @@ fn reconcile_activation_candidates(
     target: &Dir,
     values: BTreeMap<String, (Vec<u8>, u32)>,
     mut current: BTreeMap<String, (ActivationRecord, FileSnapshot)>,
+    allow_unmanaged_overwrite: bool,
 ) -> Result<(Vec<ActivationCandidate>, Vec<ActivationRecord>), LifecycleError> {
     let mut candidates = Vec::with_capacity(values.len());
     for (path, (bytes, mode)) in values {
@@ -848,16 +884,18 @@ fn reconcile_activation_candidates(
             if let Some((_, snapshot)) = current.remove(&path) {
                 (Some(snapshot), false)
             } else {
+                let required_mode = (!allow_unmanaged_overwrite).then_some(mode);
                 let snapshot =
-                    read_optional_relative_file(target, &path, Some(mode), "activation file")?;
-                if let Some(snapshot) = snapshot.as_ref()
+                    read_optional_relative_file(target, &path, required_mode, "activation file")?;
+                if !allow_unmanaged_overwrite
+                    && let Some(snapshot) = snapshot.as_ref()
                     && snapshot.bytes != bytes
                 {
                     return invalid(format!(
                         "refusing to overwrite unmanaged activation destination: {path}"
                     ));
                 }
-                let adopted = snapshot.is_some();
+                let adopted = snapshot.is_some() && !allow_unmanaged_overwrite;
                 (snapshot, adopted)
             };
         candidates.push(ActivationCandidate {

@@ -41,6 +41,7 @@ pub struct LifecycleWorkspace {
     requires_persistent_rollback_restore: bool,
     stage: WorkspaceEntry,
     staged_external_state: Option<external_stage::ExternalStageSnapshot>,
+    staged_legacy_skills: Option<Dir>,
     staged_install_identity: Option<StagedInstallIdentity>,
     staged_rollback_point: Option<rollback_stage::RollbackStageSnapshot>,
     staged_rollback_point_is_fresh: bool,
@@ -115,6 +116,7 @@ impl LifecycleWorkspace {
                 requires_persistent_rollback_restore: false,
                 stage,
                 staged_external_state: None,
+                staged_legacy_skills: None,
                 staged_install_identity: None,
                 staged_rollback_point: None,
                 staged_rollback_point_is_fresh: false,
@@ -271,6 +273,39 @@ impl LifecycleWorkspace {
         self.validate()
     }
 
+    /// Preserve a legacy iOSAgentSkills `.system` tree in the managed stage.
+    ///
+    /// The supplied directory is the already capability-opened legacy `skills`
+    /// root. Its identity stays held through publication so moving the target
+    /// symlink cannot redirect or invalidate the frozen source.
+    #[cfg(not(windows))]
+    pub(super) fn stage_legacy_external_state(
+        &mut self,
+        plan: &ValidatedInstallPlan,
+        legacy_skills: &Dir,
+    ) -> Result<bool, LifecycleError> {
+        self.validate()?;
+        self.validate_staged_install_identity(plan)?;
+        self.require_external_state_not_staged()?;
+        staged_install::verify(
+            self.stage.directory()?,
+            plan,
+            staged_install::ExternalLayout::default(),
+        )?;
+        let snapshot =
+            external_stage::stage_from_legacy_skills(legacy_skills, self.stage.directory()?)?;
+        let preserved = snapshot.layout().system_skills;
+        external_stage::verify_from_legacy_skills(
+            legacy_skills,
+            self.stage.directory()?,
+            &snapshot,
+        )?;
+        self.staged_legacy_skills = Some(legacy_skills.try_clone()?);
+        self.staged_external_state = Some(snapshot);
+        self.validate()?;
+        Ok(preserved)
+    }
+
     pub(super) fn stage_persistent_rollback_install(
         &mut self,
         persistent: &rollback::PersistentRollbackPoint,
@@ -306,7 +341,7 @@ impl LifecycleWorkspace {
             persistent.root(),
             self.stage.directory()?,
         )?;
-        external_stage::verify(&self.target_directory, self.stage.directory()?, &external)?;
+        self.verify_external_stage(&external)?;
         self.staged_external_state = Some(external);
         self.requires_persistent_rollback_restore = true;
         self.stage_rollback_point(&plan, persistent.external_paths())?;
@@ -417,7 +452,7 @@ impl LifecycleWorkspace {
                 "lifecycle workspace external state has not been staged".to_owned(),
             )
         })?;
-        external_stage::verify(&self.target_directory, self.stage.directory()?, external)?;
+        self.verify_external_stage(external)?;
         staged_install::verify(self.stage.directory()?, plan, external.layout())?;
         let snapshot = rollback_stage::stage(
             &self.target_directory,
@@ -457,6 +492,24 @@ impl LifecycleWorkspace {
         plan: &ValidatedInstallPlan,
         session_launcher: &[u8],
     ) -> Result<String, LifecycleError> {
+        self.stage_source_activation(plan, session_launcher, false)
+    }
+
+    #[cfg(not(windows))]
+    pub(super) fn stage_legacy_source_activation(
+        &mut self,
+        plan: &ValidatedInstallPlan,
+        session_launcher: &[u8],
+    ) -> Result<String, LifecycleError> {
+        self.stage_source_activation(plan, session_launcher, true)
+    }
+
+    fn stage_source_activation(
+        &mut self,
+        plan: &ValidatedInstallPlan,
+        session_launcher: &[u8],
+        legacy_adoption: bool,
+    ) -> Result<String, LifecycleError> {
         self.validate()?;
         self.validate_staged_install_identity(plan)?;
         if self.staged_rollback_point.is_some() {
@@ -468,14 +521,23 @@ impl LifecycleWorkspace {
                 "lifecycle workspace external state has not been staged".to_owned(),
             )
         })?;
-        external_stage::verify(&self.target_directory, self.stage.directory()?, external)?;
+        self.verify_external_stage(external)?;
         staged_install::verify(self.stage.directory()?, plan, external.layout())?;
-        let prepared = source_activation::SourceActivation::prepare_fresh(
-            self.stage.directory()?,
-            &self.target_directory,
-            &self.contract_target,
-            session_launcher,
-        )?;
+        let prepared = if legacy_adoption {
+            source_activation::SourceActivation::prepare_legacy_adoption(
+                self.stage.directory()?,
+                &self.target_directory,
+                &self.contract_target,
+                session_launcher,
+            )?
+        } else {
+            source_activation::SourceActivation::prepare_fresh(
+                self.stage.directory()?,
+                &self.target_directory,
+                &self.contract_target,
+                session_launcher,
+            )?
+        };
         let external_paths = prepared.scope().to_vec();
         let snapshot = rollback_stage::stage_fresh(
             self.stage.directory()?,
@@ -557,7 +619,7 @@ impl LifecycleWorkspace {
                 "lifecycle workspace external state has not been staged".to_owned(),
             )
         })?;
-        external_stage::verify(&self.target_directory, self.stage.directory()?, external)?;
+        self.verify_external_stage(external)?;
         let mut layout = external.layout();
         if let Some(rollback) = self.staged_rollback_point.as_ref() {
             if self.staged_rollback_point_is_fresh {
@@ -598,7 +660,7 @@ impl LifecycleWorkspace {
                 )?;
             }
         }
-        external_stage::verify(&self.target_directory, self.stage.directory()?, external)?;
+        self.verify_external_stage(external)?;
         self.validate()
     }
 
@@ -678,6 +740,22 @@ impl LifecycleWorkspace {
             rollback_stage::verify_published(&self.target_directory, rollback)?;
         }
         self.validate()
+    }
+
+    fn verify_external_stage(
+        &self,
+        expected: &external_stage::ExternalStageSnapshot,
+    ) -> Result<(), LifecycleError> {
+        match self.staged_legacy_skills.as_ref() {
+            Some(legacy_skills) => external_stage::verify_from_legacy_skills(
+                legacy_skills,
+                self.stage.directory()?,
+                expected,
+            ),
+            None => {
+                external_stage::verify(&self.target_directory, self.stage.directory()?, expected)
+            }
+        }
     }
 
     pub(super) fn target_directory(&self) -> Result<Dir, LifecycleError> {
@@ -1000,15 +1078,32 @@ impl LifecycleWorkspace {
     pub(super) fn preserve_recovery_workspace(
         mut self,
     ) -> Result<(PathBuf, PathBuf), LifecycleError> {
-        self.lock()?.validate()?;
-        self.stage.validate(&self.target_directory)?;
-        self.backup.validate(&self.target_directory)?;
         let stage = self.stage_path();
         let backup = self.backup_path();
-        self.cleanup_handler_scratch()?;
+        let mut errors = Vec::new();
+        match self.lock() {
+            Ok(lock) => {
+                if let Err(error) = lock.validate() {
+                    errors.push(("lock validation", error));
+                }
+            }
+            Err(error) => errors.push(("lock validation", error)),
+        }
+        if let Err(error) = self.stage.validate(&self.target_directory) {
+            errors.push(("stage validation", error));
+        }
+        if let Err(error) = self.backup.validate(&self.target_directory) {
+            errors.push(("backup validation", error));
+        }
         self.stage.preserve();
         self.backup.preserve();
-        self.release_lock()?;
+        if let Err(error) = self.cleanup_handler_scratch() {
+            errors.push(("handler scratch", error));
+        }
+        if let Err(error) = self.release_lock() {
+            errors.push(("lock release", error));
+        }
+        finish_cleanup("lifecycle recovery workspace preservation", errors)?;
         Ok((stage, backup))
     }
 
@@ -1618,6 +1713,102 @@ mod tests {
         workspace.cleanup().expect("cleanup lifecycle workspace");
         assert!(!root.join(LIFECYCLE_LOCK_DIRECTORY).exists());
         std::fs::remove_dir(&root).expect("remove handler scratch target");
+    }
+
+    #[test]
+    fn recovery_workspace_survives_handler_scratch_cleanup_failure() {
+        let root = temporary_path("preserve-recovery-scratch-failure");
+        std::fs::create_dir(&root).expect("create recovery target");
+        let workspace = LifecycleWorkspace::begin(&root).expect("begin lifecycle workspace");
+        let stage = workspace.stage_path();
+        let backup = workspace.backup_path();
+        workspace
+            .stage_directory()
+            .expect("borrow stage capability")
+            .write("quarantined", b"stage evidence")
+            .expect("write stage evidence");
+        workspace
+            .backup_directory()
+            .expect("borrow backup capability")
+            .write("legacy-link", b"backup evidence")
+            .expect("write backup evidence");
+        workspace
+            .handler_scratch_directory()
+            .expect("open handler scratch")
+            .write("unexpected-entry", b"unsafe scratch residue")
+            .expect("write unexpected scratch entry");
+
+        let error = workspace
+            .preserve_recovery_workspace()
+            .expect_err("unknown scratch entry must fail preservation cleanup");
+        assert!(error.to_string().contains("unknown entry"));
+        assert_eq!(
+            std::fs::read(stage.join("quarantined")).expect("read preserved stage evidence"),
+            b"stage evidence"
+        );
+        assert_eq!(
+            std::fs::read(backup.join("legacy-link")).expect("read preserved backup evidence"),
+            b"backup evidence"
+        );
+
+        std::fs::remove_dir_all(&root).expect("remove preserved recovery target");
+    }
+
+    fn assert_recovery_peer_survives_workspace_namespace_drift(drift_stage: bool) {
+        let label = if drift_stage {
+            "preserve-recovery-stage-drift"
+        } else {
+            "preserve-recovery-backup-drift"
+        };
+        let root = temporary_path(label);
+        std::fs::create_dir(&root).expect("create recovery target");
+        let workspace = LifecycleWorkspace::begin(&root).expect("begin lifecycle workspace");
+        let stage = workspace.stage_path();
+        let backup = workspace.backup_path();
+        workspace
+            .stage_directory()
+            .expect("borrow stage capability")
+            .write("stage-evidence", b"stage evidence")
+            .expect("write stage evidence");
+        workspace
+            .backup_directory()
+            .expect("borrow backup capability")
+            .write("backup-evidence", b"backup evidence")
+            .expect("write backup evidence");
+        let drifted = root.join("detached-workspace");
+        std::fs::rename(if drift_stage { &stage } else { &backup }, &drifted)
+            .expect("drift workspace namespace");
+
+        workspace
+            .preserve_recovery_workspace()
+            .expect_err("workspace namespace drift must fail preservation validation");
+        let (peer, peer_name, peer_bytes) = if drift_stage {
+            (&backup, "backup-evidence", b"backup evidence".as_slice())
+        } else {
+            (&stage, "stage-evidence", b"stage evidence".as_slice())
+        };
+        assert_eq!(
+            std::fs::read(peer.join(peer_name)).expect("read preserved peer evidence"),
+            peer_bytes
+        );
+        let drifted_name = if drift_stage {
+            "stage-evidence"
+        } else {
+            "backup-evidence"
+        };
+        assert!(drifted.join(drifted_name).is_file());
+
+        std::fs::remove_dir_all(&root).expect("remove preserved recovery target");
+    }
+
+    #[test]
+    fn recovery_backup_survives_stage_namespace_drift() {
+        assert_recovery_peer_survives_workspace_namespace_drift(true);
+    }
+
+    #[test]
+    fn recovery_stage_survives_backup_namespace_drift() {
+        assert_recovery_peer_survives_workspace_namespace_drift(false);
     }
 
     #[test]

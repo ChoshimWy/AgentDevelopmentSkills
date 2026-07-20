@@ -8,7 +8,7 @@ use crate::{
     upgrade_plan::semantic_lock_identity,
 };
 #[cfg(not(windows))]
-use crate::{same_content_state_cap, same_object_cap};
+use crate::{managed_swap, same_content_state_cap, same_object_cap};
 use agent_engine::validate_install_plan;
 use cap_std::fs::Dir;
 use serde_json::Value;
@@ -55,8 +55,43 @@ fn inspect_legacy_adoption_posix(
         return Ok(serde_json::json!({}));
     };
     let (target, canonical_target, _) = transaction_lock::inspect_existing_target(target_root)?;
-    if has_managed_install_lock(&target)? {
+    let Some(snapshot) = capture_legacy_adoption_layout(&target, &canonical_target, between_links)?
+    else {
         return Ok(serde_json::json!({}));
+    };
+    Ok(snapshot.projection())
+}
+
+#[cfg(not(windows))]
+struct LegacyAdoptionSnapshot {
+    agents: LegacyLinkSnapshot,
+    skills: LegacyLinkSnapshot,
+}
+
+#[cfg(not(windows))]
+impl LegacyAdoptionSnapshot {
+    fn projection(&self) -> Value {
+        let mut links = BTreeMap::new();
+        links.insert(
+            "AGENTS.md".to_owned(),
+            Value::String(self.agents.raw_target.clone()),
+        );
+        links.insert(
+            "skills".to_owned(),
+            Value::String(self.skills.raw_target.clone()),
+        );
+        Value::Object(links.into_iter().collect())
+    }
+}
+
+#[cfg(not(windows))]
+fn capture_legacy_adoption_layout(
+    target: &Dir,
+    canonical_target: &Path,
+    between_links: impl FnOnce() -> Result<(), LifecycleError>,
+) -> Result<Option<LegacyAdoptionSnapshot>, LifecycleError> {
+    if has_managed_install_lock(target)? {
+        return Ok(None);
     }
     let occupied = MANAGED_ROOTS
         .iter()
@@ -67,7 +102,7 @@ fn inspect_legacy_adoption_posix(
         })
         .collect::<Result<Vec<_>, _>>()?;
     if occupied.is_empty() {
-        return Ok(serde_json::json!({}));
+        return Ok(None);
     }
     if occupied != ["AGENTS.md".to_owned(), "skills".to_owned()] {
         return invalid(format!(
@@ -76,9 +111,9 @@ fn inspect_legacy_adoption_posix(
         ));
     }
 
-    let agents = inspect_legacy_link(&target, &canonical_target, "AGENTS.md", true)?;
+    let agents = inspect_legacy_link(target, canonical_target, "AGENTS.md", true)?;
     between_links()?;
-    let skills = inspect_legacy_link(&target, &canonical_target, "skills", false)?;
+    let skills = inspect_legacy_link(target, canonical_target, "skills", false)?;
     if agents.resolved_parent != skills.resolved_parent
         || !same_object_cap(
             &agents.repository.dir_metadata()?,
@@ -87,13 +122,9 @@ fn inspect_legacy_adoption_posix(
     {
         return invalid("legacy AGENTS.md and skills must resolve from the same repository");
     }
-    validate_legacy_link(&target, &canonical_target, &agents)?;
-    validate_legacy_link(&target, &canonical_target, &skills)?;
-
-    let mut links = BTreeMap::new();
-    links.insert("AGENTS.md".to_owned(), Value::String(agents.raw_target));
-    links.insert("skills".to_owned(), Value::String(skills.raw_target));
-    Ok(Value::Object(links.into_iter().collect()))
+    validate_legacy_link(target, canonical_target, &agents)?;
+    validate_legacy_link(target, canonical_target, &skills)?;
+    Ok(Some(LegacyAdoptionSnapshot { agents, skills }))
 }
 
 #[cfg(not(windows))]
@@ -266,6 +297,26 @@ fn validate_legacy_link(
         return invalid("legacy repository changed while inspecting adoption");
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn legacy_link_evidence(
+    snapshot: &LegacyLinkSnapshot,
+    name: &'static str,
+) -> Result<managed_swap::LegacyLinkEvidence, LifecycleError> {
+    if snapshot.leaf != name {
+        return invalid("legacy adoption link evidence name changed");
+    }
+    Ok(managed_swap::LegacyLinkEvidence {
+        expect_file: snapshot.expect_file,
+        name,
+        raw_target: snapshot.raw_target_path.clone(),
+        repository_identity: snapshot.repository.dir_metadata()?,
+        resolved: snapshot.resolved.clone(),
+        resolved_identity: snapshot.repository.symlink_metadata(name)?,
+        resolved_parent: snapshot.resolved_parent.clone(),
+        target_identity: snapshot.target_identity.clone(),
+    })
 }
 
 /// Exact package selection persisted by one valid installed Lock pair.
@@ -541,6 +592,112 @@ pub fn install_source_bundle_with_activation(
         "install_plan": outcome.install_plan,
         "target_root": outcome.target_root,
     }))
+}
+
+/// Replace the exact legacy iOSAgentSkills symlink layout with one native
+/// Apple source installation while retaining temporary exact rollback links.
+///
+/// Both symlinks and their shared repository identity are frozen under one
+/// lifecycle lock. The legacy `.system` tree is copied from a held directory
+/// capability, the original link objects are moved into a private backup, and
+/// activation preimages are frozen before the new managed roots are published.
+/// Any failure restores external state and the original symlink objects before
+/// the lock is released; successful commit removes the temporary backup.
+///
+/// # Errors
+/// Returns a fail-closed error for non-Apple selection, a missing or drifting
+/// legacy layout, unsafe `.system` content, publication/activation failure, or
+/// incomplete recovery. Windows remains disabled until its source-install
+/// filesystem contract is available.
+pub fn install_source_bundle_with_legacy_adoption(
+    bundle: &SourceInstallBundle,
+    package_set: &SourcePackageSet,
+    target_root: impl AsRef<Path>,
+    session_launcher: &[u8],
+) -> Result<Value, LifecycleError> {
+    #[cfg(windows)]
+    {
+        let _ = (bundle, package_set, target_root, session_launcher);
+        return invalid("legacy adoption is not enabled on Windows");
+    }
+    #[cfg(not(windows))]
+    {
+        validate_source_install_inputs(bundle, package_set)?;
+        if !selected_platforms(bundle.plan())?.contains("apple") {
+            return invalid("legacy adoption requires an Apple source selection");
+        }
+        if session_launcher.is_empty() {
+            return invalid("legacy adoption requires a frozen session launcher");
+        }
+        let target_root = target_root.as_ref();
+        let expected_contract_target = transaction_lock::normalize_lifecycle_target(target_root)?;
+        let expected_contract_target = expected_contract_target
+            .to_str()
+            .ok_or_else(|| LifecycleError::Invalid("lifecycle target is not UTF-8".to_owned()))?
+            .to_owned();
+        let lock = LifecycleLock::acquire_existing(target_root)?;
+        if lock.contract_target().to_str() != Some(expected_contract_target.as_str()) {
+            return invalid("lifecycle target changed while acquiring legacy adoption");
+        }
+        let target = lock.target_directory()?;
+        let canonical_target = lock.target().to_path_buf();
+        let legacy = capture_legacy_adoption_layout(&target, &canonical_target, || Ok(()))?
+            .ok_or_else(|| {
+                LifecycleError::Invalid(
+                    "target does not contain the exact legacy iOSAgentSkills layout".to_owned(),
+                )
+            })?;
+        let legacy_skills = open_child_directory(
+            &legacy.skills.repository,
+            "skills",
+            None,
+            "legacy Skills source",
+        )?;
+        let legacy_skills_identity = legacy_skills.dir_metadata()?;
+        if !same_object_cap(&legacy.skills.resolved_identity, &legacy_skills_identity)
+            || !same_content_state_cap(&legacy.skills.resolved_identity, &legacy_skills_identity)
+        {
+            return invalid("legacy Skills source changed before adoption staging");
+        }
+
+        let plan = ValidatedInstallPlan::new(bundle.plan().clone(), bundle.package_lock().clone())?;
+        let mut installed = bundle.plan().clone();
+        installed
+            .as_object_mut()
+            .ok_or_else(|| LifecycleError::Invalid("Install Plan must be an object".to_owned()))?
+            .insert("status".to_owned(), Value::String("installed".to_owned()));
+        validate_install_plan(&installed)?;
+
+        let mut workspace = LifecycleWorkspace::from_lock(lock)?;
+        stage_source_bundle(&mut workspace, &plan, bundle, package_set)?;
+        let preserved_system_skills =
+            workspace.stage_legacy_external_state(&plan, &legacy_skills)?;
+        validate_legacy_link(&target, &canonical_target, &legacy.agents)?;
+        validate_legacy_link(&target, &canonical_target, &legacy.skills)?;
+        let agents_evidence = legacy_link_evidence(&legacy.agents, "AGENTS.md")?;
+        let skills_evidence = legacy_link_evidence(&legacy.skills, "skills")?;
+        let mut published = workspace.publish_staged_legacy_adoption(
+            &plan,
+            agents_evidence,
+            skills_evidence,
+            session_launcher,
+        )?;
+        let activation = published.apply_source_activation(session_launcher)?;
+        published.verify(&plan)?;
+        let cleanup = published.commit(&plan)?;
+        Ok(serde_json::json!({
+            "activation": activation,
+            "install_plan": installed,
+            "legacy_adoption": {
+                "cleanup_warnings": cleanup["cleanup_warnings"].clone(),
+                "persistent_backup": cleanup["persistent_backup"].clone(),
+                "persistent_stage": cleanup["persistent_stage"].clone(),
+                "preserved_system_skills": preserved_system_skills,
+                "removed_legacy_symlinks": ["AGENTS.md", "skills"],
+            },
+            "target_root": expected_contract_target,
+        }))
+    }
 }
 
 /// Compile a source candidate with lineage anchored to the installed Lockfile.
@@ -1404,6 +1561,352 @@ mod tests {
         assert!(target.join("skills").is_symlink());
     }
 
+    #[cfg(unix)]
+    fn create_legacy_install_fixture(fixture: &Fixture) -> PathBuf {
+        use std::os::unix::fs::symlink;
+
+        let legacy = fixture.root.join(LEGACY_REPOSITORY_NAME);
+        std::fs::create_dir_all(legacy.join("skills/.system/local"))
+            .expect("create legacy system Skill");
+        std::fs::write(legacy.join("AGENTS.md"), b"legacy\n").expect("write legacy AGENTS");
+        std::fs::write(
+            legacy.join("skills/.system/local/SKILL.md"),
+            b"legacy system skill\n",
+        )
+        .expect("write legacy system Skill");
+        let target = fixture.target();
+        std::fs::create_dir(&target).expect("create legacy target");
+        symlink(
+            format!("../{LEGACY_REPOSITORY_NAME}/AGENTS.md"),
+            target.join("AGENTS.md"),
+        )
+        .expect("link legacy AGENTS");
+        symlink(
+            format!("../{LEGACY_REPOSITORY_NAME}/skills"),
+            target.join("skills"),
+        )
+        .expect("link legacy Skills");
+        target
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_adoption_installs_apple_and_preserves_system_skills() {
+        let fixture = Fixture::new();
+        let target = create_legacy_install_fixture(&fixture);
+        let (bundle, packages) = apple_bundle();
+        let launcher = b"legacy adoption launcher\n";
+        std::fs::create_dir(target.join("bin")).expect("create legacy activation directory");
+        std::fs::write(target.join("bin/agent-skills"), b"legacy unmanaged cli\n")
+            .expect("write legacy unmanaged CLI");
+
+        let outcome =
+            install_source_bundle_with_legacy_adoption(&bundle, &packages, &target, launcher)
+                .expect("adopt legacy target");
+
+        assert_eq!(outcome["install_plan"]["status"], "installed");
+        assert_eq!(
+            outcome["legacy_adoption"]["removed_legacy_symlinks"],
+            json!(["AGENTS.md", "skills"])
+        );
+        assert_eq!(outcome["legacy_adoption"]["preserved_system_skills"], true);
+        assert!(!target.join("AGENTS.md").is_symlink());
+        assert!(!target.join("skills").is_symlink());
+        assert_eq!(
+            std::fs::read(target.join("skills/.system/local/SKILL.md"))
+                .expect("read preserved system Skill"),
+            b"legacy system skill\n"
+        );
+        assert_eq!(
+            std::fs::read(target.join("bin/agent-session")).expect("read adopted launcher"),
+            launcher
+        );
+        assert_eq!(
+            std::fs::read(target.join("bin/agent-skills")).expect("read adopted native CLI"),
+            launcher
+        );
+        assert!(target.join(".agent-skills/activation-lock.json").is_file());
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        assert!(
+            std::fs::read_dir(&target)
+                .expect("read adopted target")
+                .all(|entry| {
+                    let name = entry.expect("target entry").file_name();
+                    let name = name.to_string_lossy();
+                    !name.starts_with(INSTALL_STAGE_PREFIX)
+                        && !name.starts_with(INSTALL_BACKUP_PREFIX)
+                })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_adoption_rollback_restores_exact_link_objects_and_external_state() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let fixture = Fixture::new();
+        let target = create_legacy_install_fixture(&fixture);
+        let agents_identity = std::fs::symlink_metadata(target.join("AGENTS.md"))
+            .expect("capture legacy AGENTS identity");
+        let skills_identity = std::fs::symlink_metadata(target.join("skills"))
+            .expect("capture legacy Skills identity");
+        let (bundle, packages) = apple_bundle();
+        let plan = ValidatedInstallPlan::new(bundle.plan().clone(), bundle.package_lock().clone())
+            .expect("validate Apple plan");
+        let launcher = b"legacy rollback launcher\n";
+
+        let lock = LifecycleLock::acquire_existing(&target).expect("lock legacy target");
+        let target_directory = lock.target_directory().expect("open locked legacy target");
+        let canonical_target = lock.target().to_path_buf();
+        let legacy =
+            capture_legacy_adoption_layout(&target_directory, &canonical_target, || Ok(()))
+                .expect("capture legacy layout")
+                .expect("legacy layout");
+        let legacy_skills = open_child_directory(
+            &legacy.skills.repository,
+            "skills",
+            None,
+            "legacy Skills source",
+        )
+        .expect("open legacy Skills source");
+        let mut workspace = LifecycleWorkspace::from_lock(lock).expect("create workspace");
+        stage_source_bundle(&mut workspace, &plan, &bundle, &packages).expect("stage Apple bundle");
+        workspace
+            .stage_legacy_external_state(&plan, &legacy_skills)
+            .expect("stage legacy system Skills");
+        let agents_evidence =
+            legacy_link_evidence(&legacy.agents, "AGENTS.md").expect("capture AGENTS evidence");
+        let skills_evidence =
+            legacy_link_evidence(&legacy.skills, "skills").expect("capture Skills evidence");
+        let published = workspace
+            .publish_staged_legacy_adoption(&plan, agents_evidence, skills_evidence, launcher)
+            .expect("publish legacy adoption");
+        published.rollback().expect("roll back legacy adoption");
+
+        let restored_agents =
+            std::fs::symlink_metadata(target.join("AGENTS.md")).expect("inspect restored AGENTS");
+        let restored_skills =
+            std::fs::symlink_metadata(target.join("skills")).expect("inspect restored Skills");
+        assert_eq!(
+            (agents_identity.dev(), agents_identity.ino()),
+            (restored_agents.dev(), restored_agents.ino())
+        );
+        assert_eq!(
+            (skills_identity.dev(), skills_identity.ino()),
+            (restored_skills.dev(), restored_skills.ino())
+        );
+        assert_eq!(
+            std::fs::read_link(target.join("AGENTS.md")).expect("read restored AGENTS link"),
+            Path::new("../iOSAgentSkills/AGENTS.md")
+        );
+        assert_eq!(
+            std::fs::read_link(target.join("skills")).expect("read restored Skills link"),
+            Path::new("../iOSAgentSkills/skills")
+        );
+        assert!(!target.join("config.toml").exists());
+        assert!(!target.join("bin").exists());
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_adoption_partial_activation_failure_restores_links_and_preimages() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let fixture = Fixture::new();
+        let target = create_legacy_install_fixture(&fixture);
+        let agents_identity = std::fs::symlink_metadata(target.join("AGENTS.md"))
+            .expect("capture legacy AGENTS identity");
+        let skills_identity = std::fs::symlink_metadata(target.join("skills"))
+            .expect("capture legacy Skills identity");
+        let (bundle, packages) = apple_bundle();
+        let plan = ValidatedInstallPlan::new(bundle.plan().clone(), bundle.package_lock().clone())
+            .expect("validate Apple plan");
+        let launcher = b"legacy failure launcher\n";
+        std::fs::create_dir(target.join("bin")).expect("create legacy activation directory");
+        std::fs::write(target.join("bin/agent-skills"), b"legacy unmanaged cli\n")
+            .expect("write legacy unmanaged CLI");
+        let lock = LifecycleLock::acquire_existing(&target).expect("lock legacy target");
+        let target_directory = lock.target_directory().expect("open locked legacy target");
+        let canonical_target = lock.target().to_path_buf();
+        let legacy =
+            capture_legacy_adoption_layout(&target_directory, &canonical_target, || Ok(()))
+                .expect("capture legacy layout")
+                .expect("legacy layout");
+        let legacy_skills = open_child_directory(
+            &legacy.skills.repository,
+            "skills",
+            None,
+            "legacy Skills source",
+        )
+        .expect("open legacy Skills source");
+        let mut workspace = LifecycleWorkspace::from_lock(lock).expect("create workspace");
+        stage_source_bundle(&mut workspace, &plan, &bundle, &packages).expect("stage Apple bundle");
+        workspace
+            .stage_legacy_external_state(&plan, &legacy_skills)
+            .expect("stage legacy system Skills");
+        let agents_evidence =
+            legacy_link_evidence(&legacy.agents, "AGENTS.md").expect("capture AGENTS evidence");
+        let skills_evidence =
+            legacy_link_evidence(&legacy.skills, "skills").expect("capture Skills evidence");
+        let mut published = workspace
+            .publish_staged_legacy_adoption(&plan, agents_evidence, skills_evidence, launcher)
+            .expect("publish legacy adoption");
+
+        let error = published
+            .apply_source_activation_with_test_hook(launcher, |_, phase| {
+                if phase == "activation-lock-published" {
+                    invalid("injected legacy Activation failure")
+                } else {
+                    Ok(())
+                }
+            })
+            .expect_err("partial Activation must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("injected legacy Activation failure")
+        );
+        drop(published);
+
+        let restored_agents =
+            std::fs::symlink_metadata(target.join("AGENTS.md")).expect("inspect restored AGENTS");
+        let restored_skills =
+            std::fs::symlink_metadata(target.join("skills")).expect("inspect restored Skills");
+        assert_eq!(
+            (agents_identity.dev(), agents_identity.ino()),
+            (restored_agents.dev(), restored_agents.ino())
+        );
+        assert_eq!(
+            (skills_identity.dev(), skills_identity.ino()),
+            (restored_skills.dev(), restored_skills.ino())
+        );
+        assert_eq!(
+            std::fs::read(target.join("skills/.system/local/SKILL.md"))
+                .expect("read restored legacy system Skill"),
+            b"legacy system skill\n"
+        );
+        assert!(!target.join("config.toml").exists());
+        assert_eq!(
+            std::fs::read(target.join("bin/agent-skills"))
+                .expect("read restored legacy unmanaged CLI"),
+            b"legacy unmanaged cli\n"
+        );
+        assert!(!target.join("bin/agent-session").exists());
+        assert!(!target.join("agents").exists());
+        assert!(!target.join("templates").exists());
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_adoption_partial_publication_restores_exact_links() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        for (failed_name, failed_phase) in [
+            ("AGENTS.md", "legacy-backup-after-rename"),
+            ("skills", "publish-after-rename"),
+        ] {
+            let fixture = Fixture::new();
+            let target = create_legacy_install_fixture(&fixture);
+            let agents_identity = std::fs::symlink_metadata(target.join("AGENTS.md"))
+                .expect("capture legacy AGENTS identity");
+            let skills_identity = std::fs::symlink_metadata(target.join("skills"))
+                .expect("capture legacy Skills identity");
+            let (workspace, plan, agents_evidence, skills_evidence) =
+                staged_legacy_adoption(&target, b"partial publication launcher\n");
+            let Err(error) = workspace.publish_staged_legacy_adoption_with_test_hook(
+                &plan,
+                agents_evidence,
+                skills_evidence,
+                b"partial publication launcher\n",
+                |name, phase| {
+                    if name == failed_name && phase == failed_phase {
+                        invalid("injected legacy publication failure")
+                    } else {
+                        Ok(())
+                    }
+                },
+            ) else {
+                panic!("partial publication must fail");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("injected legacy publication failure")
+            );
+            let restored_agents = std::fs::symlink_metadata(target.join("AGENTS.md"))
+                .expect("inspect restored AGENTS");
+            let restored_skills =
+                std::fs::symlink_metadata(target.join("skills")).expect("inspect restored Skills");
+            assert_eq!(
+                (agents_identity.dev(), agents_identity.ino()),
+                (restored_agents.dev(), restored_agents.ino())
+            );
+            assert_eq!(
+                (skills_identity.dev(), skills_identity.ino()),
+                (restored_skills.dev(), restored_skills.ino())
+            );
+            assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_adoption_drop_recovery_failure_preserves_stage_and_backup() {
+        let fixture = Fixture::new();
+        let target = create_legacy_install_fixture(&fixture);
+        let launcher = b"drop recovery launcher\n";
+        let (workspace, plan, agents_evidence, skills_evidence) =
+            staged_legacy_adoption(&target, launcher);
+        let published = workspace
+            .publish_staged_legacy_adoption(&plan, agents_evidence, skills_evidence, launcher)
+            .expect("publish legacy adoption");
+        let (stage, backup) = published.recovery_paths().expect("read recovery paths");
+        std::fs::remove_file(target.join("AGENTS.md")).expect("remove published AGENTS");
+        std::fs::write(target.join("AGENTS.md"), b"conflicting unmanaged AGENTS\n")
+            .expect("inject recovery conflict");
+        drop(published);
+        assert!(stage.is_dir(), "stage recovery evidence must be preserved");
+        assert!(
+            backup.is_dir(),
+            "backup recovery evidence must be preserved"
+        );
+        assert!(backup.join("AGENTS.md").is_symlink());
+        assert!(stage.join("skills").is_dir());
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_adoption_commit_cleanup_failure_is_committed_with_warning() {
+        let fixture = Fixture::new();
+        let target = create_legacy_install_fixture(&fixture);
+        let launcher = b"commit warning launcher\n";
+        let (workspace, plan, agents_evidence, skills_evidence) =
+            staged_legacy_adoption(&target, launcher);
+        let mut published = workspace
+            .publish_staged_legacy_adoption(&plan, agents_evidence, skills_evidence, launcher)
+            .expect("publish legacy adoption");
+        published
+            .apply_source_activation(launcher)
+            .expect("activate legacy adoption");
+        let outcome = published
+            .commit_with_test_cleanup(&plan, |workspace| {
+                workspace.preserve_recovery_workspace()?;
+                invalid("injected committed cleanup failure")
+            })
+            .expect("cleanup failure must not report an uncommitted transaction");
+        assert_eq!(outcome["persistent_stage"], true);
+        assert_eq!(outcome["persistent_backup"], true);
+        assert_eq!(
+            outcome["cleanup_warnings"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert!(target.join(".agent-skills/install-lock.json").is_file());
+        assert!(!target.join(LIFECYCLE_LOCK_DIRECTORY).exists());
+    }
+
     fn upgrade_evidence(package_lock: &Value) -> Value {
         let mut evidence = json!({
             "candidate_package_lock_hash": package_lock["fingerprint"],
@@ -1451,6 +1954,45 @@ mod tests {
             compile_source_install_bundle(&selection, &packages, root.join("schemas"), previous)
                 .expect("compile desktop bundle");
         (bundle, packages)
+    }
+
+    #[cfg(unix)]
+    fn staged_legacy_adoption(
+        target: &Path,
+        _launcher: &[u8],
+    ) -> (
+        LifecycleWorkspace,
+        ValidatedInstallPlan,
+        managed_swap::LegacyLinkEvidence,
+        managed_swap::LegacyLinkEvidence,
+    ) {
+        let (bundle, packages) = apple_bundle();
+        let plan = ValidatedInstallPlan::new(bundle.plan().clone(), bundle.package_lock().clone())
+            .expect("validate Apple plan");
+        let lock = LifecycleLock::acquire_existing(target).expect("lock legacy target");
+        let target_directory = lock.target_directory().expect("open locked legacy target");
+        let canonical_target = lock.target().to_path_buf();
+        let legacy =
+            capture_legacy_adoption_layout(&target_directory, &canonical_target, || Ok(()))
+                .expect("capture legacy layout")
+                .expect("legacy layout");
+        let legacy_skills = open_child_directory(
+            &legacy.skills.repository,
+            "skills",
+            None,
+            "legacy Skills source",
+        )
+        .expect("open legacy Skills source");
+        let mut workspace = LifecycleWorkspace::from_lock(lock).expect("create workspace");
+        stage_source_bundle(&mut workspace, &plan, &bundle, &packages).expect("stage Apple bundle");
+        workspace
+            .stage_legacy_external_state(&plan, &legacy_skills)
+            .expect("stage legacy system Skills");
+        let agents_evidence =
+            legacy_link_evidence(&legacy.agents, "AGENTS.md").expect("capture AGENTS evidence");
+        let skills_evidence =
+            legacy_link_evidence(&legacy.skills, "skills").expect("capture Skills evidence");
+        (workspace, plan, agents_evidence, skills_evidence)
     }
 
     fn apple_bundle() -> (SourceInstallBundle, SourcePackageSet) {
