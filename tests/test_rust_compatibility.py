@@ -15,6 +15,12 @@ import unittest
 from copy import deepcopy
 from unittest import mock
 
+if os.name != "nt":
+    import pty
+    import select
+    import termios
+    import time
+
 from agent_workflow import __version__ as PYTHON_CORE_VERSION
 from agent_workflow.adapters import (
     build_adapter_request,
@@ -253,6 +259,119 @@ class RustCompatibilityTests(unittest.TestCase):
             self.assertNotIn("web", report["selected_packages"])
             self.assertNotIn("backend", report["selected_packages"])
             self.assertFalse(target.exists())
+
+    @unittest.skipIf(os.name == "nt", "interactive source install is POSIX-only")
+    def test_native_interactive_install_uses_terminal_and_preserves_mode(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="agent-skills-native-interactive-"
+        ) as directory:
+            target = Path(directory).resolve() / "target"
+            master, slave = pty.openpty()
+            terminal_before = termios.tcgetattr(slave)
+            output = bytearray()
+            process = subprocess.Popen(
+                [
+                    str(self.rust_cli),
+                    "install",
+                    "--source-root",
+                    str(ROOT),
+                    "--target-root",
+                    str(target),
+                    "--interactive",
+                    "--session-launcher",
+                    str(self.rust_cli),
+                    "--dry-run",
+                ],
+                cwd=ROOT,
+                env={**os.environ, "CARGO_TERM_COLOR": "never"},
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                close_fds=True,
+            )
+
+            def read_until(needle: bytes, timeout: float) -> None:
+                deadline = time.monotonic() + timeout
+                while needle not in output and time.monotonic() < deadline:
+                    ready, _, _ = select.select([master], [], [], 0.1)
+                    if not ready:
+                        if process.poll() is not None:
+                            break
+                        continue
+                    try:
+                        output.extend(os.read(master, 4096))
+                    except OSError:
+                        break
+
+            try:
+                read_until("q 取消".encode(), 5)
+                self.assertIn("bootstrap-only".encode(), output)
+                os.write(master, b"web\n")
+                read_until("尚不可安装".encode(), 5)
+                os.write(master, b"desktop,apple\n")
+                read_until("未写入任何文件".encode(), 15)
+                process.wait(timeout=10)
+                while select.select([master], [], [], 0.05)[0]:
+                    try:
+                        output.extend(os.read(master, 4096))
+                    except OSError:
+                        break
+                terminal_after = termios.tcgetattr(slave)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+                os.close(master)
+                os.close(slave)
+            rendered = output.decode("utf-8", errors="replace")
+            self.assertEqual(process.returncode, 0, rendered)
+            self.assertIn("Apple / iOS、Desktop 平台安装预览", rendered)
+            self.assertIn("所选平台尚不可安装", rendered)
+            self.assertFalse(target.exists())
+            self.assertEqual(terminal_after, terminal_before)
+
+            non_terminal = self.run_rust(
+                "install",
+                "--source-root",
+                str(ROOT),
+                "--target-root",
+                str(target),
+                "--interactive",
+                "--session-launcher",
+                str(self.rust_cli),
+                "--dry-run",
+            )
+            self.assertEqual(non_terminal.returncode, 2)
+            self.assertIn("interactive terminal", non_terminal.stderr)
+            mixed_mode = self.run_rust(
+                "install",
+                "--source-root",
+                str(ROOT),
+                "--target-root",
+                str(target),
+                "--interactive",
+                "--platform",
+                "apple",
+                "--session-launcher",
+                str(self.rust_cli),
+                "--dry-run",
+            )
+            self.assertEqual(mixed_mode.returncode, 2)
+            self.assertIn("cannot be combined with --platform", mixed_mode.stderr)
+            json_mode = self.run_rust(
+                "install",
+                "--source-root",
+                str(ROOT),
+                "--target-root",
+                str(target),
+                "--interactive",
+                "--session-launcher",
+                str(self.rust_cli),
+                "--json",
+                "--dry-run",
+            )
+            self.assertEqual(json_mode.returncode, 2)
+            self.assertIn("cannot be combined with --json", json_mode.stderr)
 
     @unittest.skipIf(os.name == "nt", "source uninstaller is POSIX-only")
     def test_source_checkout_uninstall_uses_real_offline_rust_dry_run(self) -> None:

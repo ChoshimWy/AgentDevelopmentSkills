@@ -14,6 +14,10 @@ import unittest
 from unittest import mock
 import zipfile
 
+if os.name != "nt":
+    import pty
+    import select
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -942,6 +946,52 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(mixed_all.returncode, 2)
         self.assertIn("explicit fresh --platform", mixed_all.stderr)
         self.assertFalse(cargo_arguments.exists())
+
+        interactive_target = self.root / "source-native-interactive-target"
+        master, slave = pty.openpty()
+        try:
+            interactive = subprocess.Popen(
+                [
+                    "/bin/bash",
+                    str(ROOT / "install.sh"),
+                    "--target-root",
+                    str(interactive_target),
+                    "--dry-run",
+                ],
+                cwd=ROOT,
+                env=environment,
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                close_fds=True,
+            )
+            interactive.wait(timeout=10)
+            output = bytearray()
+            while select.select([master], [], [], 0.05)[0]:
+                try:
+                    output.extend(os.read(master, 4096))
+                except OSError:
+                    break
+        finally:
+            os.close(master)
+            os.close(slave)
+        self.assertEqual(
+            interactive.returncode,
+            0,
+            output.decode("utf-8", errors="replace"),
+        )
+        interactive_forwarded = native_arguments.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        self.assertIn(
+            "--interactive",
+            interactive_forwarded,
+            output.decode("utf-8", errors="replace"),
+        )
+        self.assertIn("--session-launcher", interactive_forwarded)
+        self.assertIn("--dry-run", interactive_forwarded)
+        self.assertNotIn("--platform", interactive_forwarded)
+        self.assertFalse(interactive_target.exists())
 
         failing_cargo = tools / "cargo"
         failing_cargo.write_text("#!/bin/sh\nexit 37\n", encoding="utf-8")

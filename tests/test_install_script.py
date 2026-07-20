@@ -324,6 +324,7 @@ class InstallScriptTests(unittest.TestCase):
             process = subprocess.Popen(
                 [str(INSTALL), "--target-root", str(target), "--dry-run"],
                 cwd=ROOT,
+                env={**os.environ, "AGENT_SKILLS_INSTALL_ENGINE": "python"},
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
@@ -384,6 +385,7 @@ class InstallScriptTests(unittest.TestCase):
             signal_process = subprocess.Popen(
                 [str(INSTALL), "--target-root", str(target), "--dry-run"],
                 cwd=ROOT,
+                env={**os.environ, "AGENT_SKILLS_INSTALL_ENGINE": "python"},
                 stdin=signal_slave,
                 stdout=signal_slave,
                 stderr=signal_slave,

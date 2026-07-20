@@ -39,7 +39,7 @@ use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 const CLI_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
@@ -137,8 +137,10 @@ enum Command {
         source_root: PathBuf,
         #[arg(long)]
         target_root: PathBuf,
-        #[arg(long = "platform", required = true)]
+        #[arg(long = "platform")]
         platforms: Vec<String>,
+        #[arg(long)]
+        interactive: bool,
         #[arg(long = "discipline")]
         disciplines: Vec<String>,
         #[arg(long = "runtime-config")]
@@ -871,6 +873,142 @@ fn expand_all_platforms(
     Ok(selected)
 }
 
+fn interactive_platform_selection(
+    input: &str,
+    platform_options: &[Value],
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let input = input.trim();
+    if input.eq_ignore_ascii_case("q") {
+        return Err("platform selection was cancelled".into());
+    }
+    if input.is_empty() {
+        return platform_options
+            .iter()
+            .find(|option| option.get("selectable").and_then(Value::as_bool) == Some(true))
+            .and_then(|option| option.get("id").and_then(Value::as_str))
+            .map(|identifier| vec![identifier.to_owned()])
+            .ok_or_else(|| "no installable platform is currently available".into());
+    }
+    let requested = input
+        .split([',', ' ', '\t'])
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if requested == ["all"] {
+        return expand_all_platforms(&requested, platform_options);
+    }
+    let mut seen = BTreeSet::new();
+    if requested.is_empty() || requested.iter().any(|item| !seen.insert(item.clone())) {
+        return Err("selected platforms must be unique".into());
+    }
+    let by_id = platform_options
+        .iter()
+        .filter_map(|option| {
+            option
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|identifier| (identifier, option))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let unknown = requested
+        .iter()
+        .filter(|identifier| !by_id.contains_key(identifier.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        return Err(format!("unknown platform selection: {}", unknown.join(", ")).into());
+    }
+    let unavailable = requested
+        .iter()
+        .filter_map(|identifier| {
+            let option = by_id.get(identifier.as_str())?;
+            if option.get("selectable").and_then(Value::as_bool) == Some(true) {
+                None
+            } else {
+                Some(format!(
+                    "{} ({})",
+                    option
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .unwrap_or(identifier),
+                    option
+                        .get("availability")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unavailable")
+                ))
+            }
+        })
+        .collect::<Vec<_>>();
+    if !unavailable.is_empty() {
+        return Err(format!("所选平台尚不可安装: {}", unavailable.join(", ")).into());
+    }
+    Ok(platform_options
+        .iter()
+        .filter_map(|option| option.get("id").and_then(Value::as_str))
+        .filter(|identifier| seen.contains(*identifier))
+        .map(str::to_owned)
+        .collect())
+}
+
+fn prompt_for_source_platforms(
+    platform_options: &[Value],
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    if !stdin.is_terminal() || !stdout.is_terminal() {
+        return Err(
+            "platform selection requires an interactive terminal or explicit --platform apple"
+                .into(),
+        );
+    }
+    let default = platform_options
+        .iter()
+        .find(|option| option.get("selectable").and_then(Value::as_bool) == Some(true))
+        .and_then(|option| option.get("id").and_then(Value::as_str))
+        .ok_or("no installable platform is currently available")?;
+    writeln!(
+        stdout,
+        "请选择安装平台（逗号分隔；直接回车默认 {default}；all 选择全部；q 取消）："
+    )?;
+    for option in platform_options {
+        let identifier = option
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("source platform option has no valid id")?;
+        let label = option
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or(identifier);
+        if option.get("selectable").and_then(Value::as_bool) == Some(true) {
+            writeln!(stdout, "  {identifier:<10} {label:<18} ✓ 已支持")?;
+        } else {
+            let availability = option
+                .get("availability")
+                .and_then(Value::as_str)
+                .unwrap_or("unavailable");
+            writeln!(
+                stdout,
+                "  {identifier:<10} {label:<18} ○ 规划中 · {availability} · 暂不可选"
+            )?;
+        }
+    }
+    loop {
+        write!(stdout, "> ")?;
+        stdout.flush()?;
+        let mut input = String::new();
+        if stdin.read_line(&mut input)? == 0 {
+            return Err("platform selection was cancelled".into());
+        }
+        match interactive_platform_selection(&input, platform_options) {
+            Ok(selection) => return Ok(selection),
+            Err(error) if error.to_string() == "platform selection was cancelled" => {
+                return Err(error);
+            }
+            Err(error) => writeln!(stdout, "! {error}")?,
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn run() -> Result<i32, Box<dyn std::error::Error>> {
     if invoked_as_agent_session() {
@@ -881,15 +1019,29 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             source_root,
             target_root,
             platforms,
+            interactive,
             disciplines,
             mut runtime_configs,
             session_launcher,
             dry_run,
             json,
         } => {
+            if interactive && !platforms.is_empty() {
+                return Err("--interactive cannot be combined with --platform".into());
+            }
+            if interactive && json {
+                return Err("--interactive cannot be combined with --json".into());
+            }
+            if !interactive && platforms.is_empty() {
+                return Err("select --interactive or at least one explicit --platform".into());
+            }
             let platform_root = source_root.join("platforms");
             let platform_options = inspect_source_platform_options(&platform_root)?;
-            let effective_platforms = expand_all_platforms(&platforms, &platform_options)?;
+            let effective_platforms = if interactive {
+                prompt_for_source_platforms(&platform_options)?
+            } else {
+                expand_all_platforms(&platforms, &platform_options)?
+            };
             if effective_platforms
                 .iter()
                 .any(|platform| platform == "apple")
@@ -2255,12 +2407,22 @@ fn native_activation_report(activation: &Value) -> Result<Value, Box<dyn std::er
 }
 
 fn native_install_human_report(report: &Value) -> Result<String, Box<dyn std::error::Error>> {
+    let labels = report
+        .get("platform_options")
+        .and_then(Value::as_array)
+        .ok_or("native install report platform options are invalid")?
+        .iter()
+        .filter_map(|option| Some((option.get("id")?.as_str()?, option.get("label")?.as_str()?)))
+        .collect::<BTreeMap<_, _>>();
     let platforms = report
         .get("selected_platforms")
         .and_then(Value::as_array)
         .ok_or("native install report platforms are invalid")?
         .iter()
-        .map(|value| value.as_str().ok_or("native install platform is invalid"))
+        .map(|value| -> Result<&str, &'static str> {
+            let identifier = value.as_str().ok_or("native install platform is invalid")?;
+            Ok(labels.get(identifier).copied().unwrap_or(identifier))
+        })
         .collect::<Result<Vec<_>, _>>()?
         .join("、");
     let target = report
@@ -2413,9 +2575,9 @@ mod tests {
     #[test]
     fn all_platforms_expand_only_ready_source_options() {
         let options = vec![
-            json!({"id": "apple", "selectable": true}),
-            json!({"id": "web", "selectable": false}),
-            json!({"id": "desktop", "selectable": true}),
+            json!({"availability": "ready", "id": "apple", "label": "Apple / iOS", "selectable": true}),
+            json!({"availability": "bootstrap-only", "id": "web", "label": "Web", "selectable": false}),
+            json!({"availability": "ready", "id": "desktop", "label": "Desktop", "selectable": true}),
         ];
         assert_eq!(
             expand_all_platforms(&["all".to_owned()], &options).expect("expand all"),
@@ -2435,6 +2597,37 @@ mod tests {
             .expect_err("empty all must fail")
             .to_string()
             .contains("no installable platform")
+        );
+        assert_eq!(
+            interactive_platform_selection("\n", &options).expect("default"),
+            ["apple"]
+        );
+        assert_eq!(
+            interactive_platform_selection("desktop, apple\n", &options)
+                .expect("ordered multiple selection"),
+            ["apple", "desktop"]
+        );
+        assert_eq!(
+            interactive_platform_selection("all\n", &options).expect("interactive all"),
+            ["apple", "desktop"]
+        );
+        assert!(
+            interactive_platform_selection("web\n", &options)
+                .expect_err("unavailable selection")
+                .to_string()
+                .contains("尚不可安装")
+        );
+        assert!(
+            interactive_platform_selection("missing\n", &options)
+                .expect_err("unknown selection")
+                .to_string()
+                .contains("unknown platform")
+        );
+        assert!(
+            interactive_platform_selection("q\n", &options)
+                .expect_err("cancel selection")
+                .to_string()
+                .contains("cancelled")
         );
     }
 

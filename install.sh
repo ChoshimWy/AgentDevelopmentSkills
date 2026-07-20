@@ -127,6 +127,7 @@ NATIVE_RUNTIME_CONFIGS=()
 NATIVE_RUNTIME_CONFIG_KEYS='|'
 NATIVE_JSON=0
 NATIVE_DRY_RUN=0
+NATIVE_INTERACTIVE=0
 NATIVE_UPGRADE_DRY_RUN=0
 NATIVE_UPGRADE_OUTPUT=''
 NATIVE_UPGRADE_PLAN=''
@@ -260,7 +261,11 @@ parse_native_request() {
                 ;;
         esac
     done
-    [[ "$NATIVE_PLATFORM_KEYS" != "|" ]] || return 1
+    if [[ "$NATIVE_PLATFORM_KEYS" == "|" ]]; then
+        [[ -n "$SOURCE_CHECKOUT_ROOT" && "$NATIVE_JSON" == "0" && -t 0 && -t 1 ]] \
+            || return 1
+        NATIVE_INTERACTIVE=1
+    fi
     [[ -n "$NATIVE_TARGET_ROOT" && "$NATIVE_TARGET_ROOT" != *'~'* ]] || return 1
     [[ ! -L "$NATIVE_TARGET_ROOT" ]] || return 1
     if [[ -e "$NATIVE_TARGET_ROOT" && ! -d "$NATIVE_TARGET_ROOT" ]]; then
@@ -474,10 +479,12 @@ run_native_install() {
         --source-root "$extracted_root"
         --target-root "$NATIVE_TARGET_ROOT"
     )
-    local platform_id
-    for platform_id in "${NATIVE_PLATFORMS[@]}"; do
-        command+=(--platform "$platform_id")
-    done
+    if [[ "$NATIVE_PLATFORM_KEYS" != "|" ]]; then
+        local platform_id
+        for platform_id in "${NATIVE_PLATFORMS[@]}"; do
+            command+=(--platform "$platform_id")
+        done
+    fi
     if [[ "$NATIVE_DISCIPLINE_KEYS" != "|" ]]; then
         local discipline_id
         for discipline_id in "${NATIVE_DISCIPLINES[@]}"; do
@@ -548,10 +555,15 @@ run_source_native_install() {
         --source-root "$source_root"
         --target-root "$NATIVE_TARGET_ROOT"
     )
-    local platform_id
-    for platform_id in "${NATIVE_PLATFORMS[@]}"; do
-        command+=(--platform "$platform_id")
-    done
+    if ((NATIVE_INTERACTIVE)); then
+        command+=(--interactive)
+    fi
+    if [[ "$NATIVE_PLATFORM_KEYS" != "|" ]]; then
+        local platform_id
+        for platform_id in "${NATIVE_PLATFORMS[@]}"; do
+            command+=(--platform "$platform_id")
+        done
+    fi
     if [[ "$NATIVE_DISCIPLINE_KEYS" != "|" ]]; then
         local discipline_id
         for discipline_id in "${NATIVE_DISCIPLINES[@]}"; do
@@ -564,7 +576,8 @@ run_source_native_install() {
             command+=(--runtime-config "$runtime_config_id")
         done
     fi
-    if [[ " ${NATIVE_PLATFORMS[*]} " == *" apple "* \
+    if ((NATIVE_INTERACTIVE)) \
+        || [[ " ${NATIVE_PLATFORMS[*]} " == *" apple "* \
         || " ${NATIVE_PLATFORMS[*]} " == *" all "* ]]; then
         command+=(--session-launcher "$native_executable")
     fi
