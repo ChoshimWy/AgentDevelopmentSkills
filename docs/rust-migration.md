@@ -73,8 +73,9 @@ no Python fallback. An explicit fresh Apple/Desktop source-checkout request,
 including `--platform all` expanded only across ready inventory entries, now
 builds the pinned Rust CLI offline in a private target directory and executes
 that exact binary. Fresh source-checkout terminal selection now also runs in
-that binary. PowerShell and other compatibility bootstrap surfaces, legacy
-adoption, and other routes remain pending.
+that binary, as does a downloaded signed POSIX release bootstrap invoked with
+an attached terminal. PowerShell and other compatibility bootstrap surfaces,
+legacy adoption, and other routes remain pending.
 The repository contains:
 
 - a Rust workspace pinned to Rust 1.97.1;
@@ -294,10 +295,13 @@ when `cargo` is available, performs a locked offline build from the pinned
 checkout into a private temporary target, and runs that exact binary. It accepts
 explicit discipline and runtime-config selection; the same selection is
 preserved by the shared verified bootstrap compatibility core. With no
-platform argument, a fresh source checkout target and attached terminal now
-invoke a native line-based selector that defaults to Apple, accepts comma-separated ready
-platform IDs or `all`, exposes bootstrap-only entries as unavailable, and
-never changes terminal mode. Existing-install, legacy-adoption, and other
+platform argument, a fresh source checkout or rendered POSIX release bootstrap,
+fresh target, and attached terminal now invoke a native line-based selector
+that defaults to Apple, accepts comma-separated ready platform IDs or `all`,
+exposes bootstrap-only entries as unavailable, and never changes terminal
+mode. A `curl | bash` pipeline has no interactive stdin, so the published
+one-liner supplies `--platform apple` explicitly. Existing-install,
+legacy-adoption, and other
 compatibility-only source requests remain on Python. Operators may explicitly
 select that path with `AGENT_SKILLS_INSTALL_ENGINE=python`; forced Rust fails
 closed when a fresh request is ineligible or Cargo is unavailable, while an
@@ -442,8 +446,11 @@ independent-review evidence. The signed POSIX release bootstrap now exposes
 the explicit guarded `--upgrade` route without Python, and POSIX source
 checkout install/uninstall default eligible non-interactive requests to
 isolated locked offline Rust builds, while fresh source-checkout terminal
-selection now runs inside the Rust CLI. The remaining hosted lifecycle cutover is
-PowerShell and the other compatibility bootstrap surfaces, separate from both
+selection now runs inside the Rust CLI. Downloaded signed POSIX release
+bootstraps with an attached terminal use that same selector, while the
+published pipe command supplies an explicit non-interactive Apple selection.
+The remaining hosted lifecycle cutover is PowerShell and the other
+compatibility bootstrap surfaces, separate from both
 the operator-invoked native routes and the Python-free eligible source routes.
 Upgrade Source Qualification v1 establishes the release-side input for that
 cutover. It binds the completed repository Conformance suite to the immutable

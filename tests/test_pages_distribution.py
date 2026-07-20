@@ -100,6 +100,10 @@ class PagesDistributionTests(unittest.TestCase):
             (first / "index.html").read_text(encoding="utf-8"),
         )
         self.assertIn(
+            "install.sh | bash -s -- --platform apple",
+            (first / "index.html").read_text(encoding="utf-8"),
+        )
+        self.assertIn(
             pages.DEFAULT_PAGES_BASE_URL + "uninstall.sh",
             (first / "index.html").read_text(encoding="utf-8"),
         )

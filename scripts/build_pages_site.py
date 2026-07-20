@@ -122,7 +122,7 @@ def _landing_page(manifest: dict[str, Any], gate_report: dict[str, Any], base_ur
     posix_command = (
         "curl -fsSL --proto '=https' --tlsv1.2 "
         + base_url
-        + "install.sh | bash"
+        + "install.sh | bash -s -- --platform apple"
     )
     powershell_command = "iwr -useb " + base_url + "install.ps1 | iex"
     uninstall_command = (

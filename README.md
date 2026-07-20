@@ -27,8 +27,9 @@ uninstall transactions. It now also provides an operator-invoked
 qualified source archive, and current-host executable before issuing a
 release-provenance-bound approval envelope. Explicit and interactive fresh
 source-checkout installs now build and execute the pinned Rust installer
-offline; compatibility-only requests, PowerShell bootstrap upgrades, and
-legacy adoption still use separately gated compatibility paths.
+offline. A downloaded signed POSIX release bootstrap with an attached terminal
+also runs the same Rust selector; compatibility-only requests, PowerShell
+bootstrap upgrades, and legacy adoption still use separately gated paths.
 The signed POSIX release bootstrap routes an explicit `--upgrade` request
 through the release-matched Rust executable without Python fallback. The
 repository carries an MIT `LICENSE`, a `NOTICE`, and verified
@@ -77,7 +78,8 @@ The public bootstrap entry point is intentionally kept separate from immutable v
 
 ```bash
 curl -fsSL --proto '=https' --tlsv1.2 \
-  https://choshimwy.github.io/AgentDevelopmentSkills/install.sh | bash
+  https://choshimwy.github.io/AgentDevelopmentSkills/install.sh \
+  | bash -s -- --platform apple
 ```
 
 Windows PowerShell:
@@ -91,6 +93,10 @@ The Pages control plane is online, but the remote installer remains unavailable 
 After a v3 release is published, an explicit fresh `--platform apple`,
 `--platform desktop`, or `--platform all` install or dry-run on macOS or a
 supported glibc 2.39+ Linux host defaults to the verified Rust binary.
+When the release bootstrap is first saved to a file and then run from an
+attached terminal without `--platform`, it uses the same native line-based
+selector as a source checkout. The piped one-liner above is intentionally
+non-interactive and therefore supplies the Apple default explicitly.
 `--platform all` expands only the source inventory entries marked ready. Musl
 and older glibc hosts remain on the Python compatibility route. The gated
 release renders exact
@@ -533,7 +539,8 @@ Release Manifest v3 now binds that exact matrix and the release-qualified
 immutable upgrade source, while keeping Rust as the default engine for
 eligible hosted fresh installs. Explicit fresh source-checkout installs now
 build the pinned Rust CLI offline in a private target directory, and
-fresh source-checkout terminal selection now runs in that binary without Python.
+fresh source-checkout and downloaded hosted POSIX terminal selection now run in
+that binary without Python.
 The PowerShell acquisition layer and all other ineligible requests still use
 the explicit Python compatibility path during this controlled phase.
 

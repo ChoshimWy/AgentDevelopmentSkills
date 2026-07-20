@@ -262,7 +262,8 @@ parse_native_request() {
         esac
     done
     if [[ "$NATIVE_PLATFORM_KEYS" == "|" ]]; then
-        [[ -n "$SOURCE_CHECKOUT_ROOT" && "$NATIVE_JSON" == "0" && -t 0 && -t 1 ]] \
+        [[ ( -n "$SOURCE_CHECKOUT_ROOT" || -n "$AGENT_SKILLS_EMBEDDED_VERSION" ) \
+            && "$NATIVE_JSON" == "0" && -t 0 && -t 1 ]] \
             || return 1
         NATIVE_INTERACTIVE=1
     fi
@@ -479,6 +480,9 @@ run_native_install() {
         --source-root "$extracted_root"
         --target-root "$NATIVE_TARGET_ROOT"
     )
+    if ((NATIVE_INTERACTIVE)); then
+        command+=(--interactive)
+    fi
     if [[ "$NATIVE_PLATFORM_KEYS" != "|" ]]; then
         local platform_id
         for platform_id in "${NATIVE_PLATFORMS[@]}"; do
@@ -497,7 +501,8 @@ run_native_install() {
             command+=(--runtime-config "$runtime_config_id")
         done
     fi
-    if [[ " ${NATIVE_PLATFORMS[*]} " == *" apple "* \
+    if ((NATIVE_INTERACTIVE)) \
+        || [[ " ${NATIVE_PLATFORMS[*]} " == *" apple "* \
         || " ${NATIVE_PLATFORMS[*]} " == *" all "* ]]; then
         command+=(--session-launcher "$native_executable")
     fi
@@ -684,7 +689,7 @@ if [[ -n "$SOURCE_CHECKOUT_ROOT" ]]; then
     fi
     if [[ "$REQUESTED_ENGINE" == "rust" ]]; then
         printf '%s\n' \
-            "forced Rust source install requires cargo, an explicit fresh --platform apple, desktop, or all selection, and no compatibility-only arguments" \
+            "forced Rust source install requires cargo, a fresh explicit platform or attached-terminal interactive selection, and no compatibility-only arguments" \
             >&2
         exit 2
     fi
@@ -702,7 +707,7 @@ fi
 
 if [[ "$REQUESTED_ENGINE" == "rust" ]]; then
     printf '%s\n' \
-        "forced Rust install requires an embedded v2 native release, an explicit fresh --platform apple, desktop, or all selection, and no compatibility-only arguments" \
+        "forced Rust install requires an embedded v2 native release, a fresh explicit platform or attached-terminal interactive selection, and no compatibility-only arguments" \
         >&2
     exit 2
 fi

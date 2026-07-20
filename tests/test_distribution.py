@@ -944,7 +944,7 @@ class DistributionTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(mixed_all.returncode, 2)
-        self.assertIn("explicit fresh --platform", mixed_all.stderr)
+        self.assertIn("fresh explicit platform", mixed_all.stderr)
         self.assertFalse(cargo_arguments.exists())
 
         interactive_target = self.root / "source-native-interactive-target"
@@ -1274,6 +1274,13 @@ class DistributionTests(unittest.TestCase):
             "  if [ \"$argument\" = '--dry-run' ]; then status=planned; fi\n"
             "done\n"
             "printf '%s\\n' \"$@\" > \"$AGENT_SKILLS_TEST_NATIVE_ARGS\"\n"
+            "if [ -n \"${AGENT_SKILLS_TEST_NATIVE_TTY:-}\" ]; then\n"
+            "  if [ -t 0 ] && [ -t 1 ]; then\n"
+            "    printf '%s\\n' tty > \"$AGENT_SKILLS_TEST_NATIVE_TTY\"\n"
+            "  else\n"
+            "    printf '%s\\n' non-tty > \"$AGENT_SKILLS_TEST_NATIVE_TTY\"\n"
+            "  fi\n"
+            "fi\n"
             "printf '%s\\n' \"{\\\"engine\\\":\\\"rust-shell\\\",\\\"status\\\":\\\"$status\\\"}\"\n",
             encoding="utf-8",
         )
@@ -1321,6 +1328,7 @@ class DistributionTests(unittest.TestCase):
         script = collision_root / "rendered-install.sh"
         script.write_bytes(rendered)
         arguments_path = self.root / "rendered-native-arguments.txt"
+        tty_path = self.root / "rendered-native-tty.txt"
         target = self.root / "rendered-native-target"
         command = [
             "/bin/bash",
@@ -1340,6 +1348,7 @@ class DistributionTests(unittest.TestCase):
             "AGENT_SKILLS_PYTHON": str(self.root / "missing-python"),
             "AGENT_SKILLS_TEST_CARGO_CALLED": str(cargo_called),
             "AGENT_SKILLS_TEST_NATIVE_ARGS": str(arguments_path),
+            "AGENT_SKILLS_TEST_NATIVE_TTY": str(tty_path),
             "PATH": f"{tools}:/usr/bin:/bin",
         }
         completed = subprocess.run(
@@ -1399,6 +1408,64 @@ class DistributionTests(unittest.TestCase):
         self.assertFalse(dry_run_target.exists())
 
         arguments_path.unlink()
+        tty_path.unlink()
+        interactive_target = self.root / "rendered-native-interactive-target"
+        interactive_command = [
+            *command[:2],
+            "--target-root",
+            str(interactive_target),
+            "--dry-run",
+        ]
+        master, slave = pty.openpty()
+        interactive_output = bytearray()
+        try:
+            interactive = subprocess.Popen(
+                interactive_command,
+                cwd=self.root,
+                env=environment,
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                close_fds=True,
+            )
+            interactive.wait(timeout=20)
+            while select.select([master], [], [], 0.05)[0]:
+                try:
+                    interactive_output.extend(os.read(master, 4096))
+                except OSError:
+                    break
+        finally:
+            os.close(master)
+            os.close(slave)
+        self.assertEqual(
+            interactive.returncode,
+            0,
+            interactive_output.decode("utf-8", errors="replace"),
+        )
+        interactive_arguments = arguments_path.read_text(encoding="utf-8").splitlines()
+        self.assertIn("--interactive", interactive_arguments)
+        self.assertIn("--session-launcher", interactive_arguments)
+        self.assertIn("--dry-run", interactive_arguments)
+        self.assertNotIn("--platform", interactive_arguments)
+        self.assertEqual(tty_path.read_text(encoding="utf-8"), "tty\n")
+        self.assertFalse(interactive_target.exists())
+
+        arguments_path.unlink()
+        tty_path.unlink()
+        non_tty_interactive = subprocess.run(
+            interactive_command,
+            cwd=self.root,
+            env={**environment, "AGENT_SKILLS_INSTALL_ENGINE": "rust"},
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(non_tty_interactive.returncode, 2)
+        self.assertIn("attached-terminal interactive selection", non_tty_interactive.stderr)
+        self.assertFalse(arguments_path.exists())
+        self.assertFalse(tty_path.exists())
+        self.assertFalse(interactive_target.exists())
+
         native_path.write_bytes(native_data + b"tampered")
         tampered = subprocess.run(
             command,
