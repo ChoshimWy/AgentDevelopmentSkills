@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import importlib.util
 import math
 import os
 from pathlib import Path
@@ -117,6 +118,16 @@ RUST_COMPATIBILITY_ENABLED = (
     os.environ.get("AGENT_SKILLS_RUST_COMPATIBILITY") == "1"
     and shutil.which("cargo") is not None
 )
+
+
+def _load_source_installer():
+    path = ROOT / "scripts" / "install_local.py"
+    spec = importlib.util.spec_from_file_location("rust_legacy_source_installer", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _normalize_runtime_ledger(value: dict) -> dict:
@@ -259,6 +270,104 @@ class RustCompatibilityTests(unittest.TestCase):
             self.assertNotIn("web", report["selected_packages"])
             self.assertNotIn("backend", report["selected_packages"])
             self.assertFalse(target.exists())
+
+    @unittest.skipIf(os.name == "nt", "legacy source adoption is POSIX-only")
+    def test_legacy_adoption_inspection_matches_python_and_tightens_mixed_roots(self) -> None:
+        installer = _load_source_installer()
+        with tempfile.TemporaryDirectory(
+            prefix="agent-skills-native-legacy-inspection-"
+        ) as directory:
+            root = Path(directory).resolve()
+            legacy = root / "iOSAgentSkills"
+            (legacy / "skills/.system").mkdir(parents=True)
+            (legacy / "AGENTS.md").write_text("legacy\n", encoding="utf-8")
+            target = root / "target"
+            target.mkdir()
+            (target / "AGENTS.md").symlink_to("../iOSAgentSkills/AGENTS.md")
+            (target / "skills").symlink_to("../iOSAgentSkills/skills")
+
+            expected = installer._classify_legacy(target)
+            native = self.run_rust("legacy-adoption-inspect", str(target))
+            self.assertEqual(native.returncode, 0, native.stderr)
+            self.assertEqual(native.stdout, dumps(expected))
+            self.assertTrue((target / "AGENTS.md").is_symlink())
+            self.assertTrue((target / "skills").is_symlink())
+
+            missing = root / "missing"
+            self.assertEqual(installer._classify_legacy(missing), {})
+            native = self.run_rust("legacy-adoption-inspect", str(missing))
+            self.assertEqual(native.returncode, 0, native.stderr)
+            self.assertEqual(native.stdout, dumps({}))
+            self.assertFalse(missing.exists())
+
+            empty = root / "empty"
+            empty.mkdir()
+            self.assertEqual(installer._classify_legacy(empty), {})
+            native = self.run_rust("legacy-adoption-inspect", str(empty))
+            self.assertEqual(native.returncode, 0, native.stderr)
+            self.assertEqual(native.stdout, dumps({}))
+            self.assertEqual(list(empty.iterdir()), [])
+
+            partial = root / "partial"
+            partial.mkdir()
+            (partial / "AGENTS.md").symlink_to("../iOSAgentSkills/AGENTS.md")
+            with self.assertRaisesRegex(ContractError, "incomplete or unknown"):
+                installer._classify_legacy(partial)
+            native = self.run_rust("legacy-adoption-inspect", str(partial))
+            self.assertEqual(native.returncode, 2)
+            self.assertIn("incomplete or unknown", native.stderr)
+
+            managed = root / "managed"
+            (managed / ".agent-skills").mkdir(parents=True)
+            (managed / ".agent-skills/install-lock.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            self.assertEqual(installer._classify_legacy(managed), {})
+            native = self.run_rust("legacy-adoption-inspect", str(managed))
+            self.assertEqual(native.returncode, 0, native.stderr)
+            self.assertEqual(native.stdout, dumps({}))
+
+            unrelated_source = root / "unrelated"
+            (unrelated_source / "skills").mkdir(parents=True)
+            (unrelated_source / "AGENTS.md").write_text(
+                "unrelated\n", encoding="utf-8"
+            )
+            unrelated = root / "unrelated-target"
+            unrelated.mkdir()
+            (unrelated / "AGENTS.md").symlink_to(unrelated_source / "AGENTS.md")
+            (unrelated / "skills").symlink_to(unrelated_source / "skills")
+            with self.assertRaisesRegex(ContractError, "non-iOSAgentSkills"):
+                installer._classify_legacy(unrelated)
+            native = self.run_rust("legacy-adoption-inspect", str(unrelated))
+            self.assertEqual(native.returncode, 2)
+            self.assertIn("non-iOSAgentSkills", native.stderr)
+
+            broken = root / "broken"
+            broken.mkdir()
+            (broken / "AGENTS.md").symlink_to("../missing/AGENTS.md")
+            (broken / "skills").symlink_to("../missing/skills")
+            with self.assertRaisesRegex(ContractError, "non-iOSAgentSkills"):
+                installer._classify_legacy(broken)
+            native = self.run_rust("legacy-adoption-inspect", str(broken))
+            self.assertEqual(native.returncode, 2)
+            self.assertIn("non-iOSAgentSkills", native.stderr)
+
+            first = root / "first/iOSAgentSkills"
+            second = root / "second/iOSAgentSkills"
+            first.mkdir(parents=True)
+            (second / "skills").mkdir(parents=True)
+            (first / "AGENTS.md").write_text("first\n", encoding="utf-8")
+            mixed = root / "mixed"
+            mixed.mkdir()
+            (mixed / "AGENTS.md").symlink_to(first / "AGENTS.md")
+            (mixed / "skills").symlink_to(second / "skills")
+            self.assertEqual(
+                sorted(installer._classify_legacy(mixed)),
+                ["AGENTS.md", "skills"],
+            )
+            native = self.run_rust("legacy-adoption-inspect", str(mixed))
+            self.assertEqual(native.returncode, 2)
+            self.assertIn("same repository", native.stderr)
 
     @unittest.skipIf(os.name == "nt", "interactive source install is POSIX-only")
     def test_native_interactive_install_uses_terminal_and_preserves_mode(self) -> None:

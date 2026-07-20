@@ -75,7 +75,11 @@ builds the pinned Rust CLI offline in a private target directory and executes
 that exact binary. Fresh source-checkout terminal selection now also runs in
 that binary, as does a downloaded signed POSIX release bootstrap invoked with
 an attached terminal. PowerShell and other compatibility bootstrap surfaces,
-legacy adoption, and other routes remain pending.
+legacy adoption mutation, and other routes remain pending. Native legacy
+adoption now has a read-only classifier that preserves the exact raw
+`AGENTS.md` / `skills` symlink targets, rejects partial or unrelated layouts,
+and tightens the Python baseline by rejecting links resolved from different
+`iOSAgentSkills` roots; it does not yet authorize or perform replacement.
 The repository contains:
 
 - a Rust workspace pinned to Rust 1.97.1;
@@ -202,6 +206,13 @@ The repository contains:
   Release mismatch, unsupported hosts, compatibility-only requests, and an
   explicitly selected Python engine retain the verified Python path; a
   selected native build or execution never silently falls back.
+  The lifecycle crate also exposes a read-only legacy-adoption inspection
+  boundary. It uses no-follow target acquisition, stable symlink identity and
+  raw-target checks, requires both managed links to resolve beneath the same
+  directory named `iOSAgentSkills`, and leaves the target untouched. The
+  mutating adoption gate remains pending until those exact links and the
+  legacy `.system` tree can be frozen, moved, and restored under one held
+  lifecycle lock.
   The crate now also resolves the source package catalog used before native
   installation: explicit platform, discipline, and runtime-config selection;
   required and optional package dependencies; numeric version constraints;

@@ -54,7 +54,7 @@ pub use source_install::{
 };
 pub use source_lifecycle::{
     InstalledSourceSelection, compile_source_upgrade_bundle, compile_source_upgrade_bundle_bound,
-    inspect_installed_source_selection, inspect_source_install,
+    inspect_installed_source_selection, inspect_legacy_adoption, inspect_source_install,
     inspect_source_install_with_activation, inspect_source_upgrade, inspect_source_upgrade_bound,
     install_source_bundle, install_source_bundle_with_activation, upgrade_source_bundle,
 };

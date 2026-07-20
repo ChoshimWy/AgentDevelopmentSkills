@@ -7,12 +7,266 @@ use crate::{
     source_packages::SourcePackageSet, staged_install, transaction_lock,
     upgrade_plan::semantic_lock_identity,
 };
+#[cfg(not(windows))]
+use crate::{same_content_state_cap, same_object_cap};
 use agent_engine::validate_install_plan;
 use cap_std::fs::Dir;
 use serde_json::Value;
+#[cfg(not(windows))]
+use std::collections::BTreeMap;
+#[cfg(not(windows))]
+use std::ffi::OsStr;
 use std::path::Path;
 
 const MANAGED_ROOTS: [&str; 3] = ["AGENTS.md", "skills", ".agent-skills"];
+#[cfg(not(windows))]
+const LEGACY_REPOSITORY_NAME: &str = "iOSAgentSkills";
+
+/// Classify the exact legacy iOSAgentSkills symlink layout without mutation.
+///
+/// A valid legacy target has only `AGENTS.md` and `skills` in the managed-root
+/// namespace, both are stable symlinks whose resolved entries have the expected
+/// leaf name under the same directory named `iOSAgentSkills`, and no managed
+/// Install Lock is present. The returned values preserve the raw link targets
+/// so a later approval-bound transaction can freeze and restore them exactly.
+///
+/// # Errors
+/// Returns a fail-closed error for partial, unrelated, unsafe, drifting,
+/// non-UTF-8, or mixed-repository layouts. Windows remains ineligible until the
+/// production source-install filesystem contract is enabled.
+pub fn inspect_legacy_adoption(target_root: impl AsRef<Path>) -> Result<Value, LifecycleError> {
+    #[cfg(windows)]
+    {
+        let _ = target_root;
+        return invalid("legacy adoption inspection is not enabled on Windows");
+    }
+    #[cfg(not(windows))]
+    {
+        inspect_legacy_adoption_posix(target_root.as_ref(), || Ok(()))
+    }
+}
+
+#[cfg(not(windows))]
+fn inspect_legacy_adoption_posix(
+    target_root: &Path,
+    between_links: impl FnOnce() -> Result<(), LifecycleError>,
+) -> Result<Value, LifecycleError> {
+    let Some(_) = transaction_lock::inspect_optional_target(target_root)? else {
+        return Ok(serde_json::json!({}));
+    };
+    let (target, canonical_target, _) = transaction_lock::inspect_existing_target(target_root)?;
+    if has_managed_install_lock(&target)? {
+        return Ok(serde_json::json!({}));
+    }
+    let occupied = MANAGED_ROOTS
+        .iter()
+        .filter_map(|name| match target.symlink_metadata(name) {
+            Ok(_) => Some(Ok((*name).to_owned())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => Some(Err(LifecycleError::from(error))),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if occupied.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    if occupied != ["AGENTS.md".to_owned(), "skills".to_owned()] {
+        return invalid(format!(
+            "refusing to replace incomplete or unknown unmanaged install roots: {}",
+            occupied.join(", ")
+        ));
+    }
+
+    let agents = inspect_legacy_link(&target, &canonical_target, "AGENTS.md", true)?;
+    between_links()?;
+    let skills = inspect_legacy_link(&target, &canonical_target, "skills", false)?;
+    if agents.resolved_parent != skills.resolved_parent
+        || !same_object_cap(
+            &agents.repository.dir_metadata()?,
+            &skills.repository.dir_metadata()?,
+        )
+    {
+        return invalid("legacy AGENTS.md and skills must resolve from the same repository");
+    }
+    validate_legacy_link(&target, &canonical_target, &agents)?;
+    validate_legacy_link(&target, &canonical_target, &skills)?;
+
+    let mut links = BTreeMap::new();
+    links.insert("AGENTS.md".to_owned(), Value::String(agents.raw_target));
+    links.insert("skills".to_owned(), Value::String(skills.raw_target));
+    Ok(Value::Object(links.into_iter().collect()))
+}
+
+#[cfg(not(windows))]
+fn has_managed_install_lock(target: &Dir) -> Result<bool, LifecycleError> {
+    let metadata = match target.symlink_metadata(".agent-skills") {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(false);
+    }
+    let managed = open_child_directory(target, ".agent-skills", None, "managed metadata")?;
+    match managed.symlink_metadata("install-lock.json") {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => Ok(true),
+        Ok(_) => invalid("managed Install Lock is unsafe"),
+    }
+}
+
+#[cfg(not(windows))]
+struct LegacyLinkSnapshot {
+    leaf: String,
+    expect_file: bool,
+    raw_target: String,
+    raw_target_path: std::path::PathBuf,
+    resolved: std::path::PathBuf,
+    resolved_parent: std::path::PathBuf,
+    target_identity: cap_std::fs::Metadata,
+    repository: Dir,
+    repository_identity: cap_std::fs::Metadata,
+    resolved_identity: cap_std::fs::Metadata,
+}
+
+#[cfg(not(windows))]
+fn inspect_legacy_link(
+    target: &Dir,
+    canonical_target: &Path,
+    leaf: &str,
+    expect_file: bool,
+) -> Result<LegacyLinkSnapshot, LifecycleError> {
+    let before = target.symlink_metadata(leaf)?;
+    if !before.file_type().is_symlink() {
+        return invalid("refusing to replace non-iOSAgentSkills AGENTS.md or skills");
+    }
+    let raw_target_path = target.read_link_contents(leaf)?;
+    let raw_target = raw_target_path
+        .to_str()
+        .ok_or_else(|| LifecycleError::Invalid("legacy symlink target is not valid UTF-8".into()))?
+        .to_owned();
+    let resolved = std::fs::canonicalize(canonical_target.join(leaf)).map_err(|_| {
+        LifecycleError::Invalid("refusing to replace non-iOSAgentSkills AGENTS.md or skills".into())
+    })?;
+    let resolved_parent = resolved
+        .parent()
+        .filter(|parent| parent.file_name() == Some(OsStr::new(LEGACY_REPOSITORY_NAME)))
+        .ok_or_else(|| {
+            LifecycleError::Invalid(
+                "refusing to replace non-iOSAgentSkills AGENTS.md or skills".into(),
+            )
+        })?
+        .to_path_buf();
+    if resolved.file_name() != Some(OsStr::new(leaf)) {
+        return invalid("refusing to replace non-iOSAgentSkills AGENTS.md or skills");
+    }
+    let repository = open_root_directory(&resolved_parent, None, "legacy repository")?;
+    let repository_identity = repository.dir_metadata()?;
+    let resolved_before = repository.symlink_metadata(leaf).map_err(|_| {
+        LifecycleError::Invalid("refusing to replace non-iOSAgentSkills AGENTS.md or skills".into())
+    })?;
+    if resolved_before.file_type().is_symlink()
+        || (expect_file && !resolved_before.is_file())
+        || (!expect_file && !resolved_before.is_dir())
+    {
+        return invalid("refusing to replace non-iOSAgentSkills AGENTS.md or skills");
+    }
+    let after = target.symlink_metadata(leaf)?;
+    let current_target = target.read_link_contents(leaf)?;
+    if !after.file_type().is_symlink()
+        || !same_object_cap(&before, &after)
+        || !same_content_state_cap(&before, &after)
+        || raw_target_path != current_target
+    {
+        return invalid("legacy symlink changed while inspecting adoption");
+    }
+    let current_resolved = std::fs::canonicalize(canonical_target.join(leaf)).map_err(|_| {
+        LifecycleError::Invalid("legacy repository changed while inspecting adoption".into())
+    })?;
+    let current_repository = open_root_directory(
+        &resolved_parent,
+        None,
+        "legacy repository changed while inspecting",
+    )?;
+    let resolved_after = current_repository.symlink_metadata(leaf).map_err(|_| {
+        LifecycleError::Invalid("legacy repository changed while inspecting adoption".into())
+    })?;
+    if current_resolved != resolved
+        || !same_object_cap(
+            &repository.dir_metadata()?,
+            &current_repository.dir_metadata()?,
+        )
+        || resolved_after.file_type().is_symlink()
+        || !same_object_cap(&resolved_before, &resolved_after)
+        || !same_content_state_cap(&resolved_before, &resolved_after)
+        || (expect_file && !resolved_after.is_file())
+        || (!expect_file && !resolved_after.is_dir())
+    {
+        return invalid("legacy repository changed while inspecting adoption");
+    }
+    Ok(LegacyLinkSnapshot {
+        leaf: leaf.to_owned(),
+        expect_file,
+        raw_target,
+        raw_target_path,
+        resolved,
+        resolved_parent,
+        target_identity: after,
+        repository,
+        repository_identity,
+        resolved_identity: resolved_after,
+    })
+}
+
+#[cfg(not(windows))]
+fn validate_legacy_link(
+    target: &Dir,
+    canonical_target: &Path,
+    snapshot: &LegacyLinkSnapshot,
+) -> Result<(), LifecycleError> {
+    let target_identity = target.symlink_metadata(&snapshot.leaf).map_err(|_| {
+        LifecycleError::Invalid("legacy symlink changed while inspecting adoption".into())
+    })?;
+    let raw_target = target.read_link_contents(&snapshot.leaf).map_err(|_| {
+        LifecycleError::Invalid("legacy symlink changed while inspecting adoption".into())
+    })?;
+    if !target_identity.file_type().is_symlink()
+        || !same_object_cap(&snapshot.target_identity, &target_identity)
+        || !same_content_state_cap(&snapshot.target_identity, &target_identity)
+        || raw_target != snapshot.raw_target_path
+    {
+        return invalid("legacy symlink changed while inspecting adoption");
+    }
+
+    let resolved = std::fs::canonicalize(canonical_target.join(&snapshot.leaf)).map_err(|_| {
+        LifecycleError::Invalid("legacy repository changed while inspecting adoption".into())
+    })?;
+    let current_repository = open_root_directory(
+        &snapshot.resolved_parent,
+        None,
+        "legacy repository changed while inspecting",
+    )?;
+    let repository_identity = current_repository.dir_metadata()?;
+    let held_repository_identity = snapshot.repository.dir_metadata()?;
+    let resolved_identity = current_repository
+        .symlink_metadata(&snapshot.leaf)
+        .map_err(|_| {
+            LifecycleError::Invalid("legacy repository changed while inspecting adoption".into())
+        })?;
+    if resolved != snapshot.resolved
+        || !same_object_cap(&snapshot.repository_identity, &held_repository_identity)
+        || !same_content_state_cap(&snapshot.repository_identity, &held_repository_identity)
+        || !same_object_cap(&snapshot.repository_identity, &repository_identity)
+        || resolved_identity.file_type().is_symlink()
+        || !same_object_cap(&snapshot.resolved_identity, &resolved_identity)
+        || !same_content_state_cap(&snapshot.resolved_identity, &resolved_identity)
+        || (snapshot.expect_file && !resolved_identity.is_file())
+        || (!snapshot.expect_file && !resolved_identity.is_dir())
+    {
+        return invalid("legacy repository changed while inspecting adoption");
+    }
+    Ok(())
+}
 
 /// Exact package selection persisted by one valid installed Lock pair.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1003,6 +1257,151 @@ mod tests {
             compile_source_install_bundle(&selection, &packages, root.join("schemas"), None)
                 .expect("compile core bundle");
         (bundle, packages)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_adoption_inspection_preserves_exact_raw_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        let legacy = fixture.root.join(LEGACY_REPOSITORY_NAME);
+        std::fs::create_dir_all(legacy.join("skills/.system")).expect("create legacy Skills");
+        std::fs::write(legacy.join("AGENTS.md"), b"legacy\n").expect("write legacy AGENTS");
+        let target = fixture.target();
+        std::fs::create_dir(&target).expect("create target");
+        symlink(
+            format!("../{LEGACY_REPOSITORY_NAME}/AGENTS.md"),
+            target.join("AGENTS.md"),
+        )
+        .expect("link legacy AGENTS");
+        symlink(
+            format!("../{LEGACY_REPOSITORY_NAME}/skills"),
+            target.join("skills"),
+        )
+        .expect("link legacy Skills");
+
+        assert_eq!(
+            inspect_legacy_adoption(&target).expect("inspect legacy target"),
+            json!({
+                "AGENTS.md": "../iOSAgentSkills/AGENTS.md",
+                "skills": "../iOSAgentSkills/skills",
+            })
+        );
+        assert!(target.join("AGENTS.md").is_symlink());
+        assert!(target.join("skills").is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_adoption_inspection_rejects_partial_and_mixed_repositories() {
+        use std::os::unix::fs::symlink;
+
+        let partial = Fixture::new();
+        let legacy = partial.root.join(LEGACY_REPOSITORY_NAME);
+        std::fs::create_dir(&legacy).expect("create partial legacy root");
+        std::fs::write(legacy.join("AGENTS.md"), b"legacy\n").expect("write partial legacy AGENTS");
+        let partial_target = partial.target();
+        std::fs::create_dir(&partial_target).expect("create partial target");
+        symlink(
+            format!("../{LEGACY_REPOSITORY_NAME}/AGENTS.md"),
+            partial_target.join("AGENTS.md"),
+        )
+        .expect("link partial AGENTS");
+        let error =
+            inspect_legacy_adoption(&partial_target).expect_err("partial legacy layout must fail");
+        assert!(error.to_string().contains("incomplete or unknown"));
+
+        let mixed = Fixture::new();
+        let first = mixed.root.join("first").join(LEGACY_REPOSITORY_NAME);
+        let second = mixed.root.join("second").join(LEGACY_REPOSITORY_NAME);
+        std::fs::create_dir_all(&first).expect("create first legacy root");
+        std::fs::create_dir_all(second.join("skills")).expect("create second legacy Skills");
+        std::fs::write(first.join("AGENTS.md"), b"legacy\n").expect("write mixed legacy AGENTS");
+        let mixed_target = mixed.target();
+        std::fs::create_dir(&mixed_target).expect("create mixed target");
+        symlink(first.join("AGENTS.md"), mixed_target.join("AGENTS.md"))
+            .expect("link mixed AGENTS");
+        symlink(second.join("skills"), mixed_target.join("skills")).expect("link mixed Skills");
+        let error = inspect_legacy_adoption(&mixed_target)
+            .expect_err("mixed legacy repositories must fail");
+        assert!(error.to_string().contains("same repository"));
+
+        let alias = mixed.root.join("target-alias");
+        symlink(&mixed_target, &alias).expect("link target alias");
+        let error = inspect_legacy_adoption(&alias)
+            .expect_err("symlinked target root must fail before classification");
+        assert!(error.to_string().contains("missing or unsafe"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_adoption_inspection_rejects_repository_replacement_between_links() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        let legacy = fixture.root.join(LEGACY_REPOSITORY_NAME);
+        std::fs::create_dir_all(legacy.join("skills")).expect("create original legacy Skills");
+        std::fs::write(legacy.join("AGENTS.md"), b"original\n")
+            .expect("write original legacy AGENTS");
+        let target = fixture.target();
+        std::fs::create_dir(&target).expect("create target");
+        symlink(
+            format!("../{LEGACY_REPOSITORY_NAME}/AGENTS.md"),
+            target.join("AGENTS.md"),
+        )
+        .expect("link legacy AGENTS");
+        symlink(
+            format!("../{LEGACY_REPOSITORY_NAME}/skills"),
+            target.join("skills"),
+        )
+        .expect("link legacy Skills");
+
+        let replaced = fixture.root.join("replaced-iOSAgentSkills");
+        let error = inspect_legacy_adoption_posix(&target, || {
+            std::fs::rename(&legacy, &replaced)?;
+            std::fs::create_dir_all(legacy.join("skills"))?;
+            std::fs::write(legacy.join("AGENTS.md"), b"replacement\n")?;
+            Ok(())
+        })
+        .expect_err("same-path repository replacement must fail");
+        assert!(error.to_string().contains("same repository"), "{error}");
+        assert!(target.join("AGENTS.md").is_symlink());
+        assert!(target.join("skills").is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_adoption_inspection_rejects_non_utf8_raw_targets() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        let non_utf8 = OsString::from_vec(vec![b'l', 0xff]);
+        let legacy = fixture.root.join(LEGACY_REPOSITORY_NAME);
+        std::fs::create_dir_all(legacy.join("skills")).expect("create legacy Skills");
+        let target = fixture.target();
+        std::fs::create_dir(&target).expect("create target");
+        symlink(
+            Path::new("..")
+                .join(&non_utf8)
+                .join(LEGACY_REPOSITORY_NAME)
+                .join("AGENTS.md"),
+            target.join("AGENTS.md"),
+        )
+        .expect("link non-UTF-8 legacy AGENTS");
+        symlink(
+            format!("../{LEGACY_REPOSITORY_NAME}/skills"),
+            target.join("skills"),
+        )
+        .expect("link non-UTF-8 legacy Skills");
+
+        let error = inspect_legacy_adoption(&target)
+            .expect_err("non-UTF-8 raw legacy targets must fail closed");
+        assert!(error.to_string().contains("not valid UTF-8"), "{error}");
+        assert!(target.join("AGENTS.md").is_symlink());
+        assert!(target.join("skills").is_symlink());
     }
 
     fn upgrade_evidence(package_lock: &Value) -> Value {

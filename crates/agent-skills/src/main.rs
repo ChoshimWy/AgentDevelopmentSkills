@@ -12,12 +12,12 @@ use agent_engine::{
 use agent_lifecycle::{
     LifecycleError, LifecycleWorkspace, compile_source_install_bundle,
     compile_source_upgrade_bundle, compile_upgrade_plan, inspect_doctor_baseline,
-    inspect_doctor_report_v1, inspect_doctor_report_v2, inspect_source_install,
-    inspect_source_install_with_activation, inspect_source_platform_options,
-    inspect_source_upgrade, inspect_uninstall_plan, inspect_upgrade_planning_snapshot,
-    install_source_bundle, install_source_bundle_with_activation, render_codex_config,
-    resolve_source_install_selection, rollback_source_install, snapshot_source_packages,
-    upgrade_source_bundle,
+    inspect_doctor_report_v1, inspect_doctor_report_v2, inspect_legacy_adoption,
+    inspect_source_install, inspect_source_install_with_activation,
+    inspect_source_platform_options, inspect_source_upgrade, inspect_uninstall_plan,
+    inspect_upgrade_planning_snapshot, install_source_bundle,
+    install_source_bundle_with_activation, render_codex_config, resolve_source_install_selection,
+    rollback_source_install, snapshot_source_packages, upgrade_source_bundle,
 };
 use agent_registry::{CORE_VERSION, ManifestRegistry, automatic_recipe_capabilities};
 use agent_release::{
@@ -157,6 +157,8 @@ enum Command {
         #[arg(long)]
         target_root: PathBuf,
     },
+    /// Inspect the exact legacy iOSAgentSkills symlink adoption boundary.
+    LegacyAdoptionInspect { target_root: PathBuf },
     /// Emit the canonical JSON representation of an existing JSON artifact.
     Canonicalize { artifact: PathBuf },
     /// Emit the canonical SHA-256 identity of an existing JSON artifact.
@@ -1110,6 +1112,10 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             if value.get("status").and_then(Value::as_str) == Some("blocked") {
                 return Ok(2);
             }
+        }
+        Command::LegacyAdoptionInspect { target_root } => {
+            let value = inspect_legacy_adoption(target_root)?;
+            print!("{}", String::from_utf8(canonical_json(&value)?)?);
         }
         Command::Canonicalize { artifact } => {
             let value = load_json(artifact)?;
