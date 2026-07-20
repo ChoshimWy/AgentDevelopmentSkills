@@ -28,9 +28,11 @@ uninstall transactions. It now also provides an operator-invoked
 qualified source archive, and current-host executable before issuing a
 release-provenance-bound approval envelope. Explicit and interactive fresh
 source-checkout installs now build and execute the pinned Rust installer
-offline. A downloaded signed POSIX release bootstrap with an attached terminal
-also runs the same Rust selector; compatibility-only requests and PowerShell
-bootstrap upgrades still use separately gated paths.
+offline on POSIX; an explicit fresh Desktop source-checkout request does the
+same on Windows. A downloaded signed POSIX release bootstrap with an attached
+terminal also runs the same Rust selector; compatibility-only
+requests and PowerShell hosted acquisition/upgrades still use separately gated
+paths.
 The signed POSIX release bootstrap routes an explicit `--upgrade` request
 through the release-matched Rust executable without Python fallback. The
 repository carries an MIT `LICENSE`, a `NOTICE`, and verified
@@ -117,9 +119,11 @@ downgrades to Python. A signed POSIX release bootstrap also routes an explicit
 `--upgrade` request directly to the release-matched Rust executable; this route
 has no Python fallback. Source-checkout and other compatibility-only requests
 outside the native interactive or explicit fresh routes still require Python
-3.11+. The PowerShell bootstrap also remains on that compatibility path
-because Windows is blocked as a production source-install target until its
-complete install contract is enabled.
+3.11+. A PowerShell script executed from a source checkout now sends an
+eligible explicit fresh Desktop request through an isolated locked offline
+Cargo build; downloaded PowerShell acquisition remains on the compatibility path because
+Windows is blocked as a production release install target until that hosted
+contract is enabled.
 
 An Apple native install publishes the verified executable as both
 `~/.codex/bin/agent-session` and `~/.codex/bin/agent-skills`. The latter exposes
@@ -550,8 +554,10 @@ build the pinned Rust CLI offline in a private target directory, and
 fresh source-checkout and downloaded hosted POSIX terminal selection now run in
 that binary without Python. Exact legacy iOSAgentSkills layouts use the same
 POSIX native route and are revalidated under the lifecycle lock before mutation.
-The PowerShell acquisition layer and all other ineligible requests still use
-the explicit Python compatibility path during this controlled phase.
+The PowerShell source-checkout layer now defaults eligible explicit fresh
+Desktop requests to Rust. Its Apple/hosted acquisition layers and all other
+ineligible requests still use the explicit Python compatibility path during
+this controlled phase.
 
 The target parent namespace must remain trusted while portable name-based
 release runs. Callers must expand `~` before using these APIs. The Doctor path

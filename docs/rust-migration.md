@@ -77,7 +77,9 @@ that exact binary. Fresh source-checkout terminal selection now also runs in
 that binary, as does a downloaded signed POSIX release bootstrap invoked with
 an attached terminal. Exact legacy iOSAgentSkills layouts selected through the
 same POSIX source or signed-release bootstrap now route to the native adoption
-transaction; PowerShell and other compatibility surfaces remain pending.
+transaction. A PowerShell source checkout now also builds and executes the
+pinned Rust CLI for eligible explicit fresh Desktop requests; Apple/hosted
+PowerShell and other compatibility surfaces remain pending.
 Native legacy adoption now has both a
 read-only classifier and a locked mutation transaction. The classifier
 preserves exact raw `AGENTS.md` / `skills` targets, rejects partial or unrelated
@@ -340,12 +342,13 @@ source requests remain on Python. Operators may explicitly select that path
 with `AGENT_SKILLS_INSTALL_ENGINE=python`; forced Rust fails
 closed when a request is ineligible or Cargo is unavailable, while an
 explicit hosted upgrade rejects the Python engine. A selected native build,
-acquisition, or execution failure never silently downgrades. PowerShell is not
+acquisition, or execution failure never silently downgrades. PowerShell source
+checkouts now exercise the native Windows managed-root filesystem contract for
+eligible explicit fresh Desktop requests, but Apple/hosted PowerShell is not
 promoted solely because the native matrix contains Windows executables: the
 release source artifact still excludes Windows as a production install host,
-so its bootstrap remains on the compatibility path until that complete
-filesystem contract and its Conformance gate are enabled. The parallel CLI
-currently covers canonical JSON,
+so downloaded acquisition remains on the compatibility path until its release
+gate is enabled. The parallel CLI currently covers canonical JSON,
 hashing, the shared schema-version boundary, registry snapshots, targeted
 binding resolution, source package-selection, package-snapshot, and complete
 Install Bundle/Plan/Lock compatibility, guarded fresh and POSIX legacy source
@@ -483,7 +486,7 @@ isolated locked offline Rust builds, while fresh source-checkout terminal
 selection now runs inside the Rust CLI. Downloaded signed POSIX release
 bootstraps with an attached terminal use that same selector, while the
 published pipe command supplies an explicit non-interactive Apple selection.
-The remaining hosted lifecycle cutover is PowerShell and the other
+The remaining hosted lifecycle cutover is PowerShell acquisition and the other
 compatibility bootstrap surfaces, separate from both
 the operator-invoked native routes and the Python-free eligible source routes.
 Upgrade Source Qualification v1 establishes the release-side input for that

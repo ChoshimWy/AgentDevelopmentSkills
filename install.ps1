@@ -6,6 +6,241 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$RequestedEngine = if ($env:AGENT_SKILLS_INSTALL_ENGINE) {
+    $env:AGENT_SKILLS_INSTALL_ENGINE
+} else {
+    "auto"
+}
+if ($RequestedEngine -notin @("auto", "python", "rust")) {
+    Write-Error `
+        "AgentDevelopmentSkills bootstrap blocked: AGENT_SKILLS_INSTALL_ENGINE must be auto, rust, or python" `
+        -ErrorAction Continue
+    exit 2
+}
+
+function Get-AgentSkillsDefaultTarget {
+    if ($env:CODEX_HOME) {
+        return $env:CODEX_HOME
+    }
+    $homeRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if (-not $homeRoot) {
+        return $null
+    }
+    return Join-Path $homeRoot ".codex"
+}
+
+function Test-AgentSkillsIdentifier {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    return $Value -match "^[a-z0-9][a-z0-9-]*$"
+}
+
+function Test-AgentSkillsFreshTarget {
+    param([Parameter(Mandatory = $true)][string]$TargetRoot)
+
+    try {
+        $target = Get-Item -LiteralPath $TargetRoot -Force -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return $true
+    } catch {
+        return $false
+    }
+    if (-not $target.PSIsContainer -or
+        ($target.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        return $false
+    }
+    foreach ($name in @("AGENTS.md", "skills", ".agent-skills")) {
+        try {
+            $null = Get-Item -LiteralPath (Join-Path $TargetRoot $name) -Force -ErrorAction Stop
+            return $false
+        } catch [System.Management.Automation.ItemNotFoundException] {
+            continue
+        } catch {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-AgentSkillsNativeRequest {
+    param([string[]]$Arguments)
+
+    $script:AgentSkillsNativeTarget = Get-AgentSkillsDefaultTarget
+    $script:AgentSkillsNativePlatforms = [System.Collections.Generic.List[string]]::new()
+    $script:AgentSkillsNativeDisciplines = [System.Collections.Generic.List[string]]::new()
+    $script:AgentSkillsNativeRuntimeConfigs = [System.Collections.Generic.List[string]]::new()
+    $script:AgentSkillsNativeDryRun = $false
+    $script:AgentSkillsNativeJson = $false
+    $targetSeen = $false
+    $platformKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $disciplineKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $runtimeKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+
+    for ($index = 0; $index -lt $Arguments.Count; $index++) {
+        $argument = $Arguments[$index]
+        if ($argument -eq "--dry-run") {
+            if ($script:AgentSkillsNativeDryRun) { return $false }
+            $script:AgentSkillsNativeDryRun = $true
+            continue
+        }
+        if ($argument -eq "--json") {
+            if ($script:AgentSkillsNativeJson) { return $false }
+            $script:AgentSkillsNativeJson = $true
+            continue
+        }
+
+        $name = $argument
+        $value = $null
+        if ($argument -match "^(--target-root|--platform|--discipline|--runtime-config)=(.*)$") {
+            $name = $Matches[1]
+            $value = $Matches[2]
+        } elseif ($argument -in @("--target-root", "--platform", "--discipline", "--runtime-config")) {
+            $index++
+            if ($index -ge $Arguments.Count) { return $false }
+            $value = $Arguments[$index]
+        } else {
+            return $false
+        }
+        if ([string]::IsNullOrEmpty($value)) { return $false }
+
+        switch ($name) {
+            "--target-root" {
+                if ($targetSeen) { return $false }
+                $targetSeen = $true
+                $script:AgentSkillsNativeTarget = $value
+            }
+            "--platform" {
+                if ($value -notin @("apple", "desktop", "all")) { return $false }
+                if (-not $platformKeys.Add($value)) { return $false }
+                if (($value -eq "all" -and $platformKeys.Count -ne 1) -or
+                    ($value -ne "all" -and $platformKeys.Contains("all"))) {
+                    return $false
+                }
+                $script:AgentSkillsNativePlatforms.Add($value)
+            }
+            "--discipline" {
+                if (-not (Test-AgentSkillsIdentifier -Value $value) -or -not $disciplineKeys.Add($value)) {
+                    return $false
+                }
+                $script:AgentSkillsNativeDisciplines.Add($value)
+            }
+            "--runtime-config" {
+                if (-not (Test-AgentSkillsIdentifier -Value $value) -or -not $runtimeKeys.Add($value)) {
+                    return $false
+                }
+                $script:AgentSkillsNativeRuntimeConfigs.Add($value)
+            }
+        }
+    }
+
+    if ($script:AgentSkillsNativePlatforms.Count -ne 1 -or
+        $script:AgentSkillsNativePlatforms[0] -ne "desktop") {
+        return $false
+    }
+    if ([string]::IsNullOrEmpty($script:AgentSkillsNativeTarget) -or
+        $script:AgentSkillsNativeTarget.Contains("~")) {
+        return $false
+    }
+    return Test-AgentSkillsFreshTarget -TargetRoot $script:AgentSkillsNativeTarget
+}
+
+function Invoke-AgentSkillsSourceNativeInstall {
+    param([Parameter(Mandatory = $true)][string]$SourceRoot)
+
+    $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+    if (-not $cargo) {
+        throw "native source install requires Cargo"
+    }
+    $source = Get-Item -LiteralPath $SourceRoot -Force -ErrorAction SilentlyContinue
+    if ($null -eq $source -or -not $source.PSIsContainer -or
+        ($source.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "native source install root is missing or unsafe"
+    }
+    foreach ($relative in @(
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "crates/agent-skills/Cargo.toml"
+    )) {
+        $path = Join-Path $SourceRoot $relative
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item -or $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "native source install input is missing or unsafe: $relative"
+        }
+    }
+
+    $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("agent-skills-source-native-" + [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+    try {
+        $targetDirectory = Join-Path $temporaryRoot "target"
+        & $cargo.Source build `
+            --locked `
+            --offline `
+            --manifest-path (Join-Path $SourceRoot "Cargo.toml") `
+            --package agent-skills-rs `
+            --bin agent-skills-rs `
+            --target-dir $targetDirectory
+        if ($LASTEXITCODE -ne 0) {
+            throw "native source installer build failed with exit code $LASTEXITCODE"
+        }
+        $nativeExecutable = Join-Path $targetDirectory "debug/agent-skills-rs.exe"
+        $native = Get-Item -LiteralPath $nativeExecutable -Force -ErrorAction SilentlyContinue
+        if ($null -eq $native -or $native.PSIsContainer -or
+            ($native.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Cargo did not produce the expected native installer"
+        }
+
+        $nativeArguments = [System.Collections.Generic.List[string]]::new()
+        $nativeArguments.Add("install")
+        $nativeArguments.Add("--source-root")
+        $nativeArguments.Add($SourceRoot)
+        $nativeArguments.Add("--target-root")
+        $nativeArguments.Add($script:AgentSkillsNativeTarget)
+        foreach ($platform in $script:AgentSkillsNativePlatforms) {
+            $nativeArguments.Add("--platform")
+            $nativeArguments.Add($platform)
+        }
+        foreach ($discipline in $script:AgentSkillsNativeDisciplines) {
+            $nativeArguments.Add("--discipline")
+            $nativeArguments.Add($discipline)
+        }
+        foreach ($runtimeConfig in $script:AgentSkillsNativeRuntimeConfigs) {
+            $nativeArguments.Add("--runtime-config")
+            $nativeArguments.Add($runtimeConfig)
+        }
+        if ($script:AgentSkillsNativePlatforms.Contains("apple") -or
+            $script:AgentSkillsNativePlatforms.Contains("all")) {
+            $nativeArguments.Add("--session-launcher")
+            $nativeArguments.Add($nativeExecutable)
+        }
+        if ($script:AgentSkillsNativeDryRun) { $nativeArguments.Add("--dry-run") }
+        if ($script:AgentSkillsNativeJson) { $nativeArguments.Add("--json") }
+
+        $selectedEngine = Get-Item `
+            -LiteralPath Env:AGENT_SKILLS_INSTALL_ENGINE_SELECTED `
+            -ErrorAction SilentlyContinue
+        try {
+            $env:AGENT_SKILLS_INSTALL_ENGINE_SELECTED = "rust"
+            & $nativeExecutable @nativeArguments
+            $script:AgentSkillsNativeExitCode = [int]$LASTEXITCODE
+        } finally {
+            if ($null -ne $selectedEngine) {
+                $env:AGENT_SKILLS_INSTALL_ENGINE_SELECTED = $selectedEngine.Value
+            } else {
+                Remove-Item `
+                    -LiteralPath Env:AGENT_SKILLS_INSTALL_ENGINE_SELECTED `
+                    -ErrorAction SilentlyContinue
+            }
+        }
+    } finally {
+        try {
+            Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction Stop
+        } catch {
+            Write-Warning ("native source installer temporary directory requires cleanup: " + $temporaryRoot)
+        }
+    }
+}
+
 function Resolve-AgentSkillsPython {
     if ($env:AGENT_SKILLS_PYTHON) {
         return @($env:AGENT_SKILLS_PYTHON)
@@ -166,12 +401,26 @@ function Assert-AgentSkillsBootstrap {
 }
 
 try {
-    $python = Resolve-AgentSkillsPython
     $localInstaller = if ($PSScriptRoot) { Join-Path $PSScriptRoot "scripts/install_local.py" } else { $null }
     if ($localInstaller -and (Test-Path -LiteralPath $localInstaller -PathType Leaf)) {
+        $sourceRoot = (Get-Item -LiteralPath $PSScriptRoot -Force).FullName
+        $nativeEligible = Test-AgentSkillsNativeRequest -Arguments $InstallerArguments
+        if ($RequestedEngine -ne "python" -and $nativeEligible -and
+            (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            Invoke-AgentSkillsSourceNativeInstall -SourceRoot $sourceRoot
+            exit [int]$script:AgentSkillsNativeExitCode
+        }
+        if ($RequestedEngine -eq "rust") {
+            throw "forced Rust source install requires Cargo, a supported explicit platform, and no compatibility-only arguments"
+        }
+        $python = Resolve-AgentSkillsPython
         Invoke-AgentSkillsPython -PythonCommand $python -Script $localInstaller -Arguments $InstallerArguments
         exit [int]$script:AgentSkillsPythonExitCode
     }
+    if ($RequestedEngine -eq "rust") {
+        throw "forced Rust hosted install is not enabled by the PowerShell bootstrap yet"
+    }
+    $python = Resolve-AgentSkillsPython
     $releaseBaseUrl = if ($env:AGENT_SKILLS_RELEASE_BASE_URL) {
         $env:AGENT_SKILLS_RELEASE_BASE_URL.TrimEnd("/")
     } else {
@@ -203,6 +452,8 @@ try {
     }
     exit [int]$script:AgentSkillsPythonExitCode
 } catch {
-    Write-Error ("AgentDevelopmentSkills bootstrap blocked: " + $_.Exception.Message)
+    Write-Error `
+        ("AgentDevelopmentSkills bootstrap blocked: " + $_.Exception.Message) `
+        -ErrorAction Continue
     exit 2
 }
