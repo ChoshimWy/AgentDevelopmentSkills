@@ -507,7 +507,7 @@ def _validated_install_target(installer_arguments: list[str]) -> Path:
             target_root_seen = True
             target_text = argument.split("=", 1)[1]
         index += 1
-    if not target_text or "~" in target_text:
+    if not target_text or target_text.startswith("~"):
         raise BootstrapError("native install target must be expanded and provided once")
     return Path(os.path.abspath(target_text))
 
@@ -556,7 +556,7 @@ def _native_install_request(
                     raise BootstrapError(
                         "native install target must be expanded and provided once"
                     )
-                if value.startswith("--") or "~" in value:
+                if value.startswith("--") or value.startswith("~"):
                     raise BootstrapError(
                         "native install target must be expanded and provided once"
                     )
@@ -576,7 +576,7 @@ def _native_install_request(
                 )
             target_root_seen = True
             value = argument.split("=", 1)[1]
-            if not value or "~" in value:
+            if not value or value.startswith("~"):
                 raise BootstrapError(
                     "native install target must be expanded and provided once"
                 )

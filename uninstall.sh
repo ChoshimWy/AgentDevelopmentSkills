@@ -132,7 +132,7 @@ validate_uninstall_target_arguments() {
                 ;;
         esac
     done
-    [[ -n "$target_root" && "$target_root" != *'~'* ]]
+    [[ -n "$target_root" && "$target_root" != '~'* ]]
 }
 
 parse_native_request() {
@@ -182,7 +182,7 @@ parse_native_request() {
                 ;;
         esac
     done
-    [[ -n "$NATIVE_TARGET_ROOT" && "$NATIVE_TARGET_ROOT" != *'~'* ]] || return 1
+    [[ -n "$NATIVE_TARGET_ROOT" && "$NATIVE_TARGET_ROOT" != '~'* ]] || return 1
     if ((NATIVE_DRY_RUN)); then
         NATIVE_ARGUMENTS+=(--dry-run)
         NATIVE_ARGUMENTS_PRESENT=1

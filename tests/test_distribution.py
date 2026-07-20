@@ -344,6 +344,17 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(unsafe_tilde.returncode, 2)
         self.assertIn("expanded and provided once", unsafe_tilde.stderr)
 
+        short_name_style = self.root / "RUNNER~1" / "native-target"
+        request = bootstrap._native_install_request([
+            "--target-root",
+            str(short_name_style),
+            "--platform",
+            "desktop",
+        ])
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertEqual(request[0], Path(os.path.abspath(short_name_style)))
+
         safe_override = self.root / "safe-explicit-override"
         with mock.patch.dict(
             os.environ,
@@ -1248,6 +1259,29 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(str(executable).endswith("/target/debug/agent-skills-rs"))
         self.assertFalse(executable.parents[2].exists())
         self.assertTrue(target.is_dir())
+
+        short_name_target = self.root / "RUNNER~1" / "uninstall-target"
+        short_name_target.mkdir(parents=True)
+        short_name = subprocess.run(
+            [
+                "/bin/bash",
+                str(ROOT / "uninstall.sh"),
+                "--target-root",
+                str(short_name_target),
+                "--dry-run",
+                "--json",
+            ],
+            cwd=ROOT,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(short_name.returncode, 0, short_name.stderr)
+        self.assertEqual(
+            native_arguments.read_text(encoding="utf-8").splitlines()[1],
+            str(short_name_target),
+        )
 
         cargo.write_text("#!/bin/sh\nexit 39\n", encoding="utf-8")
         cargo.chmod(0o755)

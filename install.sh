@@ -162,7 +162,7 @@ validate_install_target_arguments() {
                 ;;
         esac
     done
-    [[ -n "$target_root" && "$target_root" != *'~'* ]]
+    [[ -n "$target_root" && "$target_root" != '~'* ]]
 }
 
 parse_native_request() {
@@ -267,7 +267,7 @@ parse_native_request() {
             || return 1
         NATIVE_INTERACTIVE=1
     fi
-    [[ -n "$NATIVE_TARGET_ROOT" && "$NATIVE_TARGET_ROOT" != *'~'* ]] || return 1
+    [[ -n "$NATIVE_TARGET_ROOT" && "$NATIVE_TARGET_ROOT" != '~'* ]] || return 1
     [[ ! -L "$NATIVE_TARGET_ROOT" ]] || return 1
     if [[ -e "$NATIVE_TARGET_ROOT" && ! -d "$NATIVE_TARGET_ROOT" ]]; then
         return 1
@@ -367,7 +367,7 @@ parse_native_upgrade_request() {
         esac
     done
     ((upgrade_seen == 1)) || return 1
-    [[ -n "$NATIVE_TARGET_ROOT" && "$NATIVE_TARGET_ROOT" != *'~'* ]] || return 1
+    [[ -n "$NATIVE_TARGET_ROOT" && "$NATIVE_TARGET_ROOT" != '~'* ]] || return 1
     [[ -d "$NATIVE_TARGET_ROOT" && ! -L "$NATIVE_TARGET_ROOT" ]] || return 1
     if ((NATIVE_UPGRADE_DRY_RUN)); then
         [[ -z "$NATIVE_UPGRADE_PLAN" \

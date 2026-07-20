@@ -137,7 +137,7 @@ function Test-AgentSkillsNativeRequest {
         return $false
     }
     if ([string]::IsNullOrEmpty($script:AgentSkillsNativeTarget) -or
-        $script:AgentSkillsNativeTarget.Contains("~")) {
+        $script:AgentSkillsNativeTarget.StartsWith("~", [StringComparison]::Ordinal)) {
         return $false
     }
     return Test-AgentSkillsFreshTarget -TargetRoot $script:AgentSkillsNativeTarget
