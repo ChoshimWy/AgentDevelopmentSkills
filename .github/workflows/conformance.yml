@@ -56,6 +56,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          function Invoke-ExpectedInstallerFailure {
+            param([string[]]$Arguments)
+            $output = & pwsh -NoProfile -File ./install.ps1 @Arguments 2>&1
+            [pscustomobject]@{
+              ExitCode = [int]$LASTEXITCODE
+              Output = @($output)
+            }
+          }
           $target = Join-Path $env:RUNNER_TEMP ("agent-skills-windows-source-smoke-" + [guid]::NewGuid())
           try {
             $env:AGENT_SKILLS_PYTHON = "C:\definitely-missing\python.exe"
@@ -73,10 +81,10 @@ jobs:
               }
             }
             $env:AGENT_SKILLS_PYTHON = (Get-Command python -ErrorAction Stop).Source
-            $occupiedOutput = & ./install.ps1 --platform desktop --target-root $target --dry-run --json 2>&1
-            if ($LASTEXITCODE -ne 2) { throw "occupied PowerShell compatibility route did not fail closed" }
-            if (($occupiedOutput | Out-String) -notmatch "refusing to overwrite unmanaged or modified install roots") {
-              throw "occupied PowerShell target did not preserve the Python compatibility failure"
+            $occupied = Invoke-ExpectedInstallerFailure @("--platform", "desktop", "--target-root", $target, "--dry-run", "--json")
+            if ($occupied.ExitCode -ne 2) { throw "occupied PowerShell compatibility route did not fail closed: $($occupied.Output | Out-String)" }
+            if (($occupied.Output | Out-String) -notmatch "refusing to overwrite unmanaged or modified install roots") {
+              throw "occupied PowerShell target did not preserve the Python compatibility failure: $($occupied.Output | Out-String)"
             }
             $compatibilityTarget = "${target}-python"
             $env:AGENT_SKILLS_INSTALL_ENGINE = "python"
@@ -88,10 +96,10 @@ jobs:
               throw "forced Python compatibility route did not preserve engine provenance"
             }
             $env:AGENT_SKILLS_INSTALL_ENGINE = "rust"
-            $blocked = & ./install.ps1 --platform apple --target-root "${target}-apple" --dry-run --json 2>&1
-            if ($LASTEXITCODE -ne 2) { throw "forced Rust Apple request did not fail closed" }
-            if (($blocked | Out-String) -notmatch "forced Rust source install requires Cargo") {
-              throw "forced Rust Apple request failed for an unexpected reason"
+            $blocked = Invoke-ExpectedInstallerFailure @("--platform", "apple", "--target-root", "${target}-apple", "--dry-run", "--json")
+            if ($blocked.ExitCode -ne 2) { throw "forced Rust Apple request did not fail closed: $($blocked.Output | Out-String)" }
+            if (($blocked.Output | Out-String) -notmatch "forced Rust source install requires Cargo") {
+              throw "forced Rust Apple request failed for an unexpected reason: $($blocked.Output | Out-String)"
             }
           } finally {
             Remove-Item Env:AGENT_SKILLS_INSTALL_ENGINE -ErrorAction SilentlyContinue
