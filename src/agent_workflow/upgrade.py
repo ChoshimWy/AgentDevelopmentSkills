@@ -647,7 +647,11 @@ def _permission_approvals(before: dict[str, Any], after: dict[str, Any]) -> list
         current = new[capability]["permission_profile"]
         if previous != current:
             approvals.append(f"permission:{capability}:{previous}->{current}")
-    return approvals
+    # Upgrade Plan v1 requires the serialized approval values themselves to be
+    # canonical-order sorted. Capability-key order differs when one capability
+    # is a dotted prefix of another (for example ``analysis.desktop`` and
+    # ``analysis.desktop.environment``).
+    return sorted(approvals)
 
 
 def _upgrade_steps(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, str]]:

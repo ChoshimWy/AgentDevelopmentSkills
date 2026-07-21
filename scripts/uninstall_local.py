@@ -43,6 +43,18 @@ from agent_workflow.installation import (  # noqa: E402
     target_lifecycle_lock,
 )
 from agent_workflow.models import ContractError  # noqa: E402
+from agent_workflow.activation import (  # noqa: E402
+    DEACTIVATION_HANDLER_ID,
+    PRESERVE_HANDLER_ID,
+    activation_handler_sha256,
+    deactivation_external_paths,
+)
+from agent_workflow.upgrade import (  # noqa: E402
+    apply_upgrade,
+    plan_upgrade,
+    prepare_upgrade_candidate,
+    run_upgrade_conformance,
+)
 from install_local import ACTIVATED_FILES  # noqa: E402
 
 
@@ -295,12 +307,82 @@ def _selected_platforms(lock: dict[str, Any], requested: list[str]) -> tuple[str
     unknown = sorted(set(requested) - set(installed))
     if unknown:
         raise ContractError("platform is not installed: " + ", ".join(unknown))
-    if set(requested) != set(installed):
-        raise ContractError(
-            "partial platform uninstall is not available in the current source installer; "
-            "select all installed platforms"
-        )
     return tuple(sorted(requested))
+
+
+def _partial_uninstall_context(target: Path, removed_platforms: tuple[str, ...]):
+    activation_lock = target / ".agent-skills" / EXTERNAL_ACTIVATION_LOCK
+    if not activation_lock.exists():
+        return (), "none", None
+    if activation_lock.is_symlink() or not activation_lock.is_file():
+        raise ContractError("source activation lock is missing or unsafe")
+    handler = DEACTIVATION_HANDLER_ID if "apple" in removed_platforms else PRESERVE_HANDLER_ID
+    return deactivation_external_paths(target), handler, activation_handler_sha256()
+
+
+def _partial_uninstall_report(operation: Any, result: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
+    plan = operation.plan
+    return {
+        "schema_version": "1.0",
+        "status": "planned" if dry_run else result["status"],
+        "operation": "partial-uninstall",
+        "target_root": plan["target_root"],
+        "selected_platforms": plan["removed_platforms"],
+        "remaining_platforms": plan["selection"]["platforms"],
+        "changes": plan["changes"],
+        "rollback": plan["rollback"],
+        "plan_fingerprint": plan["fingerprint"],
+    }
+
+
+def _run_partial_uninstall(target: Path, lock: dict[str, Any], removed_platforms: tuple[str, ...], *, dry_run: bool) -> dict[str, Any]:
+    current_platforms = set(lock["selected_platforms"])
+    remaining_platforms = tuple(sorted(current_platforms - set(removed_platforms)))
+    runtime_configs = tuple(
+        config
+        for config in lock["selected_runtime_configs"]
+        if not (config == "codex" and "apple" in removed_platforms)
+    )
+    disciplines = tuple(lock["selected_disciplines"])
+    core_only = not (remaining_platforms or disciplines or runtime_configs)
+    candidate = prepare_upgrade_candidate(
+        ROOT / "platforms",
+        target,
+        platforms=remaining_platforms,
+        disciplines=disciplines,
+        runtime_configs=runtime_configs,
+        core_only=core_only,
+    )
+    evidence = run_upgrade_conformance(ROOT / "platforms", candidate.bundle.package_lock)
+    external_paths, external_handler, external_handler_sha256 = _partial_uninstall_context(
+        target,
+        removed_platforms,
+    )
+    operation = plan_upgrade(
+        ROOT / "platforms",
+        target,
+        evidence,
+        schema_root=ROOT / "schemas",
+        platforms=remaining_platforms,
+        disciplines=disciplines,
+        runtime_configs=runtime_configs,
+        core_only=core_only,
+        external_paths=external_paths,
+        external_handler=external_handler,
+        external_handler_sha256=external_handler_sha256,
+        action="partial-uninstall",
+        removed_platforms=removed_platforms,
+        removed_runtime_configs=("codex",) if "apple" in removed_platforms else (),
+    )
+    if dry_run:
+        return _partial_uninstall_report(operation, {"status": "planned"}, dry_run=True)
+    result = apply_upgrade(
+        operation,
+        target,
+        approve_plan=operation.plan["fingerprint"],
+        approvals=operation.plan["approvals_required"],
+    )
+    return _partial_uninstall_report(operation, result, dry_run=False)
 
 
 def _remove_managed_instructions_assignment(
@@ -810,6 +892,15 @@ def run(args: argparse.Namespace | None = None) -> dict[str, Any]:
         raise ContractError("uninstall.sh requires Python 3.11+")
     if args is None:
         args = parse_args()
+    raw_target = Path(args.target_root).expanduser()
+    if raw_target.is_symlink():
+        raise ContractError(f"uninstall target must not be a symlink: {raw_target}")
+    target = raw_target.resolve()
+    if args.platform and args.platform != ["all"] and target.exists() and target.is_dir():
+        _, installed_lock, _, _, _ = _managed_state(target)
+        requested = _selected_platforms(installed_lock, args.platform)
+        if requested and set(requested) != set(installed_lock["selected_platforms"]):
+            return _run_partial_uninstall(target, installed_lock, requested, dry_run=args.dry_run)
     if args.dry_run:
         target, lock, activation_files, target_identity, activation_identity = _managed_state(
             args.target_root
@@ -834,6 +925,16 @@ def run(args: argparse.Namespace | None = None) -> dict[str, Any]:
 
 
 def _human_report(report: dict[str, Any]) -> str:
+    if report.get("operation") == "partial-uninstall":
+        dry_run = report["status"] == "planned"
+        title = "移除平台预览" if dry_run else "移除平台完成"
+        lines = [f"{'◇' if dry_run else '✓'} Agent Development Skills {title}", ""]
+        lines.append("  移除平台：" + "、".join(report["selected_platforms"]))
+        lines.append("  保留平台：" + ("、".join(report["remaining_platforms"]) or "Core"))
+        lines.append("  回滚点：" + ("不创建（无变更）" if report["changes"]["status"] == "unchanged" else "已规划"))
+        if dry_run:
+            lines.extend(["", "未写入任何文件；移除 --dry-run 后执行移除。"])
+        return "\n".join(lines) + "\n"
     dry_run = report["status"] == "planned"
     title = "卸载预览" if dry_run else "卸载完成"
     lines = [f"{'◇' if dry_run else '✓'} Agent Development Skills {title}", ""]

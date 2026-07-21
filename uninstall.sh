@@ -339,6 +339,13 @@ if parse_native_request "$@"; then
 fi
 
 if [[ -n "$SOURCE_CHECKOUT_ROOT" ]]; then
+    # Source checkout users keep a two-command public interface: uninstall.sh
+    # owns both whole-install removal and platform removal. The Python route
+    # performs the latter as a guarded lifecycle transaction.
+    if [[ "$REQUESTED_ENGINE" != "rust" && -e "$NATIVE_TARGET_ROOT/.agent-skills" ]]; then
+        resolve_selected_python
+        exec "$PYTHON_BIN" "$SOURCE_CHECKOUT_ROOT/scripts/uninstall_local.py" "$@"
+    fi
     if [[ "$REQUESTED_ENGINE" != "python" && "$NATIVE_REQUEST_ELIGIBLE" == "1" ]] \
         && command -v cargo >/dev/null 2>&1; then
         run_source_native_uninstall "$SOURCE_CHECKOUT_ROOT"

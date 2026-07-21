@@ -199,8 +199,7 @@ class UninstallScriptTests(unittest.TestCase):
     def test_platform_selection_and_target_symlink_fail_closed(self) -> None:
         module = load_uninstaller_module()
         lock = {"selected_platforms": ["apple", "web"]}
-        with self.assertRaisesRegex(module.ContractError, "partial platform uninstall"):
-            module._selected_platforms(lock, ["apple"])
+        self.assertEqual(module._selected_platforms(lock, ["apple"]), ("apple",))
         with self.assertRaisesRegex(module.ContractError, "platform is not installed"):
             module._selected_platforms(lock, ["android"])
         with self.assertRaisesRegex(module.ContractError, "cannot be combined"):
@@ -215,6 +214,49 @@ class UninstallScriptTests(unittest.TestCase):
             blocked = self.uninstall(linked_target, check=False)
             self.assertEqual(blocked.returncode, 2)
             self.assertIn("must not be a symlink", blocked.stderr)
+
+    def test_partial_platform_uninstall_uses_the_guarded_upgrade_transaction(self) -> None:
+        from agent_workflow.upgrade import make_upgrade_conformance_evidence
+
+        def evidence(package_lock):
+            return make_upgrade_conformance_evidence(
+                package_lock,
+                manifest_count=1,
+                negative_contract_count=1,
+                test_count=1,
+                suite_definition_hash="1" * 64,
+                runner_sha256="2" * 64,
+                environment={"platform": "test", "python": "3.14.0"},
+                command_results=[{
+                    "command": "test",
+                    "exit_code": 0,
+                    "stdout_sha256": "3" * 64,
+                    "stderr_sha256": "4" * 64,
+                }],
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".codex"
+            self.install(target)
+            # Reuse the public source installer module to add Desktop first.
+            installer_spec = importlib.util.spec_from_file_location("install_local", ROOT / "scripts/install_local.py")
+            assert installer_spec is not None and installer_spec.loader is not None
+            installer_module = importlib.util.module_from_spec(installer_spec)
+            installer_spec.loader.exec_module(installer_module)
+            with mock.patch.object(installer_module, "run_upgrade_conformance", side_effect=lambda _, lock: evidence(lock)):
+                installer_module.run(SimpleNamespace(
+                    target_root=str(target), platform=["desktop"], dry_run=False, json=True
+                ))
+
+            module = load_uninstaller_module()
+            with mock.patch.object(module, "run_upgrade_conformance", side_effect=lambda _, lock: evidence(lock)):
+                result = module.run(SimpleNamespace(
+                    target_root=str(target), platform=["desktop"], dry_run=False, json=True
+                ))
+
+            self.assertEqual(result["status"], "upgraded")
+            self.assertEqual(result["operation"], "partial-uninstall")
+            self.assertEqual(result["remaining_platforms"], ["apple"])
 
     def test_incomplete_activation_lock_is_rejected_without_removal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

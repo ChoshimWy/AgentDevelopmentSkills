@@ -46,11 +46,25 @@ from agent_workflow.installation import (  # noqa: E402
     MANAGED_DIRECTORY_MODE,
     MANAGED_FILE_MODE,
     MANAGED_ROOTS,
+    _is_managed_install,
     build_install_bundle,
     install_bundle,
     target_lifecycle_lock,
 )
 from agent_workflow.models import ContractError  # noqa: E402
+from agent_workflow.activation import (  # noqa: E402
+    ACTIVATION_HANDLER_ID,
+    DEACTIVATION_HANDLER_ID,
+    activation_handler_sha256,
+    deactivation_external_paths,
+    external_paths as activation_external_paths,
+)
+from agent_workflow.upgrade import (  # noqa: E402
+    apply_upgrade,
+    plan_upgrade,
+    prepare_upgrade_candidate,
+    run_upgrade_conformance,
+)
 
 
 ACTIVATION_LOCK = ".agent-skills/activation-lock.json"
@@ -338,7 +352,12 @@ def _validated_platform_selection(
 
 
 def _prompt_for_platforms(
-    options: list[dict[str, Any]], *, input_stream: Any, output_stream: Any
+    options: list[dict[str, Any]],
+    *,
+    input_stream: Any,
+    output_stream: Any,
+    initial_selected: tuple[str, ...] = (),
+    locked_selected: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     color = _supports_color(output_stream)
     default_index = next(
@@ -347,7 +366,11 @@ def _prompt_for_platforms(
     )
     if default_index is None:
         raise ContractError("no installable platform is currently available")
-    selected = {options[default_index]["id"]}
+    selectable_ids = {item["id"] for item in options if item["selectable"]}
+    if not set(initial_selected) <= selectable_ids or not set(locked_selected) <= set(initial_selected):
+        raise ContractError("initial platform selection is invalid")
+    selected = set(initial_selected) or {options[default_index]["id"]}
+    locked = set(locked_selected)
     cursor = default_index
     rendered_line_count = 0
     message = ""
@@ -403,6 +426,9 @@ def _prompt_for_platforms(
                     message = f"! {item['label']} ({item['availability']}) 尚不可安装"
                     continue
                 if item["id"] in selected:
+                    if item["id"] in locked:
+                        message = f"! 已安装的 {item['label']} 请通过 uninstall.sh 移除"
+                        continue
                     selected.remove(item["id"])
                 else:
                     selected.add(item["id"])
@@ -441,7 +467,194 @@ def _select_platforms(
     return _prompt_for_platforms(options, input_stream=input_stream, output_stream=output_stream), options
 
 
+def _installed_selection(target: Path) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Read the current selection only after the managed-root integrity gate passed."""
+
+    lock = load(target / ".agent-skills" / "install-lock.json")
+    return (
+        tuple(lock["selected_platforms"]),
+        tuple(lock["selected_disciplines"]),
+        tuple(lock["selected_runtime_configs"]),
+    )
+
+
+def _upgrade_platform_selection(
+    args: argparse.Namespace,
+    target: Path,
+    options: list[dict[str, Any]],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Keep the installed selection unless --platform explicitly adds ready platforms.
+
+    ``install.sh --platform desktop`` therefore adds Desktop to an existing Apple
+    installation. Platform removal intentionally remains owned by uninstall.sh.
+    """
+
+    installed_platforms, installed_disciplines, installed_runtime_configs = _installed_selection(target)
+    requested = list(getattr(args, "platform", []) or [])
+    if not requested:
+        if not args.json and sys.stdin.isatty() and sys.stdout.isatty():
+            platforms = _prompt_for_platforms(
+                options,
+                input_stream=sys.stdin,
+                output_stream=sys.stdout,
+                initial_selected=installed_platforms,
+                locked_selected=installed_platforms,
+            )
+            return platforms, installed_disciplines, installed_runtime_configs
+        return installed_platforms, installed_disciplines, installed_runtime_configs
+    additions = _validated_platform_selection(requested, options)
+    platforms = tuple(sorted(set(installed_platforms) | set(additions)))
+    runtime_configs = set(installed_runtime_configs)
+    if "apple" in platforms:
+        runtime_configs.add("codex")
+    return platforms, installed_disciplines, tuple(sorted(runtime_configs))
+
+
+def _legacy_platform_selection(
+    args: argparse.Namespace,
+    installed_platforms: tuple[str, ...],
+    options: list[dict[str, Any]],
+) -> tuple[str, ...]:
+    requested = list(getattr(args, "platform", []) or [])
+    if requested:
+        additions = _validated_platform_selection(requested, options)
+        return tuple(sorted(set(installed_platforms) | set(additions)))
+    if not args.json and sys.stdin.isatty() and sys.stdout.isatty():
+        return _prompt_for_platforms(
+            options,
+            input_stream=sys.stdin,
+            output_stream=sys.stdout,
+            initial_selected=installed_platforms,
+            locked_selected=installed_platforms,
+        )
+    return installed_platforms
+
+
+def _source_upgrade_context(target: Path, platforms: tuple[str, ...], runtime_configs: tuple[str, ...]):
+    activation_lock = target / ".agent-skills" / "activation-lock.json"
+    if not activation_lock.exists():
+        return (), "none", None
+    if activation_lock.is_symlink() or not activation_lock.is_file():
+        raise ContractError("source activation lock is missing or unsafe")
+    if "apple" in platforms and "codex" in runtime_configs:
+        return activation_external_paths(target), ACTIVATION_HANDLER_ID, activation_handler_sha256()
+    return deactivation_external_paths(target), DEACTIVATION_HANDLER_ID, activation_handler_sha256()
+
+
+def _upgrade_report(operation: Any, result: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
+    plan = operation.plan
+    return {
+        "engine": _install_engine(),
+        "schema_version": "1.0",
+        "status": "planned" if dry_run else result["status"],
+        "operation": "upgrade",
+        "target_root": plan["target_root"],
+        "selected_platforms": plan["selection"]["platforms"],
+        "selected_runtime_configs": plan["selection"]["runtime_configs"],
+        "selected_packages": [item["id"] for item in operation.candidate.bundle.plan["selected_packages"]],
+        "skill_count": len(operation.candidate.bundle.plan["skills"]),
+        "changes": plan["changes"],
+        "approvals_required": plan["approvals_required"],
+        "rollback": plan["rollback"],
+        "plan_fingerprint": plan["fingerprint"],
+        "post_install_smoke": "performed by the guarded upgrade transaction" if not dry_run else "performed when applied",
+    }
+
+
+def _no_change_upgrade_report(
+    target: Path,
+    candidate: Any,
+    platforms: tuple[str, ...],
+    runtime_configs: tuple[str, ...],
+    *,
+    dry_run: bool,
+) -> dict[str, Any]:
+    return {
+        "engine": _install_engine(),
+        "schema_version": "1.0",
+        "status": "planned" if dry_run else "no-change",
+        "operation": "upgrade",
+        "target_root": str(target),
+        "selected_platforms": list(platforms),
+        "selected_runtime_configs": list(runtime_configs),
+        "selected_packages": [item["id"] for item in candidate.bundle.plan["selected_packages"]],
+        "skill_count": len(candidate.bundle.plan["skills"]),
+        "changes": {"status": "unchanged"},
+        "approvals_required": [],
+        "rollback": None,
+        "plan_fingerprint": None,
+        "post_install_smoke": "not needed; managed content is already current",
+    }
+
+
+def _run_managed_upgrade(
+    args: argparse.Namespace,
+    target: Path,
+    options: list[dict[str, Any]],
+) -> dict[str, Any]:
+    platforms, disciplines, runtime_configs = _upgrade_platform_selection(args, target, options)
+    candidate = prepare_upgrade_candidate(
+        ROOT / "platforms",
+        target,
+        platforms=platforms,
+        disciplines=disciplines,
+        runtime_configs=runtime_configs,
+        core_only=False,
+    )
+    current_lock = load(target / ".agent-skills" / "agent-skills.lock")
+    if candidate.bundle.package_lock["fingerprint"] == current_lock["fingerprint"]:
+        return _no_change_upgrade_report(
+            target,
+            candidate,
+            platforms,
+            runtime_configs,
+            dry_run=args.dry_run,
+        )
+    evidence = run_upgrade_conformance(ROOT / "platforms", candidate.bundle.package_lock)
+    external_paths, external_handler, external_handler_sha256 = _source_upgrade_context(
+        target,
+        platforms,
+        runtime_configs,
+    )
+    operation = plan_upgrade(
+        ROOT / "platforms",
+        target,
+        evidence,
+        schema_root=ROOT / "schemas",
+        platforms=platforms,
+        disciplines=disciplines,
+        runtime_configs=runtime_configs,
+        core_only=False,
+        external_paths=external_paths,
+        external_handler=external_handler,
+        external_handler_sha256=external_handler_sha256,
+    )
+    if args.dry_run:
+        return _upgrade_report(operation, {"status": "planned"}, dry_run=True)
+    result = apply_upgrade(
+        operation,
+        target,
+        approve_plan=operation.plan["fingerprint"],
+        approvals=operation.plan["approvals_required"],
+    )
+    return _upgrade_report(operation, result, dry_run=False)
+
+
 def _human_report(report: dict[str, Any], *, color: bool) -> str:
+    if report.get("operation") == "upgrade":
+        planned = report["status"] == "planned"
+        marker = _styled("◇", ANSI_CYAN, ANSI_BOLD, enabled=color) if planned else _styled(
+            "✓", ANSI_GREEN, ANSI_BOLD, enabled=color
+        )
+        title = "安装更新预览" if planned else "安装更新完成"
+        changes = report["changes"]
+        lines = [f"{marker} {_styled(title, ANSI_BOLD, enabled=color)}", ""]
+        lines.append("  平台：" + ("、".join(report["selected_platforms"]) or "Core"))
+        lines.append("  变更：" + ("无" if changes["status"] == "unchanged" else "将事务性更新受管内容"))
+        lines.append("  回滚点：" + ("不创建（无变更）" if changes["status"] == "unchanged" else "已规划"))
+        if planned:
+            lines.extend(["", "未写入任何文件；移除 --dry-run 后执行更新。"])
+        return "\n".join(lines) + "\n"
     planned = report["status"] == "planned"
     marker = _styled("◇", ANSI_CYAN, ANSI_BOLD, enabled=color) if planned else _styled(
         "✓", ANSI_GREEN, ANSI_BOLD, enabled=color
@@ -845,14 +1058,48 @@ def parse_args() -> argparse.Namespace:
 def run(args: argparse.Namespace | None = None) -> dict[str, Any]:
     if args is None:
         args = parse_args()
-    selected_platforms, platform_options = _select_platforms(args)
-    apple_selected = "apple" in selected_platforms
     raw_target = Path(args.target_root).expanduser()
     if raw_target.is_symlink():
         raise ContractError(f"install target must not be a symlink: {raw_target}")
     target = raw_target.resolve()
     if target.exists() and not target.is_dir():
         raise ContractError(f"install target must be a directory: {target}")
+    platform_options = _platform_inventory()
+    has_managed_metadata = target.exists() and _path_exists(target / ".agent-skills")
+    legacy_activation_repair = False
+    valid_activation_lock = False
+    if has_managed_metadata and _path_exists(target / ACTIVATION_LOCK):
+        valid_activation_lock = _validate_activation_lock(target)
+        activation_lock = load(target / ACTIVATION_LOCK)
+        activation_paths = {item["path"] for item in activation_lock["files"]}
+        legacy_activation_repair = "bin/agent-session" not in activation_paths
+    managed_install = target.exists() and _is_managed_install(target)
+    persistent_package_lock = target / ".agent-skills" / "agent-skills.lock"
+    if managed_install and persistent_package_lock.is_file() and not legacy_activation_repair:
+        return _run_managed_upgrade(args, target, platform_options)
+    # A pre-agent-session Apple activation lock is a supported legacy managed
+    # shape. Let the existing repair path refresh that exact legacy projection;
+    # every other damaged managed root remains fail-closed.
+    if has_managed_metadata:
+        legacy_install_lock = load(target / ".agent-skills" / "install-lock.json")
+        if "apple" in legacy_install_lock.get("selected_platforms", []):
+            if valid_activation_lock:
+                pass
+            else:
+                raise ContractError("refusing to overwrite incomplete or modified managed installation")
+        else:
+            raise ContractError("refusing to overwrite incomplete or modified managed installation")
+
+    if managed_install:
+        # Legacy source installs predate the persistent package Lock required
+        # by the guarded upgrade API. Rebuild once through the regular
+        # transaction, preserving their current platform selection and any
+        # separately managed Skill roots; subsequent runs use upgrade above.
+        installed_platforms, _, _ = _installed_selection(target)
+        selected_platforms = _legacy_platform_selection(args, installed_platforms, platform_options)
+    else:
+        selected_platforms, platform_options = _select_platforms(args)
+    apple_selected = "apple" in selected_platforms
     if not args.dry_run:
         target.mkdir(parents=True, exist_ok=True)
 

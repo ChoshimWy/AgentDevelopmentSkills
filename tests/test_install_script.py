@@ -468,11 +468,11 @@ class InstallScriptTests(unittest.TestCase):
             self.assertIn("Plan / Review / Final：ready / passed / completed", first.stdout)
             multi_platform_report = {**second, "selected_platforms": ["apple", "web"]}
             self.assertIn(
-                "Apple / iOS、Web 平台安装完成",
+                "平台：apple、web",
                 load_installer_module()._human_report(multi_platform_report, color=False),
             )
-            self.assertEqual(second["activation"]["managed_file_updates"], [])
-            self.assertEqual(len(second["activation"]["managed_files_unchanged"]), 13)
+            self.assertEqual(second["status"], "no-change")
+            self.assertEqual(second["changes"]["status"], "unchanged")
             activation_lock = json.loads(
                 (target / ".agent-skills" / "activation-lock.json").read_text(encoding="utf-8")
             )
@@ -560,8 +560,8 @@ class InstallScriptTests(unittest.TestCase):
             metadata_preview = json.loads(self.run_install(target, "--dry-run").stdout)
             self.assertEqual(metadata_preview["status"], "planned")
             metadata_reinstall = json.loads(self.run_install(target).stdout)
-            self.assertEqual(metadata_reinstall["status"], "installed")
-            self.assertFalse((target / "skills" / ".DS_Store").exists())
+            self.assertEqual(metadata_reinstall["status"], "no-change")
+            self.assertTrue((target / "skills" / ".DS_Store").exists())
 
     def test_desktop_install_has_no_apple_activation_side_effects(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -616,7 +616,7 @@ class InstallScriptTests(unittest.TestCase):
             self.assertFalse((root / "home" / ".agent-skills-backups").exists())
 
             reinstalled = json.loads(self.run_install(target).stdout)
-            self.assertEqual(reinstalled["status"], "installed")
+            self.assertEqual(reinstalled["status"], "no-change")
             self.assertTrue((target / "skills" / ".system" / "openai-docs" / "SKILL.md").is_file())
 
     def test_unknown_unmanaged_roots_are_rejected_without_changes(self) -> None:
@@ -752,7 +752,7 @@ class InstallScriptTests(unittest.TestCase):
                 self.assertFalse(module._path_exists(target / name))
             self.assertFalse((target / ".agent-skills-backups").exists())
 
-    def test_managed_reinstall_activation_failure_restores_previous_managed_roots(self) -> None:
+    def test_managed_reinstall_is_a_no_change_update(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / ".codex"
             self.run_install(target)
@@ -764,19 +764,67 @@ class InstallScriptTests(unittest.TestCase):
             }
 
             with mock.patch.object(module, "parse_args", return_value=arguments):
-                with mock.patch.object(
-                    module,
-                    "_activate",
-                    side_effect=OSError("injected activation failure"),
-                ):
-                    with self.assertRaisesRegex(OSError, "injected activation failure"):
-                        module.run()
+                result = module.run()
 
+            self.assertEqual(result["status"], "no-change")
             self.assertEqual(
                 {name: (target / name).stat().st_ino for name in module.MANAGED_ROOTS},
                 original_inodes,
             )
             self.assertTrue(module._validate_activation_lock(target))
+
+    def test_existing_install_adds_a_platform_through_install_script(self) -> None:
+        from agent_workflow.upgrade import make_upgrade_conformance_evidence
+
+        def evidence(package_lock):
+            return make_upgrade_conformance_evidence(
+                package_lock,
+                manifest_count=1,
+                negative_contract_count=1,
+                test_count=1,
+                suite_definition_hash="1" * 64,
+                runner_sha256="2" * 64,
+                environment={"platform": "test", "python": "3.14.0"},
+                command_results=[{
+                    "command": "test",
+                    "exit_code": 0,
+                    "stdout_sha256": "3" * 64,
+                    "stderr_sha256": "4" * 64,
+                }],
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".codex"
+            self.run_install(target)
+            module = load_installer_module()
+            arguments = SimpleNamespace(
+                target_root=str(target), dry_run=False, platform=["desktop"], json=True
+            )
+
+            with mock.patch.object(module, "run_upgrade_conformance", side_effect=lambda _, lock: evidence(lock)):
+                result = module.run(arguments)
+
+            self.assertEqual(result["status"], "upgraded")
+            self.assertEqual(result["selected_platforms"], ["apple", "desktop"])
+
+    def test_legacy_managed_install_preserves_user_skill_roots_when_migrating(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".codex"
+            self.run_install(target)
+            # Older installations did not have the persistent Package Lock.
+            # A normal install.sh invocation must migrate them rather than
+            # treating separately managed Skills as an overwrite conflict.
+            (target / ".agent-skills" / "agent-skills.lock").unlink()
+            user_skill = target / "skills" / "local-user-skill" / "SKILL.md"
+            user_skill.parent.mkdir()
+            user_skill.write_text("user-owned\n", encoding="utf-8")
+
+            result = json.loads(self.run_install(target).stdout)
+
+            self.assertEqual(result["status"], "installed")
+            self.assertEqual(result["selected_platforms"], ["apple"])
+            self.assertEqual(user_skill.read_text(encoding="utf-8"), "user-owned\n")
+            self.assertTrue((target / ".agent-skills" / "agent-skills.lock").is_file())
 
 
 if __name__ == "__main__":

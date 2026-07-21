@@ -1109,10 +1109,16 @@ def _is_managed_install(target_root: Path) -> bool:
             files, directories = _snapshot_tree(directory, ignore_os_metadata=True)
             if not _tree_matches_record(files, directories, item, digest_field="files_sha256"):
                 return False
+        expected_names = {item["name"] for item in lock["skills"]}
+        # Codex users commonly keep independently managed Skills alongside
+        # AgentDevelopmentSkills. A regular unknown root is not evidence that
+        # our managed projection was modified; it is preserved verbatim during
+        # the next transaction. Files and symlinks at this level remain
+        # fail-closed, and every expected managed Skill is still hash checked.
         external_names = {
             item.name
             for item in skills_root.iterdir()
-            if item.name in EXTERNAL_SKILL_ROOTS
+            if item.name not in expected_names
             and item.is_dir()
             and not item.is_symlink()
         }
@@ -1126,7 +1132,7 @@ def _is_managed_install(target_root: Path) -> bool:
             for item in skills_root.iterdir()
             if item.name not in external_names and item.name not in metadata_names
         )
-        expected_names = sorted(item["name"] for item in lock["skills"])
+        expected_names = sorted(expected_names)
         if installed_names != expected_names:
             return False
         for item in lock["skills"]:
@@ -1932,11 +1938,15 @@ def install_bundle(
                     root_mode=skill_record["root_mode"],
                 )
         existing_skills = target / "skills"
-        for name in EXTERNAL_SKILL_ROOTS:
-            source = existing_skills / name
+        managed_skill_names = {item["name"] for item in result["skills"]}
+        existing_skill_roots = existing_skills.iterdir() if existing_skills.is_dir() else ()
+        for source in existing_skill_roots:
+            if source.name in managed_skill_names or _is_ignored_os_metadata(source):
+                continue
             if source.is_dir() and not source.is_symlink():
-                # `.system` 由 Codex 自身维护，不进入本仓 Lock；更新受管 Skills 时原样保留。
-                shutil.copytree(source, stage / "skills" / name, symlinks=True)
+                # `.system` and user-managed Skills do not enter this Lock;
+                # retain their complete roots while replacing only our Skills.
+                shutil.copytree(source, stage / "skills" / source.name, symlinks=True)
         activation_lock = target / ".agent-skills" / EXTERNAL_ACTIVATION_LOCK
         if activation_lock.is_file() and not activation_lock.is_symlink():
             shutil.copyfile(

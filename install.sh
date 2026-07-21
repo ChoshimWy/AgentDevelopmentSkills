@@ -700,6 +700,14 @@ if parse_native_request "$@"; then
 fi
 
 if [[ -n "$SOURCE_CHECKOUT_ROOT" ]]; then
+    # A managed target is an update operation, even when the user re-runs the
+    # familiar install.sh command. Route that source-checkout UX through the
+    # guarded lifecycle implementation rather than the fresh-only native
+    # installer. The Rust binary remains the production release engine.
+    if [[ "$REQUESTED_ENGINE" != "rust" && -e "$NATIVE_TARGET_ROOT/.agent-skills" ]]; then
+        resolve_selected_python
+        exec "$PYTHON_BIN" "$SOURCE_CHECKOUT_ROOT/scripts/install_local.py" "$@"
+    fi
     if [[ "$REQUESTED_ENGINE" != "python" && "$NATIVE_REQUEST_ELIGIBLE" == "1" ]] \
         && command -v cargo >/dev/null 2>&1; then
         run_source_native_install "$SOURCE_CHECKOUT_ROOT"
