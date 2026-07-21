@@ -103,6 +103,8 @@ NATIVE_ARGUMENTS=()
 NATIVE_ARGUMENTS_PRESENT=0
 NATIVE_DRY_RUN=0
 NATIVE_JSON=0
+NATIVE_PLATFORM_COUNT=0
+NATIVE_PLATFORM_ALL=0
 
 validate_uninstall_target_arguments() {
     local argument value target_root_seen=0
@@ -160,6 +162,8 @@ parse_native_request() {
                 [[ -n "$2" ]] || return 1
                 NATIVE_ARGUMENTS+=(--platform "$2")
                 NATIVE_ARGUMENTS_PRESENT=1
+                ((NATIVE_PLATFORM_COUNT += 1))
+                [[ "$2" == "all" ]] && NATIVE_PLATFORM_ALL=1
                 shift 2
                 ;;
             --platform=*)
@@ -167,6 +171,8 @@ parse_native_request() {
                 [[ -n "$argument" ]] || return 1
                 NATIVE_ARGUMENTS+=(--platform "$argument")
                 NATIVE_ARGUMENTS_PRESENT=1
+                ((NATIVE_PLATFORM_COUNT += 1))
+                [[ "$argument" == "all" ]] && NATIVE_PLATFORM_ALL=1
                 shift
                 ;;
             --dry-run)
@@ -191,6 +197,11 @@ parse_native_request() {
         NATIVE_ARGUMENTS+=(--json)
         NATIVE_ARGUMENTS_PRESENT=1
     fi
+}
+
+native_full_uninstall_request() {
+    ((NATIVE_PLATFORM_COUNT == 0)) || \
+        ((NATIVE_PLATFORM_COUNT == 1 && NATIVE_PLATFORM_ALL == 1))
 }
 
 gnu_libc_is_compatible() {
@@ -360,14 +371,11 @@ if parse_native_request "$@"; then
 fi
 
 if [[ -n "$SOURCE_CHECKOUT_ROOT" ]]; then
-    # Source checkout users keep a two-command public interface: uninstall.sh
-    # owns both whole-install removal and platform removal. The Python route
-    # performs the latter as a guarded lifecycle transaction.
-    if [[ "$REQUESTED_ENGINE" != "rust" && -e "$NATIVE_TARGET_ROOT/.agent-skills" ]]; then
-        resolve_selected_python
-        exec "$PYTHON_BIN" "$SOURCE_CHECKOUT_ROOT/scripts/uninstall_local.py" "$@"
-    fi
+    # Native lifecycle currently owns only exact full removal. A partial
+    # platform removal must remain on the approval-bound Python upgrade path
+    # until its public Rust command route is promoted.
     if [[ "$REQUESTED_ENGINE" != "python" && "$NATIVE_REQUEST_ELIGIBLE" == "1" ]] \
+        && { [[ "$REQUESTED_ENGINE" == "rust" ]] || native_full_uninstall_request; } \
         && resolve_native_cargo >/dev/null; then
         run_source_native_uninstall "$SOURCE_CHECKOUT_ROOT"
         exit $?

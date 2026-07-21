@@ -258,6 +258,48 @@ class UninstallScriptTests(unittest.TestCase):
             self.assertEqual(result["operation"], "partial-uninstall")
             self.assertEqual(result["remaining_platforms"], ["apple"])
 
+    def test_shell_auto_partial_platform_uninstall_routes_to_python(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".codex"
+            installed = subprocess.run(
+                [
+                    str(INSTALL),
+                    "--target-root",
+                    str(target),
+                    "--platform",
+                    "all",
+                    "--json",
+                ],
+                cwd=ROOT,
+                env={**os.environ, "AGENT_SKILLS_INSTALL_ENGINE": "python"},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            completed = subprocess.run(
+                [
+                    str(UNINSTALL),
+                    "--target-root",
+                    str(target),
+                    "--platform",
+                    "desktop",
+                    "--dry-run",
+                    "--json",
+                ],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "AGENT_SKILLS_UNINSTALL_ENGINE": "auto",
+                    "AGENT_SKILLS_PYTHON": "/definitely/missing/python",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("AGENT_SKILLS_PYTHON must point", completed.stderr)
+
     def test_incomplete_activation_lock_is_rejected_without_removal(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / ".codex"

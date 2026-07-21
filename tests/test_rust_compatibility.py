@@ -775,6 +775,51 @@ class RustCompatibilityTests(unittest.TestCase):
             )
 
     @unittest.skipIf(os.name == "nt", "source uninstaller is POSIX-only")
+    def test_source_checkout_uninstall_defaults_to_rust_without_python(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="agent-skills-native-source-uninstall-default-"
+        ) as directory:
+            target = Path(directory).resolve() / "target"
+            installed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/install_local.py"),
+                    "--target-root",
+                    str(target),
+                    "--platform",
+                    "desktop",
+                    "--json",
+                ],
+                cwd=ROOT,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            completed = subprocess.run(
+                [
+                    "/bin/bash",
+                    str(ROOT / "uninstall.sh"),
+                    "--target-root",
+                    str(target),
+                    "--platform",
+                    "all",
+                    "--json",
+                    "--dry-run",
+                ],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "AGENT_SKILLS_PYTHON": "/definitely/missing/python",
+                },
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(json.loads(completed.stdout)["status"], "planned")
+
+    @unittest.skipIf(os.name == "nt", "source uninstaller is POSIX-only")
     def test_source_checkout_uninstall_resolves_rustup_when_cargo_proxy_is_hidden(self) -> None:
         with tempfile.TemporaryDirectory(
             prefix="agent-skills-rustup-source-uninstall-"
