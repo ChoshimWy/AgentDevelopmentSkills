@@ -1154,9 +1154,26 @@ def _preflight_install(target: Path) -> None:
         raise ContractError(f"install target must be a directory: {target}")
     occupied = [name for name in MANAGED_ROOTS if _path_exists(target / name)]
     if occupied and not _is_managed_install(target):
+        # uninstall.sh deliberately preserves Codex `.system` and user-owned
+        # Skill directories. A subsequent fresh install must be able to reuse
+        # that skills-only root without treating preserved content as a hostile
+        # partial installation.
+        if occupied == ["skills"] and _has_preservable_skill_roots(target / "skills"):
+            return
         raise ContractError(
             "refusing to overwrite unmanaged or modified install roots: " + ", ".join(occupied)
         )
+
+
+def _has_preservable_skill_roots(skills_root: Path) -> bool:
+    if skills_root.is_symlink() or not skills_root.is_dir():
+        return False
+    for item in skills_root.iterdir():
+        if _is_ignored_os_metadata(item):
+            continue
+        if item.is_symlink() or not item.is_dir():
+            return False
+    return True
 
 
 def _tree_matches_record(

@@ -826,6 +826,23 @@ class InstallScriptTests(unittest.TestCase):
             self.assertEqual(user_skill.read_text(encoding="utf-8"), "user-owned\n")
             self.assertTrue((target / ".agent-skills" / "agent-skills.lock").is_file())
 
+    def test_fresh_install_reuses_skills_preserved_by_uninstall(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".codex"
+            system_skill = target / "skills" / ".system" / "openai-docs" / "SKILL.md"
+            user_skill = target / "skills" / "local-user-skill" / "SKILL.md"
+            system_skill.parent.mkdir(parents=True)
+            user_skill.parent.mkdir(parents=True)
+            system_skill.write_text("system\n", encoding="utf-8")
+            user_skill.write_text("user\n", encoding="utf-8")
+
+            result = json.loads(self.run_install(target).stdout)
+
+            self.assertEqual(result["status"], "installed")
+            self.assertTrue(result["preserved_system_skills"])
+            self.assertEqual(system_skill.read_text(encoding="utf-8"), "system\n")
+            self.assertEqual(user_skill.read_text(encoding="utf-8"), "user\n")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -704,7 +704,8 @@ if [[ -n "$SOURCE_CHECKOUT_ROOT" ]]; then
     # familiar install.sh command. Route that source-checkout UX through the
     # guarded lifecycle implementation rather than the fresh-only native
     # installer. The Rust binary remains the production release engine.
-    if [[ "$REQUESTED_ENGINE" != "rust" && -e "$NATIVE_TARGET_ROOT/.agent-skills" ]]; then
+    if [[ "$REQUESTED_ENGINE" != "rust" && ( -e "$NATIVE_TARGET_ROOT/.agent-skills" \
+        || -e "$NATIVE_TARGET_ROOT/skills" || -e "$NATIVE_TARGET_ROOT/AGENTS.md" ) ]]; then
         resolve_selected_python
         exec "$PYTHON_BIN" "$SOURCE_CHECKOUT_ROOT/scripts/install_local.py" "$@"
     fi

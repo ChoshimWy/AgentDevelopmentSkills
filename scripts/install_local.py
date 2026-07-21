@@ -46,6 +46,7 @@ from agent_workflow.installation import (  # noqa: E402
     MANAGED_DIRECTORY_MODE,
     MANAGED_FILE_MODE,
     MANAGED_ROOTS,
+    _has_preservable_skill_roots,
     _is_managed_install,
     build_install_bundle,
     install_bundle,
@@ -765,6 +766,8 @@ def _classify_legacy(target: Path) -> dict[str, str]:
         return {}
     if (target / ".agent-skills" / "install-lock.json").is_file():
         return {}
+    if occupied == ["skills"] and _has_preservable_skill_roots(target / "skills"):
+        return {}
     if set(occupied) != {"AGENTS.md", "skills"}:
         raise ContractError(
             "refusing to replace incomplete or unknown unmanaged install roots: "
@@ -1146,7 +1149,13 @@ def run(args: argparse.Namespace | None = None) -> dict[str, Any]:
             config_candidate = b""
 
         def complete_install(installed_target: Path, _: dict[str, Any]) -> None:
-            post_install["preserved_system_skills"] = _copy_legacy_system_skills(installed_target, legacy_links) if apple_selected else False
+            if apple_selected:
+                copied_legacy_system = _copy_legacy_system_skills(installed_target, legacy_links)
+                post_install["preserved_system_skills"] = (
+                    copied_legacy_system or (installed_target / "skills" / ".system").is_dir()
+                )
+            else:
+                post_install["preserved_system_skills"] = False
             post_install["smoke"] = _run_target_smoke(installed_target, selected_platforms)
             post_install["activation"] = _activate(installed_target, config_candidate) if apple_selected else _empty_activation_plan()
 
