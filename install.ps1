@@ -6,6 +6,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# BEGIN agent-skills embedded release metadata
+$script:AgentSkillsEmbeddedVersion = ""
+$script:AgentSkillsEmbeddedAssetBaseUrl = ""
+$script:AgentSkillsEmbeddedNativeArtifacts = @()
+# END agent-skills embedded release metadata
+
 $RequestedEngine = if ($env:AGENT_SKILLS_INSTALL_ENGINE) {
     $env:AGENT_SKILLS_INSTALL_ENGINE
 } else {
@@ -141,6 +147,124 @@ function Test-AgentSkillsNativeRequest {
         return $false
     }
     return Test-AgentSkillsFreshTarget -TargetRoot $script:AgentSkillsNativeTarget
+}
+
+function Get-AgentSkillsNativeHostTarget {
+    $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    switch ($architecture) {
+        "X64" { return "x86_64-pc-windows-msvc" }
+        "Arm64" { return "aarch64-pc-windows-msvc" }
+        default { return $null }
+    }
+}
+
+function Test-AgentSkillsNativeUpgradeRequest {
+    param([string[]]$Arguments)
+
+    $script:AgentSkillsNativeUpgradeTarget = Get-AgentSkillsDefaultTarget
+    $script:AgentSkillsNativeUpgradeDryRun = $false
+    $script:AgentSkillsNativeUpgradeOutput = $null
+    $script:AgentSkillsNativeUpgradePlan = $null
+    $script:AgentSkillsNativeUpgradeApproval = $null
+    $script:AgentSkillsNativeUpgradeApprovals = [System.Collections.Generic.List[string]]::new()
+    $upgradeSeen = $false
+    $targetSeen = $false
+
+    for ($index = 0; $index -lt $Arguments.Count; $index++) {
+        $argument = $Arguments[$index]
+        if ($argument -eq "--upgrade") {
+            if ($upgradeSeen) { return $false }
+            $upgradeSeen = $true
+            continue
+        }
+        if ($argument -eq "--dry-run") {
+            if ($script:AgentSkillsNativeUpgradeDryRun) { return $false }
+            $script:AgentSkillsNativeUpgradeDryRun = $true
+            continue
+        }
+        $name = $argument
+        $value = $null
+        if ($argument -match "^(--target-root|--output|--plan|--approve-plan|--approve)=(.*)$") {
+            $name = $Matches[1]
+            $value = $Matches[2]
+        } elseif ($argument -in @("--target-root", "--output", "--plan", "--approve-plan", "--approve")) {
+            $index++
+            if ($index -ge $Arguments.Count) { return $false }
+            $value = $Arguments[$index]
+        } else {
+            return $false
+        }
+        if ([string]::IsNullOrEmpty($value)) { return $false }
+        switch ($name) {
+            "--target-root" {
+                if ($targetSeen) { return $false }
+                $targetSeen = $true
+                $script:AgentSkillsNativeUpgradeTarget = $value
+            }
+            "--output" {
+                if ($null -ne $script:AgentSkillsNativeUpgradeOutput) { return $false }
+                $script:AgentSkillsNativeUpgradeOutput = $value
+            }
+            "--plan" {
+                if ($null -ne $script:AgentSkillsNativeUpgradePlan) { return $false }
+                $script:AgentSkillsNativeUpgradePlan = $value
+            }
+            "--approve-plan" {
+                if ($null -ne $script:AgentSkillsNativeUpgradeApproval) { return $false }
+                $script:AgentSkillsNativeUpgradeApproval = $value
+            }
+            "--approve" { $script:AgentSkillsNativeUpgradeApprovals.Add($value) }
+        }
+    }
+    if (-not $upgradeSeen -or [string]::IsNullOrEmpty($script:AgentSkillsNativeUpgradeTarget) -or
+        $script:AgentSkillsNativeUpgradeTarget.StartsWith("~", [StringComparison]::Ordinal)) {
+        return $false
+    }
+    try {
+        $target = Get-Item -LiteralPath $script:AgentSkillsNativeUpgradeTarget -Force -ErrorAction Stop
+        if (-not $target.PSIsContainer -or ($target.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            return $false
+        }
+    } catch {
+        return $false
+    }
+    if ($script:AgentSkillsNativeUpgradeDryRun) {
+        return ($null -eq $script:AgentSkillsNativeUpgradePlan -and
+            $null -eq $script:AgentSkillsNativeUpgradeApproval -and
+            $script:AgentSkillsNativeUpgradeApprovals.Count -eq 0)
+    }
+    if ($null -ne $script:AgentSkillsNativeUpgradeOutput -or
+        [string]::IsNullOrEmpty($script:AgentSkillsNativeUpgradePlan) -or
+        [string]::IsNullOrEmpty($script:AgentSkillsNativeUpgradeApproval) -or
+        $script:AgentSkillsNativeUpgradeApproval -notmatch "^[0-9a-f]{64}$") {
+        return $false
+    }
+    try {
+        $plan = Get-Item -LiteralPath $script:AgentSkillsNativeUpgradePlan -Force -ErrorAction Stop
+        return (-not $plan.PSIsContainer -and -not ($plan.Attributes -band [IO.FileAttributes]::ReparsePoint))
+    } catch {
+        return $false
+    }
+}
+
+function Find-AgentSkillsEmbeddedNativeArtifact {
+    param([Parameter(Mandatory = $true)][string]$Target)
+
+    if ($script:AgentSkillsEmbeddedAssetBaseUrl -notmatch "^https://" -or
+        [string]::IsNullOrEmpty($script:AgentSkillsEmbeddedVersion)) {
+        return $null
+    }
+    $matches = @($script:AgentSkillsEmbeddedNativeArtifacts | Where-Object { $_.Target -eq $Target })
+    if ($matches.Count -ne 1) { return $null }
+    $record = $matches[0]
+    if ([string]$record.Filename -notmatch "^[A-Za-z0-9._-]+$" -or
+        [string]$record.Sha256 -notmatch "^[0-9a-f]{64}$" -or
+        $record.Size -is [bool]) {
+        return $null
+    }
+    try { [long]$size = $record.Size } catch { return $null }
+    if ($size -le 0 -or [double]$record.Size -ne [double]$size) { return $null }
+    return $record
 }
 
 function Resolve-AgentSkillsCargo {
@@ -397,6 +521,74 @@ function Get-AgentSkillsAssetBaseUrl {
     return $uri.AbsoluteUri
 }
 
+function Invoke-AgentSkillsHostedNativeUpgrade {
+    $target = Get-AgentSkillsNativeHostTarget
+    if (-not $target) {
+        throw "the signed release has no supported native upgrade artifact for this Windows host"
+    }
+    $record = Find-AgentSkillsEmbeddedNativeArtifact -Target $target
+    if (-not $record) {
+        throw "the signed release has no supported native upgrade artifact for this Windows host"
+    }
+    $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("agent-skills-native-upgrade-" + [guid]::NewGuid())
+    New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+    try {
+        $nativeExecutable = Join-Path $temporaryRoot ([string]$record.Filename)
+        $null = Invoke-AgentSkillsHttpsDownload `
+            -Uri ($script:AgentSkillsEmbeddedAssetBaseUrl + [string]$record.Filename) `
+            -Destination $nativeExecutable `
+            -MaximumBytes ([long]$record.Size)
+        $native = Get-Item -LiteralPath $nativeExecutable -Force -ErrorAction Stop
+        $digest = (Get-FileHash -LiteralPath $nativeExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($native.PSIsContainer -or ($native.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $native.Length -ne [long]$record.Size -or $digest -ne [string]$record.Sha256) {
+            throw "downloaded native upgrade executable does not match the signed release allowlist"
+        }
+        $nativeArguments = [System.Collections.Generic.List[string]]::new()
+        $nativeArguments.Add("hosted-upgrade")
+        $nativeArguments.Add("--target-root")
+        $nativeArguments.Add($script:AgentSkillsNativeUpgradeTarget)
+        if ($script:AgentSkillsNativeUpgradeDryRun) {
+            $nativeArguments.Add("--dry-run")
+            if ($null -ne $script:AgentSkillsNativeUpgradeOutput) {
+                $nativeArguments.Add("--output")
+                $nativeArguments.Add($script:AgentSkillsNativeUpgradeOutput)
+            }
+        } else {
+            $nativeArguments.Add("--plan")
+            $nativeArguments.Add($script:AgentSkillsNativeUpgradePlan)
+            $nativeArguments.Add("--approve-plan")
+            $nativeArguments.Add($script:AgentSkillsNativeUpgradeApproval)
+            foreach ($approval in $script:AgentSkillsNativeUpgradeApprovals) {
+                $nativeArguments.Add("--approve")
+                $nativeArguments.Add($approval)
+            }
+        }
+        $selectedEngine = Get-Item `
+            -LiteralPath Env:AGENT_SKILLS_INSTALL_ENGINE_SELECTED `
+            -ErrorAction SilentlyContinue
+        try {
+            $env:AGENT_SKILLS_INSTALL_ENGINE_SELECTED = "rust"
+            & $nativeExecutable @nativeArguments
+            $script:AgentSkillsNativeUpgradeExitCode = [int]$LASTEXITCODE
+        } finally {
+            if ($null -ne $selectedEngine) {
+                $env:AGENT_SKILLS_INSTALL_ENGINE_SELECTED = $selectedEngine.Value
+            } else {
+                Remove-Item `
+                    -LiteralPath Env:AGENT_SKILLS_INSTALL_ENGINE_SELECTED `
+                    -ErrorAction SilentlyContinue
+            }
+        }
+    } finally {
+        try {
+            Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction Stop
+        } catch {
+            Write-Warning ("native hosted upgrade temporary directory requires cleanup: " + $temporaryRoot)
+        }
+    }
+}
+
 function Assert-AgentSkillsBootstrap {
     param(
         [Parameter(Mandatory = $true)][string]$ManifestPath,
@@ -431,6 +623,20 @@ function Assert-AgentSkillsBootstrap {
 
 try {
     $localInstaller = if ($PSScriptRoot) { Join-Path $PSScriptRoot "scripts/install_local.py" } else { $null }
+    $nativeUpgradeRequested = @($InstallerArguments | Where-Object { $_ -eq "--upgrade" }).Count -gt 0
+    if ($nativeUpgradeRequested) {
+        if ($localInstaller -and (Test-Path -LiteralPath $localInstaller -PathType Leaf)) {
+            throw "hosted upgrade requires the signed release bootstrap, not a source checkout"
+        }
+        if ($RequestedEngine -eq "python") {
+            throw "hosted upgrade has no Python fallback"
+        }
+        if (-not (Test-AgentSkillsNativeUpgradeRequest -Arguments $InstallerArguments)) {
+            throw "hosted upgrade requires a safe existing target and either --dry-run or the exact --plan and --approve-plan"
+        }
+        Invoke-AgentSkillsHostedNativeUpgrade
+        exit [int]$script:AgentSkillsNativeUpgradeExitCode
+    }
     if ($localInstaller -and (Test-Path -LiteralPath $localInstaller -PathType Leaf)) {
         $sourceRoot = (Get-Item -LiteralPath $PSScriptRoot -Force).FullName
         $nativeEligible = Test-AgentSkillsNativeRequest -Arguments $InstallerArguments
@@ -447,7 +653,7 @@ try {
         exit [int]$script:AgentSkillsPythonExitCode
     }
     if ($RequestedEngine -eq "rust") {
-        throw "forced Rust hosted install is not enabled by the PowerShell bootstrap yet"
+        throw "forced Rust hosted install is not enabled by the PowerShell bootstrap yet; use the signed --upgrade route for an existing installation"
     }
     $python = Resolve-AgentSkillsPython
     $releaseBaseUrl = if ($env:AGENT_SKILLS_RELEASE_BASE_URL) {

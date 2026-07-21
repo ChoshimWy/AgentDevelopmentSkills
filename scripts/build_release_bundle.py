@@ -66,6 +66,8 @@ DEFAULT_HOST_OS = ("darwin", "linux")
 WINDOWS_RELEASE_ENABLED = False
 POSIX_METADATA_BEGIN = "# BEGIN agent-skills embedded release metadata"
 POSIX_METADATA_END = "# END agent-skills embedded release metadata"
+POWERSHELL_METADATA_BEGIN = "# BEGIN agent-skills embedded release metadata"
+POWERSHELL_METADATA_END = "# END agent-skills embedded release metadata"
 
 
 class ReleaseBuildError(RuntimeError):
@@ -162,6 +164,65 @@ def _render_posix_bootstrap(
         "    return 1",
         "}",
         POSIX_METADATA_END,
+    ])
+    rendered = text[:begin] + "\n".join(assignments) + text[end:]
+    return rendered.encode("utf-8")
+
+
+def _powershell_single_quoted(value: str) -> str:
+    """Return one literal that cannot escape a PowerShell single-quoted string."""
+
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _render_powershell_bootstrap(
+    source: bytes,
+    *,
+    asset_base_url: str,
+    native_records: list[dict[str, Any]],
+    version: str,
+) -> bytes:
+    """Freeze the native acquisition allowlist into the PowerShell bootstrap.
+
+    The hosted PowerShell upgrade route must not choose an executable from a
+    mutable release manifest.  The downloaded Rust binary authenticates the
+    full Manifest-v3 envelope itself, but the bootstrap first pins the exact
+    executable bytes it is willing to start.
+    """
+
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ReleaseBuildError("PowerShell bootstrap must be valid UTF-8") from error
+    begin = text.find(POWERSHELL_METADATA_BEGIN)
+    end = text.find(POWERSHELL_METADATA_END)
+    if (
+        begin < 0
+        or end < begin
+        or text.find(POWERSHELL_METADATA_BEGIN, begin + 1) >= 0
+        or text.find(POWERSHELL_METADATA_END, end + 1) >= 0
+    ):
+        raise ReleaseBuildError("PowerShell bootstrap embedded release metadata block is invalid")
+    end += len(POWERSHELL_METADATA_END)
+    assignments = [
+        POWERSHELL_METADATA_BEGIN,
+        f"$script:AgentSkillsEmbeddedVersion = {_powershell_single_quoted(version)}",
+        "$script:AgentSkillsEmbeddedAssetBaseUrl = "
+        + _powershell_single_quoted(asset_base_url),
+        "$script:AgentSkillsEmbeddedNativeArtifacts = @(",
+    ]
+    for record in sorted(native_records, key=lambda item: item["target"]):
+        assignments.append(
+            "    [pscustomobject]@{ "
+            f"Filename = {_powershell_single_quoted(record['filename'])}; "
+            f"Sha256 = {_powershell_single_quoted(record['sha256'])}; "
+            f"Size = {record['size']}; "
+            f"Target = {_powershell_single_quoted(record['target'])} "
+            "}"
+        )
+    assignments.extend([
+        ")",
+        POWERSHELL_METADATA_END,
     ])
     rendered = text[:begin] + "\n".join(assignments) + text[end:]
     return rendered.encode("utf-8")
@@ -406,6 +467,13 @@ def build_release_bundle(
                     data,
                     asset_base_url=asset_base_url,
                     source_artifact=source_artifact,
+                    native_records=native_index["artifacts"],
+                    version=version,
+                )
+            elif relative == "install.ps1" and native_index is not None:
+                data = _render_powershell_bootstrap(
+                    data,
+                    asset_base_url=asset_base_url,
                     native_records=native_index["artifacts"],
                     version=version,
                 )

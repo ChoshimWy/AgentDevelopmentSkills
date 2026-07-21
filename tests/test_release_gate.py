@@ -399,6 +399,7 @@ class ReleaseGateTests(unittest.TestCase):
             )
             rendered_shell = (release / "install.sh").read_text(encoding="utf-8")
             rendered_uninstall = (release / "uninstall.sh").read_text(encoding="utf-8")
+            rendered_powershell = (release / "install.ps1").read_text(encoding="utf-8")
             self.assertNotEqual(
                 rendered_shell,
                 (ROOT / "install.sh").read_text(encoding="utf-8"),
@@ -406,6 +407,10 @@ class ReleaseGateTests(unittest.TestCase):
             self.assertNotEqual(
                 rendered_uninstall,
                 (ROOT / "uninstall.sh").read_text(encoding="utf-8"),
+            )
+            self.assertNotEqual(
+                rendered_powershell,
+                (ROOT / "install.ps1").read_text(encoding="utf-8"),
             )
             self.assertIn(
                 f"AGENT_SKILLS_EMBEDDED_ASSET_BASE_URL={manifest['asset_base_url']}",
@@ -420,6 +425,26 @@ class ReleaseGateTests(unittest.TestCase):
                 self.assertIn(native_record["sha256"], rendered_shell)
                 self.assertIn(native_record["target"], rendered_uninstall)
                 self.assertIn(native_record["sha256"], rendered_uninstall)
+                self.assertIn(native_record["target"], rendered_powershell)
+                self.assertIn(native_record["sha256"], rendered_powershell)
+            self.assertIn(
+                f"$script:AgentSkillsEmbeddedAssetBaseUrl = '{manifest['asset_base_url']}'",
+                rendered_powershell,
+            )
+            native_index = native_contract.load_native_artifacts(
+                release / "native-artifacts.json",
+                release,
+                expected_source_revision=FIXTURE_SOURCE_REVISION,
+                expected_version=manifest["version"],
+            )
+            self.assertEqual(
+                rendered_powershell.encode("utf-8"),
+                gate._expected_powershell_bootstrap(
+                    (ROOT / "install.ps1").read_bytes(),
+                    manifest=manifest,
+                    native_index=native_index,
+                ),
+            )
 
             manifest["native_artifacts"][0]["sha256"] = "9" * 64
             (release / "release-manifest.json").write_bytes(
@@ -935,7 +960,7 @@ class ReleaseGateTests(unittest.TestCase):
                     channel="beta",
                     native_artifacts_dir=native,
                 )
-            bootstrap_path = release / "install.sh"
+            bootstrap_path = release / "install.ps1"
             bootstrap_path.write_bytes(
                 bootstrap_path.read_bytes() + b"\n# unbound native metadata\n"
             )
@@ -946,7 +971,7 @@ class ReleaseGateTests(unittest.TestCase):
             record = next(
                 item
                 for item in manifest["bootstrap_assets"]
-                if item["filename"] == "install.sh"
+                if item["filename"] == "install.ps1"
             )
             record.update({"sha256": digest, "size": len(value)})
             dump(manifest, manifest_path)
@@ -955,7 +980,7 @@ class ReleaseGateTests(unittest.TestCase):
             provenance_record = next(
                 item
                 for item in provenance["artifacts"]
-                if item["filename"] == "install.sh"
+                if item["filename"] == "install.ps1"
             )
             provenance_record.update({"sha256": digest, "size": len(value)})
             provenance["fingerprint"] = sha256({

@@ -73,6 +73,8 @@ _MAX_CANDIDATE_FILE_BYTES = _MAX_SDIST_BYTES
 _RSA_SHA256_DIGEST_INFO_PREFIX = bytes.fromhex("3031300d060960864801650304020105000420")
 _POSIX_METADATA_BEGIN = "# BEGIN agent-skills embedded release metadata"
 _POSIX_METADATA_END = "# END agent-skills embedded release metadata"
+_POWERSHELL_METADATA_BEGIN = "# BEGIN agent-skills embedded release metadata"
+_POWERSHELL_METADATA_END = "# END agent-skills embedded release metadata"
 
 
 def _expected_posix_bootstrap(
@@ -126,6 +128,56 @@ def _expected_posix_bootstrap(
         "    return 1",
         "}",
         _POSIX_METADATA_END,
+    ])
+    return (text[:begin] + "\n".join(expected) + text[end:]).encode("utf-8")
+
+
+def _powershell_single_quoted(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _expected_powershell_bootstrap(
+    source: bytes,
+    *,
+    manifest: dict[str, Any],
+    native_index: dict[str, Any],
+) -> bytes:
+    """Rebuild the immutable PowerShell native-executable allowlist."""
+
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ContractError("source PowerShell bootstrap must be valid UTF-8") from error
+    begin = text.find(_POWERSHELL_METADATA_BEGIN)
+    end = text.find(_POWERSHELL_METADATA_END)
+    if (
+        begin < 0
+        or end < begin
+        or text.find(_POWERSHELL_METADATA_BEGIN, begin + 1) >= 0
+        or text.find(_POWERSHELL_METADATA_END, end + 1) >= 0
+    ):
+        raise ContractError("source PowerShell bootstrap embedded metadata block is invalid")
+    end += len(_POWERSHELL_METADATA_END)
+    expected = [
+        _POWERSHELL_METADATA_BEGIN,
+        "$script:AgentSkillsEmbeddedVersion = "
+        + _powershell_single_quoted(manifest["version"]),
+        "$script:AgentSkillsEmbeddedAssetBaseUrl = "
+        + _powershell_single_quoted(manifest["asset_base_url"]),
+        "$script:AgentSkillsEmbeddedNativeArtifacts = @("
+    ]
+    for record in sorted(native_index["artifacts"], key=lambda item: item["target"]):
+        expected.append(
+            "    [pscustomobject]@{ "
+            f"Filename = {_powershell_single_quoted(record['filename'])}; "
+            f"Sha256 = {_powershell_single_quoted(record['sha256'])}; "
+            f"Size = {record['size']}; "
+            f"Target = {_powershell_single_quoted(record['target'])} "
+            "}"
+        )
+    expected.extend([
+        ")",
+        _POWERSHELL_METADATA_END,
     ])
     return (text[:begin] + "\n".join(expected) + text[end:]).encode("utf-8")
 
@@ -1142,6 +1194,12 @@ def _evaluate_release_gate_snapshot(
                 expected = source_path.read_bytes()
                 if standalone in {"install.sh", "uninstall.sh"} and native_index is not None:
                     expected = _expected_posix_bootstrap(
+                        expected,
+                        manifest=manifest,
+                        native_index=native_index,
+                    )
+                elif standalone == "install.ps1" and native_index is not None:
+                    expected = _expected_powershell_bootstrap(
                         expected,
                         manifest=manifest,
                         native_index=native_index,
