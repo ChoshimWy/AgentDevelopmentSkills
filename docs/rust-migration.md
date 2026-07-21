@@ -326,7 +326,7 @@ release-matched host executable after checking its embedded size and SHA-256;
 it does not download the source archive, trust the installed launcher, or
 permit Python fallback. An explicit Apple/Desktop source-checkout request,
 including `--platform all` expanded from the ready inventory, now selects Rust
-when `cargo` is available, performs a locked offline build from the pinned
+when `cargo` or an active `rustup` toolchain is available, performs a locked offline build from the pinned
 checkout into a private temporary target, and runs that exact binary. It accepts
 explicit discipline and runtime-config selection; the same selection is
 preserved by the shared verified bootstrap compatibility core. With no

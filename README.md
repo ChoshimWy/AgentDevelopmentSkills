@@ -1,65 +1,50 @@
 # AgentDevelopmentSkills
 
-AgentDevelopmentSkills is an offline-first, fail-closed workflow core for coding agents. It discovers repository capabilities, resolves platform and discipline contracts, builds deterministic execution plans, and records auditable evidence.
+AgentDevelopmentSkills is an offline-first, fail-closed workflow core for
+coding agents. It discovers repository capabilities, resolves explicit
+platform and discipline contracts, produces deterministic execution plans,
+and records auditable evidence.
 
-## Highlights
+## What it provides
 
-- Conservative repository discovery and explicit capability routing
-- Deterministic plans, locks, manifests, migrations, and release artifacts
-- Transactional install, upgrade, rollback, doctor, and uninstall workflows
-- Cross-platform packages for Apple and Desktop; Android, Web, and Backend remain explicit bootstrap-only targets
-- A qualified six-target Rust binary matrix plus reproducible Python compatibility artifacts
-- A compatibility-gated, incremental migration whose first fresh-install route now defaults to Rust
-- Signed release review, provenance, SBOM, and fail-closed release gates
-- GitHub Pages control plane with immutable GitHub Release assets
+- Conservative repository discovery and capability-based routing
+- Deterministic plans, manifests, lockfiles, migrations, and release artifacts
+- Guarded install, upgrade, rollback, doctor, and uninstall transactions
+- Apple and Desktop packages; Android, Web, and Backend are currently
+  `bootstrap-only`
+- Python compatibility tooling and a gradually expanding Rust native runtime
+- Reproducible release artifacts, provenance, SBOM, and fail-closed gates
 - No telemetry, credential collection, or implicit remote execution
 
 ## Status
 
-The incremental Rust migration has reached the controlled bootstrap phase.
-Release Manifest v3 binds a complete macOS, Linux, and Windows native binary
-matrix plus the immutable Upgrade Source Qualification produced by release
-qualification. A hosted, explicit, fresh Apple or Desktop install or dry-run,
-and an exact POSIX legacy iOSAgentSkills adoption, select the verified Rust
-lifecycle transaction by default. The installed
-native CLI also supports explicit-source upgrade, rollback, doctor, and
-uninstall transactions. It now also provides an operator-invoked
-`hosted-upgrade` route that authenticates the fixed Pages control plane,
-qualified source archive, and current-host executable before issuing a
-release-provenance-bound approval envelope. Explicit and interactive fresh
-source-checkout installs now build and execute the pinned Rust installer
-offline on POSIX; an explicit fresh Desktop source-checkout request does the
-same on Windows. A downloaded signed POSIX release bootstrap with an attached
-terminal also runs the same Rust selector; compatibility-only
-requests and PowerShell hosted acquisition/upgrades still use separately gated
-paths.
-The signed POSIX release bootstrap routes an explicit `--upgrade` request
-through the release-matched Rust executable without Python fallback. The
-repository carries an MIT `LICENSE`, a `NOTICE`, and verified
-migration-audit hashes. The GitHub Pages control plane is deployed; public
-release assets and remote installation remain gated on an external release
-signature and GitHub environment approval.
+The project is in a controlled Rust migration. The source-checkout installer
+can use the pinned Rust toolchain offline for eligible fresh Apple/Desktop
+installs; compatibility-only paths still use Python. Release Manifest v3 and
+the six-target native binary matrix are implemented, but hosted installation
+is not a production entry point until the signed release and required GitHub
+environment approvals are complete.
+
+See the [Rust migration plan](docs/rust-migration.md) for the exact feature
+matrix and cutover gates.
 
 ## Requirements
 
-- Python 3.11 or newer only for the explicit compatibility fallback and
-  remaining compatibility-only routes
-- Rust 1.97.1 for native development; hosted v2 releases download a qualified
-  target binary
-- macOS, Linux, or WSL2 for the production bootstrap path
-- Windows bootstrap is validated in CI but is not yet a production install target
+- Python 3.11+ for the compatibility implementation
+- Rust 1.97.1 for native development and offline source builds
+- macOS, Linux, or WSL2 for the supported POSIX bootstrap path
+- Windows bootstrap is CI-validated; hosted Windows installation remains gated
 
 ## Install from a checkout
+
+The safest way to install before a signed release is available is from a local
+checkout:
 
 ```bash
 ./install.sh
 ```
 
-For a fresh target, interactive `./install.sh` now defaults to the Rust
-terminal selector when `cargo` is available. Press Enter for Apple, enter
-comma-separated platform IDs for multiple ready platforms, enter `all` for
-every ready platform, or `q` to cancel. Explicit fresh Apple/Desktop selection
-also defaults to Rust:
+Examples:
 
 ```bash
 ./install.sh --platform apple
@@ -68,22 +53,24 @@ also defaults to Rust:
 ./install.sh --platform apple --discipline qa --runtime-config codex --dry-run
 ```
 
-On POSIX, the same source and signed-release bootstrap also recognize the exact
-legacy `AGENTS.md` plus `skills` symlink layout from an `iOSAgentSkills`
-checkout. The Rust installer previews it read-only, preserves `skills/.system`,
-and removes the two legacy links only inside the locked adoption transaction.
-Partial, unrelated, mixed-root, or unsafe layouts fail closed.
+For a fresh install, the selector uses Rust when `cargo` (or an active
+`rustup` toolchain) and the required offline dependencies are available. To
+select the implementation explicitly:
 
-The source bootstrap runs `cargo build --locked --offline` in a private
-temporary target directory and then executes that exact binary. Dependencies
-must already exist in the local Cargo cache; after native build starts, failure
-never falls back to Python. Set `AGENT_SKILLS_INSTALL_ENGINE=python` for the
-compatibility implementation or `AGENT_SKILLS_INSTALL_ENGINE=rust` to require
-the native route.
+```bash
+AGENT_SKILLS_INSTALL_ENGINE=rust ./install.sh --platform apple
+AGENT_SKILLS_INSTALL_ENGINE=python ./install.sh --platform apple
+```
 
-## Remote release installation
+Once native execution has started, a Rust failure never silently falls back to
+Python. The installer also recognizes the exact legacy `iOSAgentSkills`
+symlink layout on POSIX and handles it inside the guarded adoption transaction.
 
-The public bootstrap entry point is intentionally kept separate from immutable versioned assets:
+## Remote installation
+
+The Pages bootstrap is intentionally separate from immutable GitHub Release
+assets. Do not use it as a production installer until a signed release is
+published:
 
 ```bash
 curl -fsSL --proto '=https' --tlsv1.2 \
@@ -97,110 +84,10 @@ Windows PowerShell:
 iwr -useb https://choshimwy.github.io/AgentDevelopmentSkills/install.ps1 | iex
 ```
 
-The Pages control plane is online, but the remote installer remains unavailable until a signed release has been published. Use a source checkout before that release gate is satisfied.
-
-After a v3 release is published, an explicit fresh `--platform apple`,
-`--platform desktop`, or `--platform all` install or dry-run on macOS or a
-supported glibc 2.39+ Linux host defaults to the verified Rust binary.
-When the release bootstrap is first saved to a file and then run from an
-attached terminal without `--platform`, it uses the same native line-based
-selector as a source checkout. The piped one-liner above is intentionally
-non-interactive and therefore supplies the Apple default explicitly.
-`--platform all` expands only the source inventory entries marked ready. Musl
-and older glibc hosts remain on the Python compatibility route. The gated
-release renders exact
-source and host-binary sizes and SHA-256 identities into the POSIX bootstrap,
-so this route needs `curl`, `unzip`, and a system SHA-256 command but does not
-require Python. Set
-`AGENT_SKILLS_INSTALL_ENGINE=python` to request the transitional compatibility
-path. `AGENT_SKILLS_INSTALL_ENGINE=rust` fails closed if the request is not
-eligible; once Rust has been selected, a native failure never silently
-downgrades to Python. A signed POSIX release bootstrap also routes an explicit
-`--upgrade` request directly to the release-matched Rust executable; this route
-has no Python fallback. Source-checkout and other compatibility-only requests
-outside the native interactive or explicit fresh routes still require Python
-3.11+. A PowerShell script executed from a source checkout now sends an
-eligible explicit fresh Desktop request through an isolated locked offline
-Cargo build; downloaded PowerShell acquisition remains on the compatibility path because
-Windows is blocked as a production release install target until that hosted
-contract is enabled.
-
-An Apple native install publishes the verified executable as both
-`~/.codex/bin/agent-session` and `~/.codex/bin/agent-skills`. The latter exposes
-the guarded Rust lifecycle CLI. Preview before removing the exact managed
-installation:
-
-```bash
-~/.codex/bin/agent-skills uninstall ~/.codex --platform all --dry-run
-~/.codex/bin/agent-skills uninstall ~/.codex --platform all
-```
-
-After a signed Manifest v3 release is available, an existing native
-installation can explicitly preview and approve the hosted upgrade. The
-manifest URL and asset origin are fixed in the binary and cannot be supplied by
-the caller:
-
-```bash
-~/.codex/bin/agent-skills hosted-upgrade \
-  --target-root ~/.codex --dry-run \
-  --output /path/to/hosted-upgrade-plan.json
-
-~/.codex/bin/agent-skills hosted-upgrade \
-  --target-root ~/.codex \
-  --plan /path/to/hosted-upgrade-plan.json \
-  --approve-plan <envelope-fingerprint> \
-  --approve <each-required-permission-approval>
-```
-
-The apply command reacquires and reauthenticates the release, recompiles the
-candidate twice, compares the complete saved envelope, and replaces both
-installed launcher names with the verified current-host executable inside the
-guarded lifecycle transaction. It is never an unattended background update.
-
-The signed POSIX release bootstrap provides the same explicit two-step flow
-without trusting the already installed launcher:
-
-```bash
-curl -fsSL --proto '=https' --tlsv1.2 \
-  https://choshimwy.github.io/AgentDevelopmentSkills/install.sh \
-  | bash -s -- --upgrade --target-root ~/.codex --dry-run \
-      --output /path/to/hosted-upgrade-plan.json
-
-curl -fsSL --proto '=https' --tlsv1.2 \
-  https://choshimwy.github.io/AgentDevelopmentSkills/install.sh \
-  | bash -s -- --upgrade --target-root ~/.codex \
-      --plan /path/to/hosted-upgrade-plan.json \
-      --approve-plan <envelope-fingerprint> \
-      --approve <each-required-permission-approval>
-```
-
-The bootstrap downloads only the current release's exact host executable,
-checks its embedded size and SHA-256 identity, and forwards only the guarded
-upgrade arguments. Unsupported hosts, malformed approval modes, source-checkout
-invocation, an explicit Python engine, and asset tampering all fail closed
-before native execution.
-
-The gated hosted uninstaller authenticates that installed executable against
-its embedded release matrix before selecting Rust:
-
-```bash
-curl -fsSL --proto '=https' --tlsv1.2 \
-  https://choshimwy.github.io/AgentDevelopmentSkills/uninstall.sh \
-  | bash -s -- --dry-run
-```
-
-Set `AGENT_SKILLS_UNINSTALL_ENGINE=python` for the compatibility route or
-`AGENT_SKILLS_UNINSTALL_ENGINE=rust` to require native execution. From a source
-checkout, compatible target/platform requests default to a locked, offline
-Cargo build in a private temporary target; set the engine to `python` to force
-the Python 3.11+ compatibility route. A selected native uninstall never falls
-back after build or execution begins. The hosted script continues to fail
-closed unless the installed binary matches its embedded release record.
+The hosted upgrade and uninstall flows require the same release provenance and
+approval gates. They are operator-invoked, never background updates.
 
 ## Development
-
-- [Contributing guide](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
 
 Run the complete conformance suite:
 
@@ -208,376 +95,63 @@ Run the complete conformance suite:
 PYTHONPATH=src python3 scripts/run_conformance.py
 ```
 
-Run focused tests:
+Run focused Python tests:
 
 ```bash
-PYTHONPATH=src python3 -m unittest tests.test_pages_distribution tests.test_github_publication
+PYTHONPATH=src python3 -m unittest \
+  tests.test_pages_distribution \
+  tests.test_github_publication
 ```
 
-Validate the current Rust compatibility layer:
+Validate the Rust workspace:
 
 ```bash
 cargo fmt --check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
-AGENT_SKILLS_RUST_COMPATIBILITY=1 \
-  PYTHONPATH=src python3 -m unittest tests.test_rust_compatibility -v
 ```
 
-Inspect the current registry through the non-default native CLI:
+The native CLI is still a non-default migration surface. Examples and
+compatibility details are documented in [docs/rust-migration.md](docs/rust-migration.md).
 
-```bash
-cargo run --locked -p agent-skills-rs -- registry-snapshot platforms
-```
+## Repository map
 
-The same compatibility lane can resolve policies, discover repository evidence,
-compile deterministic plans, resolve or inspect persistent package Lockfiles,
-and simulate workflow runtime contracts without invoking external providers:
+| Path | Purpose |
+| --- | --- |
+| `src/` | Python compatibility implementation |
+| `crates/` | Rust contracts, engine, lifecycle, runtime, registry, and release packages |
+| `platforms/` | Platform packages and manifests |
+| `disciplines/` | Cross-platform workflow disciplines |
+| `runtime-configs/` | Explicit runtime configuration packages |
+| `schemas/` | Versioned machine-readable contracts |
+| `scripts/` | Install, conformance, release, and validation tooling |
+| `docs/` | Architecture, migration, implementation phases, and operational details |
 
-```bash
-cargo run --locked -p agent-skills-rs -- \
-  repository-discover tests/fixtures/apple-app
-cargo run --locked -p agent-skills-rs -- \
-  policy-resolve /path/to/profile.json "implement the requested feature"
-cargo run --locked -p agent-skills-rs -- \
-  plan-compile /path/to/profile.json /path/to/policy.json \
-  --manifests platforms
-cargo run --locked -p agent-skills-rs -- \
-  lock-resolve /path/to/install-plan.json --schemas schemas \
-  --output /path/to/agent-skills.lock
-cargo run --locked -p agent-skills-rs -- \
-  lock-validate /path/to/agent-skills.lock
-cargo run --locked -p agent-skills-rs -- \
-  lifecycle-install platforms /path/to/fresh-target \
-  --platform apple --schemas schemas --dry-run
-cargo run --locked -p agent-skills-rs -- \
-  doctor-baseline /path/to/installed-root --schemas schemas
-cargo run --locked -p agent-skills-rs -- \
-  doctor-report /path/to/installed-root --schemas schemas \
-  --python-version 3.11.0
-cargo run --locked -p agent-skills-rs -- \
-  doctor --target-root /path/to/installed-root
-cargo run --locked -p agent-skills-rs -- \
-  rollback /path/to/installed-root \
-  --approve-current-lock <sha256> --approve-rollback-point <sha256>
-cargo run --locked -p agent-skills-rs -- \
-  upgrade /path/to/source/platforms /path/to/installed-root \
-  /path/to/upgrade-conformance-evidence.json --dry-run \
-  --output /path/to/upgrade-plan.json
-cargo run --locked -p agent-skills-rs -- \
-  upgrade-source-qualification-validate \
-  /path/to/upgrade-source-qualification.json
-cargo run --locked -p agent-skills-rs -- \
-  lifecycle-uninstall /path/to/installed-root --platform all
-cargo run --locked -p agent-skills-rs -- \
-  runtime-execute /path/to/workflow-plan.json \
-  --behaviors /path/to/fake-behaviors.json
-cargo run --locked -p agent-skills-rs -- \
-  adapter-request-build /path/to/workflow-plan.json node-id \
-  /path/to/task-context.json invocation-id
-cargo run --locked -p agent-skills-rs -- \
-  adapter-result-validate /path/to/adapter-request.json \
-  /path/to/adapter-result.json
-cargo run --locked -p agent-skills-rs -- \
-  runtime-execute-recorded /path/to/workflow-plan.json \
-  /path/to/adapter-results.json /path/to/task-context.json
-cargo run --locked -p agent-skills-rs -- \
-  invocation-prepare /path/to/handoff /path/to/workflow-plan.json node-id \
-  /path/to/task-context.json invocation-id
-cargo run --locked -p agent-skills-rs -- \
-  invocation-claim /path/to/handoff adapter-request-id host-actor \
-  /path/to/private-claim-token
-cargo run --locked -p agent-skills-rs -- \
-  invocation-submit /path/to/handoff adapter-request-id \
-  /path/to/adapter-result.json /path/to/private-claim-token
-cargo run --locked -p agent-skills-rs -- \
-  runtime-execute-invocations /path/to/workflow-plan.json \
-  /path/to/handoff /path/to/task-context.json \
-  --selection /path/to/provider-invocation-selection.json
-cargo run --locked -p agent-skills-rs -- \
-  repository-inspect /path/to/repository app --base-ref HEAD
-cargo run --locked -p agent-skills-rs -- \
-  session-context-create /path/to/session-context-input.json
-cargo run --locked -p agent-skills-rs -- \
-  session-registry-list /path/to/repository
-cargo run --locked -p agent-skills-rs -- \
-  session-create /path/to/repository feature \
-  /path/to/session-context-input.json --base-ref HEAD
-cargo run --locked -p agent-skills-rs -- \
-  session-create-manifest /path/to/repository feature \
-  --project-id project --created-at 2026-07-18T00:00:00+00:00 \
-  --platform apple --manifest-root /path/to/platforms --base-ref HEAD
-cargo run --locked -p agent-skills-rs -- \
-  session-registry-checkpoint /path/to/repository session-id
-cargo run --locked -p agent-skills-rs -- \
-  session-registry-gate /path/to/repository session-id \
-  /path/to/adapter-pairs.json /path/to/run-ledger.json /path/to/artifacts
-```
+## Design and security principles
 
-For a plan containing `package_lock_hash`, append
-`--lock /path/to/agent-skills.lock` to `invocation-prepare` and supply the same
-validated Lockfile when consuming it.
+1. **Explicit selection:** platform packages and runtime configurations are
+   selected by the caller; they are never activated implicitly.
+2. **Deterministic output:** machine-readable output is canonical UTF-8 JSON
+   with stable ordering and no NaN values.
+3. **Fail closed:** missing capabilities, dependency cycles, schema mismatches,
+   permission expansion, tampering, and unsafe layouts stop the transaction.
+4. **Bounded trust:** discovery is read-only; Core does not read provider
+   credentials, execute provider code, or make implicit network calls.
+5. **Transactional lifecycle:** installation changes are staged, verified,
+   published atomically where supported, and recoverable on failure.
 
-The migration sequence and cutover gates are documented in
-[`docs/rust-migration.md`](docs/rust-migration.md). The Python CLI remains the
-production entry point until every relevant differential test and release gate
-passes. The current native lane includes canonical contracts and a read-only
-manifest registry, repository discovery, policy resolution, and plan
-compilation, plus package Lockfile resolution, validation, diff, explanation,
-and locked-plan binding checks. Phase 4 has started with a native deterministic
-fake-adapter runtime covering node state transitions, retries, approvals,
-resource scheduling, append-only ledger replay, and locked-plan execution. It
-also freezes and validates Adapter Request/Result v1 contracts and consumes
-those recorded results through the same ledger, resource, resume, and
-final-status contracts. The next native increment now covers bounded Git
-Worktree inspection, `repository-patch-v1`, `session-source-v1`, Session
-Context validation, exact Worktree creation/compensation, checkpoint
-transitions, the locked persistent Session Registry, trusted Manifest-driven
-platform/Provider closure compilation and Session creation, and Final Gate
-evidence revalidation/persistence. A filesystem-backed Provider Invocation v1
-handoff now freezes permissions, side effects, resources, provenance, and a
-hard timeout; it supports one hashed-token claim and accepts only an
-identity-matched Adapter Result. Runtime consumption requires an explicit
-Provider Invocation Selection v1 mapping from each node to its submitted
-request ID; retry results are never selected by timestamp. The external host
-still owns actual Provider execution: Core does not discover or read Provider
-credentials, execute a binding or package code, or make network calls. It
-reads only a caller-supplied, owner-private, high-entropy transport claim
-token. After a failure around result publication, inspect the request before
-retrying claim or submit. The first native lifecycle slice now provides a
-read-only Doctor compatibility projection for the safe target, recovery
-residue, managed layout, Install/Persistent Lock anchors, Core runtime
-identity, runtime Schema inventory, and managed Activation file integrity. It
-also verifies installed package trees, package and Provider Manifests, the
-ordered package closure, and installed package identity, dependency, and
-side-effect semantics against both Lockfiles. The projection now also verifies
-installed Skill identities and trees, the unique global `AGENTS.md` content,
-fragment order and rule trace, frozen Capability Bindings and Provider
-closure, and permission profiles and per-Capability grants against rebuilt
-installed Manifest semantics. Persistent rollback points are now checked
-read-only as complete snapshots, including their own Lock pair, package,
-Skill, AGENTS, external-state, Activation, semantic, and snapshot-digest
-anchors. The compatibility-only `doctor-report` command still emits Doctor
-Report v1 with an explicit `--python-version` host attestation. The public
-`doctor` command now emits runtime-neutral Doctor Report v2 instead: the Rust
-binary embeds its build-time Schema inventory and requires neither Python, a
-source checkout, a network connection, nor a caller-supplied Schema path.
-Fresh install, uninstall, and rollback already use guarded native
-transactions. The public native `upgrade` command requires explicit verified
-source and Conformance evidence. The operator-invoked `hosted-upgrade` command
-now acquires only the fixed repository control plane and release assets, then
-binds their provenance and the installation-specific candidate to a separate
-approval envelope. `agent-lifecycle` uses an identity-bound RAII
-directory lock with atomic exclusion, safe missing-target creation,
-crash-residue visibility, and identity-checked cleanup.
-The companion `LifecycleWorkspace` now creates a unique POSIX mode-`0700`
-stage/backup pair under that lock, holds both directory capabilities, exposes
-them for later native staging, removes symlink-safe temporary trees, and can
-preserve an incomplete-recovery backup. It can also copy and revalidate
-tree-local, Install-Plan-shaped package and Skill records with canonical POSIX
-modes, bounded paths, atomic destinations, and no-follow source traversal.
-`ValidatedInstallPlan` now binds a complete Install Plan to its persistent
-package Lockfile in both directions. Plan-bound workspace methods assemble
-canonical `AGENTS.md`, Install Lock, persistent Lockfile, package trees, and
-Skill trees, then run a complete managed pre-swap gate over exact topology,
-canonical bytes, Manifest-derived semantics, Bindings, permissions, and both
-identity anchors. The workspace now also freezes and copies external
-`skills/.system` trees without following symlinks, preserves the exact validated
-Activation Lock, and revalidates both the target and staged external state
-around the complete pre-swap gate. On Windows, `.system` symlink entries
-currently fail closed because stable `cap-std` cannot recover the file-vs-dir
-link kind without following the link. For an intact current installation, the
-workspace can now assemble and validate a persistent rollback point inside the
-new stage. It freezes the current Lock pair, packages, Skills, `AGENTS.md`,
-optional Activation Lock, package-owned external files, absent-file records,
-and parent-directory state, then revalidates both source and staged identities
-around the complete gate. External paths must be sorted, unique, relative, and
-disjoint from managed roots. `publish_staged_install` now moves the three
-managed roots with atomic no-replace renames (`renameat2`/`renamex_np` on
-supported Unix targets and `MoveFileExW` without replace flags on Windows),
-verifies every source and destination object identity, and returns a
-`PublishedInstall` guard that keeps the lifecycle lock and old roots until
-explicit commit or rollback.
-Existing installs require a verified staged rollback point. The recovery
-backup is revalidated against the frozen source semantics before publication
-and again before restoration. A restored installation is fully revalidated
-before cleanup; if recovery-time content drift is detected after a complete
-publication, the new roots are reinstated and the backup is preserved for
-diagnosis. Partial failures reverse completed moves, while identity or content
-drift never overwrites an unknown target. Dropping an uncommitted guard
-attempts the same safe rollback.
-The guard now also tracks the start of a transaction-bound external mutation.
-It first validates the published rollback snapshot and recovery backup, then
-restores or safely reinstates the managed roots. Only after the old roots are
-complete does it revalidate the frozen rollback point from the private stage
-and restore external file, absent-file, mode, and ancestor-directory
-preimages. Existing external entries move through atomic no-replace renames
-into a private quarantine before snapshot files are published with the same
-no-replace rule. Aliased destinations, replaced parent symlinks, or drift
-preserve both stage and backup. On Windows, rename paths are resolved from the
-held directory handles, so replaced junction ancestors cannot redirect nested
-external operations. The lifecycle lock coordinates lifecycle commands, not
-arbitrary same-user file handles: callers must keep the approved external
-scope quiescent and must not retain writable handles to those entries during a
-transaction. The first trusted handler, source deactivation, now derives its
-exact scope from the validated Activation Lock, requires an exact frozen
-rollback scope, validates every owned preimage, removes only owned files and
-the managed root-level `model_instructions_file`, and permits commit only after
-the Activation Lock is absent and the remaining installation is revalidated.
-Its config rewrite uses TOML 1.0 parsing while preserving every unrelated byte
-and the original POSIX mode. The source-activation prerequisite that overlays
-the Codex shared config is also available as a native, non-executing TOML
-renderer with differential parity against the installed source script. The
-same guard can now run source activation for replacement and fresh-install
-transactions backed by an exact rollback point. Replacement activation freezes
-assets from the newly published package snapshot. Fresh activation derives the
-same scope before publication by reading package assets from the managed stage
-and unmanaged config, profile, and destination preimages from the target. Both
-paths refuse unmanaged conflicts, create only missing profiles, use private
-no-replace publication, and write the Activation Lock last. A fresh failure
-removes the new managed roots before restoring every frozen external preimage.
-Compatibility commands still accept an explicit session launcher; the v2
-bootstrap freezes the same verified native executable and activates it inside
-the eligible fresh-install transaction. A separate
-`PublishedUninstall` guard now freezes a complete
-managed and external rollback point, moves all managed roots into a private
-backup, removes only Activation-owned files, preserves local profiles,
-`config.toml` semantics, and `skills/.system`, and supports explicit commit,
-rollback, and drop-time recovery. Remaining production command routing is a
-later lifecycle slice. The non-default
-`lifecycle-uninstall` compatibility command now drives this guard, rejects a
-missing target without creating it, and matches the successful Python JSON
-report and resulting filesystem state on the supported POSIX source-installer
-path. Windows keeps native unit coverage for target spelling, ownership, and
-transaction recovery while the Python source installer remains POSIX-mode
-only. The native command now also matches the source CLI's read-only dry-run,
-human-readable success output, and canonical blocked JSON surface. The gated
-hosted `uninstall.sh` authenticates the installed executable against its
-embedded host record and defaults eligible requests to this Rust guard without
-Python. Source-checkout uninstall now also defaults compatible requests to an
-offline, locked private Cargo build. Release mismatch, unsupported hosts,
-compatibility-only requests, and an explicitly selected Python engine retain
-the verified Python route.
+## Documentation
 
-The parallel `install-selection` compatibility command now resolves the
-installable source package catalog, explicit platform/discipline/runtime
-selection, required and optional dependency closure, version constraints,
-deterministic topological order, and selection reasons with Python
-differential parity. The follow-on `install-source-snapshot` command freezes
-declared package assets, Package/Provider Manifests, instruction Fragments,
-and installable Skill trees through bounded no-follow traversal and source
-mutation revalidation. Both are differential-tested against Python. This lane
-now feeds the non-default `install-bundle` command, which independently
-rebuilds Manifest Registry, dependency capability, instruction/rule, Skill,
-asset, binding, permission, side-effect, Install Plan v2, and persistent
-package Lockfile identities. Core-only, Apple, QA, Codex runtime-config, and
-previous-Lock lineage outputs are byte-for-byte differential-tested against
-Python. The native lifecycle lane now provides a read-only
-`lifecycle-install` compatibility command plus a production `install` command
-for eligible fresh installs and exact POSIX legacy adoption. It performs
-staging, semantic verification,
-atomic publication, post-publication verification, rollback-on-failure, and
-cleanup. Apple installation also freezes the exact launcher bytes and
-completes source activation in the same guarded transaction. Core-only and
-Apple projections remain differential-tested against Python. Replacement
-installs, upgrades, and compatibility-only requests remain on separately gated
-paths. As the first upgrade cutover gate, Rust now strictly
-validates Upgrade Conformance Evidence v1 and Upgrade Plan v1, including
-stable attestation semantics, exact selections/removals, permission approvals,
-external-handler identity, migration ordering, rollback identity, and
-self-consistent tampering. The non-default `upgrade-plan-build` command now
-accepts only the candidate Plan/Lock, Conformance evidence, target, removal
-request, and—when source Activation is retained—the frozen native launcher.
-The lifecycle crate opens the installed target through directory capabilities,
-loads and rechecks the current locks itself, derives Activation ownership,
-selects the only permitted activation/deactivation/preserve handler, freezes
-the exact external paths and rollback state, and issues a receipt bound to the
-locked local Rust source/dependency, target, and toolchain build identity for
-in-process compiler consumption. Raw current locks, rollback
-points, migrations, handlers, and external paths are no longer CLI inputs.
-Legacy Activation Lock v1 migration is planned from that receipt; changed
-Apple, preserve, and deactivation planning now fail closed on ownership or
-scope drift instead of being categorically rejected. External-free results
-remain byte-for-byte differential-tested against Python, while native
-Activation results are semantic-differential-tested because the Rust route
-also owns `bin/agent-skills` and has its own handler implementation hash.
-`upgrade-evidence-validate` and `upgrade-plan-validate` retain negative
-contract coverage. `agent-lifecycle` now also contains the first native
-mutating executor: it rebuilds the exact approved Plan under the same held
-target lock, compares the complete Plan and permission approvals, stages the
-candidate and persistent rollback point, publishes through `PublishedInstall`,
-and dispatches only the receipt-bound activate/deactivate/preserve handler.
-Before an Apple activation can write external state, the newly published
-installation must pass a native installed-registry smoke covering discovery,
-policy, a package-Lock-bound ready Plan, Skill bindings, Recorded Adapter
-execution, independent review, and delivery reporting. Any smoke or handler
-failure remains inside the managed/external rollback window. The public
-`upgrade` command now compiles a source candidate against an
-initially locked snapshot of the installed lineage, emits or saves the exact
-Plan in `--dry-run` mode, and requires both that saved Plan and its explicit
-`--approve-plan` fingerprint before execution. Apply reacquires the target
-lock, regenerates and compares the complete Plan, then delegates to the guarded
-executor; a concurrent target change therefore fails closed instead of
-silently rebasing. The public `rollback` command now requires
-the exact current Lock and persistent rollback-point fingerprints before it
-creates a workspace. It stages the validated prior projection, preserves the
-current `.system` tree, restores the frozen external preimages inside the same
-`PublishedInstall` recovery window, and persists the displaced current state
-as the next rollback point. `lifecycle-rollback` remains a visible
-compatibility alias. `lifecycle-upgrade` likewise remains a visible alias.
-The signed POSIX release bootstrap now exposes the explicit guarded
-`--upgrade` route. PowerShell and the remaining compatibility bootstrap
-surfaces remain separate release gates.
-Upgrade Source Qualification v1 now provides the next release boundary: it
-binds the completed repository Conformance suite to one immutable source
-archive, source revision, complete SBOM material identity, Schema inventory,
-and stable command set without falsely binding that release-time evidence to a
-future installation-specific Lock lineage. The contract is validated by both
-Python and Rust, but it does not authorize acquisition or apply by itself.
-The installed native
-`agent-session` dispatch preserves
-the public `create`, `list`, `inspect`, `fingerprint`, `checkpoint`, and `gate`
-surface.
-
-The `agent-release` crate now freezes a six-target native matrix for macOS,
-Linux, and Windows on `aarch64` and `x86_64`. Every record binds the exact
-source revision, Cargo lock hash, Rust 1.97.1 toolchain, target-specific
-executable header, smoke result, size, and SHA-256. CI builds and executes each
-binary on a matching GitHub-hosted architecture, then merges only the complete
-sorted matrix into `native-artifacts.json`. Qualification copies those exact
-binaries into the release candidate; provenance, the exact release allowlist,
-the external review signature, and the final Release Gate all cover them.
-Release Manifest v3 now binds that exact matrix and the release-qualified
-immutable upgrade source, while keeping Rust as the default engine for
-eligible hosted fresh installs. Explicit fresh source-checkout installs now
-build the pinned Rust CLI offline in a private target directory, and
-fresh source-checkout and downloaded hosted POSIX terminal selection now run in
-that binary without Python. Exact legacy iOSAgentSkills layouts use the same
-POSIX native route and are revalidated under the lifecycle lock before mutation.
-The PowerShell source-checkout layer now defaults eligible explicit fresh
-Desktop requests to Rust. Its Apple/hosted acquisition layers and all other
-ineligible requests still use the explicit Python compatibility path during
-this controlled phase.
-
-The target parent namespace must remain trusted while portable name-based
-release runs. Callers must expand `~` before using these APIs. The Doctor path
-holds directory capabilities and opens contract files without following
-symlinks; unlike the explicit lock API, it does not repair, install, upgrade,
-roll back, uninstall, or otherwise write the target. Failed projected checks
-keep canonical JSON on
-stdout and return exit status 2. Doctor does not create commits, change
-staging, or make installation changes.
-Activation and installed-package tree mode parity are currently POSIX
-contracts; Windows-native Doctor still verifies the Lock shape, paths,
-no-follow traversal, and content hashes but does not interpret POSIX mode
-bits as a Windows ACL guarantee.
-
-## Release governance
-
-The `Publish verified release` workflow only accepts a successful qualification run from the protected `main` branch at the current workflow revision. It re-runs the final gate, rejects existing tags and releases, creates tags atomically, verifies Pages and Release assets by hash, and uses pinned GitHub Actions with job-level least privilege.
-
-Before the first public release, repository administrators must configure branch protection, the `release` and `github-pages` environments, required reviewers, and the external review trust store. License/NOTICE evidence is now present and verified. See [`README.zh-CN.md`](README.zh-CN.md) for the Chinese guide, [`docs/architecture.md`](docs/architecture.md) for the public architecture overview, and [`docs/rust-migration.md`](docs/rust-migration.md) for the Rust migration plan.
+- [Architecture overview](docs/architecture.md)
+- [Rust migration and cutover policy](docs/rust-migration.md)
+- [Cross-platform workflow architecture](docs/cross-platform-agent-workflow-architecture.html)
+- [Phase 4 QA Core and Desktop status](docs/implementation/phase-4-qa-core-and-desktop-minimum.html)
+- [Multi-session worktree architecture](docs/multi-session-worktree.md)
+- [Skill naming convention](docs/skill-naming.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [中文指南](README.zh-CN.md)
 
 ## License
 
-The repository-level License/NOTICE decision is recorded as MIT in the migration audit and the exact `NOTICE` hash is verified during the release gate. Any future change to licensing or attribution must update both files and regenerate the audit before release.
+MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
