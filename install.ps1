@@ -143,10 +143,33 @@ function Test-AgentSkillsNativeRequest {
     return Test-AgentSkillsFreshTarget -TargetRoot $script:AgentSkillsNativeTarget
 }
 
+function Resolve-AgentSkillsCargo {
+    $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+    if ($cargo) {
+        return $cargo.Source
+    }
+    $rustup = Get-Command rustup -ErrorAction SilentlyContinue
+    if (-not $rustup) {
+        return $null
+    }
+    try {
+        $candidate = (& $rustup.Source which cargo 2>$null | Select-Object -First 1).Trim()
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($candidate)) {
+            $item = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+            if (-not $item.PSIsContainer -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                return $item.FullName
+            }
+        }
+    } catch {
+        return $null
+    }
+    return $null
+}
+
 function Invoke-AgentSkillsSourceNativeInstall {
     param([Parameter(Mandatory = $true)][string]$SourceRoot)
 
-    $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+    $cargo = Resolve-AgentSkillsCargo
     if (-not $cargo) {
         throw "native source install requires Cargo"
     }
@@ -173,15 +196,21 @@ function Invoke-AgentSkillsSourceNativeInstall {
     New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
     try {
         $targetDirectory = Join-Path $temporaryRoot "target"
-        & $cargo.Source build `
-            --locked `
-            --offline `
-            --manifest-path (Join-Path $SourceRoot "Cargo.toml") `
-            --package agent-skills-rs `
-            --bin agent-skills-rs `
-            --target-dir $targetDirectory
-        if ($LASTEXITCODE -ne 0) {
-            throw "native source installer build failed with exit code $LASTEXITCODE"
+        $originalPath = $env:PATH
+        try {
+            $env:PATH = (Split-Path -Parent $cargo) + [IO.Path]::PathSeparator + $env:PATH
+            & $cargo build `
+                --locked `
+                --offline `
+                --manifest-path (Join-Path $SourceRoot "Cargo.toml") `
+                --package agent-skills-rs `
+                --bin agent-skills-rs `
+                --target-dir $targetDirectory
+            if ($LASTEXITCODE -ne 0) {
+                throw "native source installer build failed with exit code $LASTEXITCODE"
+            }
+        } finally {
+            $env:PATH = $originalPath
         }
         $nativeExecutable = Join-Path $targetDirectory "debug/agent-skills-rs.exe"
         $native = Get-Item -LiteralPath $nativeExecutable -Force -ErrorAction SilentlyContinue
@@ -406,7 +435,7 @@ try {
         $sourceRoot = (Get-Item -LiteralPath $PSScriptRoot -Force).FullName
         $nativeEligible = Test-AgentSkillsNativeRequest -Arguments $InstallerArguments
         if ($RequestedEngine -ne "python" -and $nativeEligible -and
-            (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            (Resolve-AgentSkillsCargo)) {
             Invoke-AgentSkillsSourceNativeInstall -SourceRoot $sourceRoot
             exit [int]$script:AgentSkillsNativeExitCode
         }

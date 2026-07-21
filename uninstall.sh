@@ -285,11 +285,12 @@ prepare_release_native() {
 
 run_source_native_uninstall() {
     local source_root="$1"
-    local temporary native_executable native_status=0
-    command -v cargo >/dev/null 2>&1 || {
+    local temporary native_executable native_status=0 cargo_bin cargo_directory
+    cargo_bin="$(resolve_native_cargo)" || {
         printf '%s\n' "native source uninstall requires cargo" >&2
         return 2
     }
+    cargo_directory="$(dirname "$cargo_bin")"
     local required
     for required in \
         Cargo.toml \
@@ -306,7 +307,7 @@ run_source_native_uninstall() {
     trap 'rm -rf "${SOURCE_NATIVE_DIR:-}"' EXIT HUP INT TERM
     (
         cd "$source_root"
-        cargo build \
+        PATH="$cargo_directory:$PATH" "$cargo_bin" build \
             --locked \
             --offline \
             --manifest-path "$source_root/Cargo.toml" \
@@ -328,6 +329,26 @@ run_source_native_uninstall() {
     return "$native_status"
 }
 
+# rustup can provide an active toolchain even when its cargo proxy directory is
+# absent from PATH. Keep the selected toolchain local to the native build so
+# compatibility routes and the caller's environment remain unchanged.
+resolve_native_cargo() {
+    local cargo_bin
+    cargo_bin="$(command -v cargo 2>/dev/null || true)"
+    if [[ -n "$cargo_bin" && -f "$cargo_bin" && ! -L "$cargo_bin" && -x "$cargo_bin" ]]; then
+        printf '%s\n' "$cargo_bin"
+        return 0
+    fi
+    if command -v rustup >/dev/null 2>&1; then
+        cargo_bin="$(rustup which cargo 2>/dev/null || true)"
+        if [[ -n "$cargo_bin" && -f "$cargo_bin" && ! -L "$cargo_bin" && -x "$cargo_bin" ]]; then
+            printf '%s\n' "$cargo_bin"
+            return 0
+        fi
+    fi
+    return 1
+}
+
 if ! validate_uninstall_target_arguments "$@"; then
     printf '%s\n' "uninstall target arguments are malformed or unsafe" >&2
     exit 2
@@ -347,7 +368,7 @@ if [[ -n "$SOURCE_CHECKOUT_ROOT" ]]; then
         exec "$PYTHON_BIN" "$SOURCE_CHECKOUT_ROOT/scripts/uninstall_local.py" "$@"
     fi
     if [[ "$REQUESTED_ENGINE" != "python" && "$NATIVE_REQUEST_ELIGIBLE" == "1" ]] \
-        && command -v cargo >/dev/null 2>&1; then
+        && resolve_native_cargo >/dev/null; then
         run_source_native_uninstall "$SOURCE_CHECKOUT_ROOT"
         exit $?
     fi

@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import random
+import shlex
 import shutil
 import struct
 import subprocess
@@ -114,9 +115,36 @@ if os.name != "nt":
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _resolve_cargo() -> str | None:
+    cargo = shutil.which("cargo")
+    if cargo:
+        return cargo
+    rustup = shutil.which("rustup")
+    if not rustup:
+        return None
+    completed = subprocess.run(
+        [rustup, "which", "cargo"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    candidate = Path(completed.stdout.strip())
+    if (
+        completed.returncode == 0
+        and candidate.is_file()
+        and not candidate.is_symlink()
+        and os.access(candidate, os.X_OK)
+    ):
+        return str(candidate)
+    return None
+
+
+RUST_CARGO = _resolve_cargo()
 RUST_COMPATIBILITY_ENABLED = (
     os.environ.get("AGENT_SKILLS_RUST_COMPATIBILITY") == "1"
-    and shutil.which("cargo") is not None
+    and RUST_CARGO is not None
 )
 
 
@@ -171,15 +199,21 @@ def _normalize_runtime_ledger(value: dict) -> dict:
 
 @unittest.skipUnless(
     RUST_COMPATIBILITY_ENABLED,
-    "set AGENT_SKILLS_RUST_COMPATIBILITY=1 and install cargo",
+    "set AGENT_SKILLS_RUST_COMPATIBILITY=1 and install Cargo or rustup",
 )
 class RustCompatibilityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        assert RUST_CARGO is not None
+        cargo_directory = str(Path(RUST_CARGO).parent)
         build = subprocess.run(
-            ["cargo", "build", "--quiet", "--locked", "-p", "agent-skills-rs"],
+            [RUST_CARGO, "build", "--quiet", "--locked", "-p", "agent-skills-rs"],
             cwd=ROOT,
-            env={**os.environ, "CARGO_TERM_COLOR": "never"},
+            env={
+                **os.environ,
+                "CARGO_TERM_COLOR": "never",
+                "PATH": cargo_directory + os.pathsep + os.environ.get("PATH", ""),
+            },
             text=True,
             capture_output=True,
             check=False,
@@ -207,6 +241,34 @@ class RustCompatibilityTests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+
+    def rustup_only_environment(self, directory: Path) -> dict[str, str]:
+        """Hide Cargo's proxy and expose only a fail-closed rustup resolver."""
+        assert RUST_CARGO is not None
+        cargo_parent = str(Path(RUST_CARGO).parent)
+        proxy = shutil.which("cargo")
+        proxy_parent = str(Path(proxy).parent) if proxy else None
+        path_entries = [
+            entry for entry in os.environ.get("PATH", "").split(os.pathsep)
+            if entry and entry not in {cargo_parent, proxy_parent}
+        ]
+        resolver = directory / "rustup"
+        resolver.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = which ] && [ \"$2\" = cargo ]; then\n"
+            f"  printf '%s\\n' {shlex.quote(RUST_CARGO)}\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 2\n",
+            encoding="utf-8",
+        )
+        resolver.chmod(0o700)
+        return {
+            **os.environ,
+            "AGENT_SKILLS_RUST_COMPATIBILITY": "1",
+            "CARGO_TERM_COLOR": "never",
+            "PATH": str(directory) + os.pathsep + os.pathsep.join(path_entries),
+        }
 
     @unittest.skipIf(os.name == "nt", "source bootstrap is POSIX-only")
     def test_source_checkout_bootstrap_uses_real_offline_rust_dry_run(self) -> None:
@@ -241,6 +303,34 @@ class RustCompatibilityTests(unittest.TestCase):
             report = json.loads(completed.stdout)
             self.assertEqual(report["engine"], "rust")
             self.assertEqual(report["status"], "planned")
+            self.assertFalse(target.exists())
+
+    @unittest.skipIf(os.name == "nt", "source bootstrap is POSIX-only")
+    def test_source_checkout_bootstrap_resolves_rustup_when_cargo_proxy_is_hidden(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="agent-skills-rustup-source-bootstrap-"
+        ) as directory:
+            root = Path(directory).resolve()
+            target = root / "target"
+            completed = subprocess.run(
+                [
+                    "/bin/bash",
+                    str(ROOT / "install.sh"),
+                    "--target-root",
+                    str(target),
+                    "--platform",
+                    "desktop",
+                    "--json",
+                    "--dry-run",
+                ],
+                cwd=ROOT,
+                env=self.rustup_only_environment(root),
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(json.loads(completed.stdout)["engine"], "rust")
             self.assertFalse(target.exists())
 
     @unittest.skipIf(os.name == "nt", "production source install is POSIX-only")
@@ -683,6 +773,49 @@ class RustCompatibilityTests(unittest.TestCase):
                 ),
                 before,
             )
+
+    @unittest.skipIf(os.name == "nt", "source uninstaller is POSIX-only")
+    def test_source_checkout_uninstall_resolves_rustup_when_cargo_proxy_is_hidden(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="agent-skills-rustup-source-uninstall-"
+        ) as directory:
+            root = Path(directory).resolve()
+            target = root / "target"
+            installed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/install_local.py"),
+                    "--target-root",
+                    str(target),
+                    "--platform",
+                    "desktop",
+                    "--json",
+                ],
+                cwd=ROOT,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            completed = subprocess.run(
+                [
+                    "/bin/bash",
+                    str(ROOT / "uninstall.sh"),
+                    "--target-root",
+                    str(target),
+                    "--platform",
+                    "desktop",
+                    "--json",
+                    "--dry-run",
+                ],
+                cwd=ROOT,
+                env=self.rustup_only_environment(root),
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(json.loads(completed.stdout)["status"], "planned")
 
     def test_canonical_json_and_hash_match_python(self) -> None:
         value = {
