@@ -458,3 +458,133 @@ fn lifecycle_upgrade_cli_applies_changed_partial_uninstall_and_rejects_drift() {
 
     assert_cli_rollback_round_trip(&binary, &target, &current_lock, &candidate_lock);
 }
+
+#[test]
+fn public_uninstall_cli_routes_partial_removal_through_the_approved_native_upgrade() {
+    let root = TestRoot::new();
+    let fixture = prepare_changed_upgrade(&root);
+    let ChangedUpgradeFixture {
+        target,
+        evidence_path,
+        plan_path,
+        binary,
+        platform_root,
+        schemas,
+        current_lock,
+        candidate_lock: _,
+        plan: _,
+    } = fixture;
+
+    let missing_json = Command::new(&binary)
+        .arg("uninstall")
+        .arg(&target)
+        .arg("--platform")
+        .arg("desktop")
+        .arg("--source-root")
+        .arg(&platform_root)
+        .arg("--evidence")
+        .arg(&evidence_path)
+        .arg("--schemas")
+        .arg(&schemas)
+        .arg("--dry-run")
+        .output()
+        .expect("reject partial uninstall without JSON before planning");
+    assert!(!missing_json.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_json.stderr).contains("partial-uninstall requires --json")
+    );
+    assert_eq!(
+        load_json(target.join(".agent-skills/agent-skills.lock"))
+            .expect("missing JSON leaves current Lock untouched"),
+        current_lock
+    );
+
+    let preview = Command::new(&binary)
+        .arg("uninstall")
+        .arg(&target)
+        .arg("--platform")
+        .arg("desktop")
+        .arg("--source-root")
+        .arg(&platform_root)
+        .arg("--evidence")
+        .arg(&evidence_path)
+        .arg("--schemas")
+        .arg(&schemas)
+        .arg("--dry-run")
+        .arg("--output")
+        .arg(&plan_path)
+        .arg("--json")
+        .output()
+        .expect("preview public partial uninstall");
+    assert!(
+        preview.status.success(),
+        "preview failed: {}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&preview.stdout).expect("parse partial Plan");
+    assert_eq!(plan["action"], "partial-uninstall");
+    assert_eq!(plan["removed_platforms"], json!(["desktop"]));
+
+    let mut apply = Command::new(&binary);
+    apply
+        .arg("uninstall")
+        .arg(&target)
+        .arg("--platform")
+        .arg("desktop")
+        .arg("--source-root")
+        .arg(&platform_root)
+        .arg("--evidence")
+        .arg(&evidence_path)
+        .arg("--schemas")
+        .arg(&schemas)
+        .arg("--plan")
+        .arg(&plan_path)
+        .arg("--approve-plan")
+        .arg(plan["fingerprint"].as_str().expect("Plan fingerprint"))
+        .arg("--json");
+    add_plan_approvals(&mut apply, &plan);
+    let applied = apply.output().expect("apply public partial uninstall");
+    assert!(
+        applied.status.success(),
+        "apply failed: {}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let result: Value = serde_json::from_slice(&applied.stdout).expect("parse partial result");
+    assert_eq!(result["status"], "partially-uninstalled");
+}
+
+#[test]
+fn lifecycle_uninstall_alias_keeps_the_full_uninstall_preview_contract() {
+    let root = TestRoot::new();
+    let repository = repository_root();
+    let target = root.0.join("target");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_agent-skills-rs"));
+    let install = Command::new(&binary)
+        .arg("lifecycle-install")
+        .arg(repository.join("platforms"))
+        .arg(&target)
+        .arg("--platform")
+        .arg("desktop")
+        .arg("--schemas")
+        .arg(repository.join("schemas"))
+        .output()
+        .expect("install managed desktop target");
+    assert!(install.status.success());
+
+    let preview = Command::new(&binary)
+        .arg("lifecycle-uninstall")
+        .arg(&target)
+        .arg("--dry-run")
+        .arg("--json")
+        .output()
+        .expect("preview full uninstall through alias");
+    assert!(
+        preview.status.success(),
+        "alias preview failed: {}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let report: Value = serde_json::from_slice(&preview.stdout).expect("parse alias report");
+    assert_eq!(report["status"], "planned");
+    assert_eq!(report["selected_platforms"], json!(["desktop"]));
+    assert!(target.join(".agent-skills/agent-skills.lock").is_file());
+}

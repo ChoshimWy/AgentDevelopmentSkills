@@ -12,8 +12,8 @@ use agent_engine::{
 use agent_lifecycle::{
     LifecycleError, LifecycleWorkspace, compile_source_install_bundle,
     compile_source_upgrade_bundle, compile_upgrade_plan, inspect_doctor_baseline,
-    inspect_doctor_report_v1, inspect_doctor_report_v2, inspect_legacy_adoption,
-    inspect_source_install, inspect_source_install_with_activation,
+    inspect_doctor_report_v1, inspect_doctor_report_v2, inspect_installed_source_selection,
+    inspect_legacy_adoption, inspect_source_install, inspect_source_install_with_activation,
     inspect_source_install_with_legacy_adoption, inspect_source_platform_options,
     inspect_source_upgrade, inspect_uninstall_plan,
     inspect_upgrade_planning_snapshot_compatibility, install_source_bundle,
@@ -430,8 +430,28 @@ enum Command {
         target_root: PathBuf,
         #[arg(long = "platform")]
         platforms: Vec<String>,
+        /// Source checkout used only by the approval-bound partial-uninstall route.
+        #[arg(long)]
+        source_root: Option<PathBuf>,
+        /// Candidate-bound Upgrade Conformance Evidence v1 for partial removal.
+        #[arg(long)]
+        evidence: Option<PathBuf>,
+        #[arg(long, default_value = "schemas")]
+        schemas: PathBuf,
         #[arg(long)]
         dry_run: bool,
+        /// Write a partial-uninstall Plan during --dry-run.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Exact saved partial-uninstall Plan required to apply.
+        #[arg(long)]
+        plan: Option<PathBuf>,
+        /// Exact fingerprint of --plan required to apply partial removal.
+        #[arg(long)]
+        approve_plan: Option<String>,
+        /// Permission approval required by the saved partial-uninstall Plan.
+        #[arg(long = "approve")]
+        approvals: Vec<String>,
         #[arg(long)]
         json: bool,
     },
@@ -1662,10 +1682,39 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         Command::LifecycleUninstall {
             target_root,
             platforms,
+            source_root,
+            evidence,
+            schemas,
             dry_run,
+            output,
+            plan,
+            approve_plan,
+            approvals,
             json,
         } => {
-            let result = if dry_run {
+            let partial_route = evidence.is_some()
+                || source_root.is_some()
+                || output.is_some()
+                || plan.is_some()
+                || approve_plan.is_some()
+                || !approvals.is_empty();
+            if partial_route && !json {
+                return Err("partial-uninstall requires --json".into());
+            }
+            let result = if partial_route {
+                run_native_partial_uninstall(
+                    &target_root,
+                    &platforms,
+                    source_root.as_deref(),
+                    evidence.as_deref(),
+                    &schemas,
+                    dry_run,
+                    output.as_deref(),
+                    plan.as_deref(),
+                    approve_plan.as_deref(),
+                    &approvals,
+                )
+            } else if dry_run {
                 inspect_uninstall_plan(&target_root, &platforms)
             } else {
                 (|| -> Result<Value, LifecycleError> {
@@ -1675,6 +1724,9 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 })()
             };
             match result {
+                Ok(value) if partial_route => {
+                    std::io::stdout().write_all(&canonical_json(&value)?)?;
+                }
                 Ok(value) => write_uninstall_report(&value, json)?,
                 Err(error) => {
                     write_uninstall_error(&error, json)?;
@@ -2159,6 +2211,159 @@ fn write_uninstall_report(
         print!("{}", uninstall_human_report(report)?);
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_native_partial_uninstall(
+    target_root: &Path,
+    requested_platforms: &[String],
+    source_root: Option<&Path>,
+    evidence_path: Option<&Path>,
+    schemas: &Path,
+    dry_run: bool,
+    output: Option<&Path>,
+    plan: Option<&Path>,
+    approve_plan: Option<&str>,
+    approvals: &[String],
+) -> Result<Value, LifecycleError> {
+    let source_root = source_root.ok_or_else(|| {
+        LifecycleError::Invalid("partial-uninstall requires --source-root".to_owned())
+    })?;
+    let evidence_path = evidence_path.ok_or_else(|| {
+        LifecycleError::Invalid("partial-uninstall requires --evidence".to_owned())
+    })?;
+    if requested_platforms.is_empty() || requested_platforms == ["all".to_owned()] {
+        return Err(LifecycleError::Invalid(
+            "partial-uninstall requires one or more explicit --platform values".to_owned(),
+        ));
+    }
+    if requested_platforms.iter().any(|platform| platform == "all") {
+        return Err(LifecycleError::Invalid(
+            "--platform all cannot be combined with another platform".to_owned(),
+        ));
+    }
+    let requested = requested_platforms.iter().cloned().collect::<BTreeSet<_>>();
+    if requested.len() != requested_platforms.len() {
+        return Err(LifecycleError::Invalid(
+            "selected platforms must be unique".to_owned(),
+        ));
+    }
+    let installed = inspect_installed_source_selection(target_root)?;
+    let installed_platforms = installed
+        .platforms()
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let unknown = requested
+        .difference(&installed_platforms)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        return Err(LifecycleError::Invalid(format!(
+            "platform is not installed: {}",
+            unknown.join(", ")
+        )));
+    }
+    let remaining_platforms = installed_platforms
+        .difference(&requested)
+        .cloned()
+        .collect::<Vec<_>>();
+    let runtime_configs = installed
+        .runtime_configs()
+        .iter()
+        .filter(|config| !(config.as_str() == "codex" && requested.contains("apple")))
+        .cloned()
+        .collect::<Vec<_>>();
+    let disciplines = installed.disciplines().to_vec();
+    let core_only =
+        remaining_platforms.is_empty() && disciplines.is_empty() && runtime_configs.is_empty();
+    let selection = resolve_source_install_selection(
+        source_root,
+        &remaining_platforms,
+        &disciplines,
+        &runtime_configs,
+        core_only,
+    )?;
+    let packages = snapshot_source_packages(&selection)?;
+    let bundle = compile_source_upgrade_bundle(&selection, &packages, schemas, target_root)?;
+    let evidence = load_json(evidence_path).map_err(|error| {
+        LifecycleError::Invalid(format!("partial-uninstall evidence is invalid: {error}"))
+    })?;
+    let removed_platforms = requested.into_iter().collect::<Vec<_>>();
+    let removed_runtime_configs = if removed_platforms.iter().any(|platform| platform == "apple") {
+        vec!["codex".to_owned()]
+    } else {
+        Vec::new()
+    };
+    let generated = inspect_source_upgrade(
+        &bundle,
+        &packages,
+        target_root,
+        &evidence,
+        "partial-uninstall",
+        &removed_platforms,
+        &removed_runtime_configs,
+        None,
+    )?;
+    if dry_run {
+        if plan.is_some() || approve_plan.is_some() || !approvals.is_empty() {
+            return Err(LifecycleError::Invalid(
+                "partial-uninstall --dry-run does not accept approvals".to_owned(),
+            ));
+        }
+        if let Some(output) = output {
+            let encoded = canonical_json(&generated).map_err(|error| {
+                LifecycleError::Invalid(format!("partial-uninstall Plan is invalid: {error}"))
+            })?;
+            std::fs::write(output, encoded).map_err(LifecycleError::from)?;
+        }
+        return Ok(generated);
+    }
+    if output.is_some() {
+        return Err(LifecycleError::Invalid(
+            "partial-uninstall apply does not accept --output".to_owned(),
+        ));
+    }
+    let approved = load_json(plan.ok_or_else(|| {
+        LifecycleError::Invalid(
+            "partial-uninstall apply requires --plan and --approve-plan".to_owned(),
+        )
+    })?)
+    .map_err(|error| {
+        LifecycleError::Invalid(format!("partial-uninstall Plan is invalid: {error}"))
+    })?;
+    let approve_plan = approve_plan.ok_or_else(|| {
+        LifecycleError::Invalid(
+            "partial-uninstall apply requires --plan and --approve-plan".to_owned(),
+        )
+    })?;
+    if approved.get("fingerprint").and_then(Value::as_str) != Some(approve_plan) {
+        return Err(LifecycleError::Invalid(
+            "partial-uninstall apply requires the exact planned fingerprint".to_owned(),
+        ));
+    }
+    if approved != generated {
+        return Err(LifecycleError::Invalid(
+            "saved partial-uninstall Plan is stale or differs from the current candidate"
+                .to_owned(),
+        ));
+    }
+    let mut result = upgrade_source_bundle(
+        &bundle,
+        &packages,
+        target_root,
+        &evidence,
+        &approved,
+        approvals,
+        "partial-uninstall",
+        &removed_platforms,
+        &removed_runtime_configs,
+        None,
+    )?;
+    if result.get("status").and_then(Value::as_str) == Some("upgraded") {
+        result["status"] = Value::String("partially-uninstalled".to_owned());
+    }
+    Ok(result)
 }
 
 fn write_uninstall_error(

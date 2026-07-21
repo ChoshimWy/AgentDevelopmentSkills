@@ -78,8 +78,11 @@ that binary, as does a downloaded signed POSIX release bootstrap invoked with
 an attached terminal. Exact legacy iOSAgentSkills layouts selected through the
 same POSIX source or signed-release bootstrap now route to the native adoption
 transaction. A PowerShell source checkout now also builds and executes the
-pinned Rust CLI for eligible explicit fresh Desktop requests; Apple/hosted
-PowerShell and other compatibility surfaces remain pending.
+pinned Rust CLI for eligible explicit fresh Desktop requests. Rendered signed
+PowerShell bootstraps additionally freeze the exact Windows native executable
+allowlist and route an explicit existing-install `--upgrade` request to the
+authenticated Rust `hosted-upgrade` command without Python. Fresh hosted
+PowerShell acquisition remains pending behind the Windows release gate.
 Native legacy adoption now has both a
 read-only classifier and a locked mutation transaction. The classifier
 preserves exact raw `AGENTS.md` / `skills` targets, rejects partial or unrelated
@@ -367,13 +370,16 @@ working/committed source identity, exact Worktree creation/compensation,
 context refresh/checkpoint semantics, locked Registry lifecycle operations,
 Manifest-driven native Session creation with bootstrap-only and trusted-root
 gates, and Final Gate Adapter/Ledger/artifact revalidation with passed-state
-persistence. The parallel CLI also exposes guarded full uninstall through
-the public `uninstall` command (`lifecycle-uninstall` remains a compatibility
-alias). Eligible Apple installs publish the frozen executable as both
+persistence. The parallel CLI exposes guarded full uninstall through the
+public `uninstall` command (`lifecycle-uninstall` remains a compatibility
+alias). Its explicit partial-platform route reuses the native upgrade executor,
+but requires `--source-root`, candidate-bound `--evidence`, a saved dry-run
+Plan, `--json`, and its exact explicit approvals; omission fails closed rather than
+degrading to full removal. Eligible Apple installs publish the frozen executable as both
 `bin/agent-session` and `bin/agent-skills`, so installed users can preview and
 execute the native full-uninstall transaction without Python. Host-specific
 live Provider execution and complete production CLI parity remain later phase
-gates. The POSIX source-checkout uninstaller now builds that transaction with
+gates. The POSIX source-checkout uninstaller now builds the full transaction with
 locked offline Cargo in an isolated target by default, while preserving an
 explicit Python compatibility engine. Although the release matrix includes
 Windows binaries, Windows production source install remains blocked until its
@@ -486,7 +492,7 @@ isolated locked offline Rust builds, while fresh source-checkout terminal
 selection now runs inside the Rust CLI. Downloaded signed POSIX release
 bootstraps with an attached terminal use that same selector, while the
 published pipe command supplies an explicit non-interactive Apple selection.
-The remaining hosted lifecycle cutover is PowerShell acquisition and the other
+The remaining hosted lifecycle cutover is fresh PowerShell acquisition and the other
 compatibility bootstrap surfaces, separate from both
 the operator-invoked native routes and the Python-free eligible source routes.
 Upgrade Source Qualification v1 establishes the release-side input for that
